@@ -1,22 +1,35 @@
 //! HTTP API boundary for the lxcup web frontend and agents.
 
-use std::{collections::HashMap, convert::Infallible, sync::Arc};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
+};
 
 use axum::{
     Json, Router,
     extract::{Json as JsonBody, Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
+    middleware::{self, Next},
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
     },
     routing::{get, post},
 };
+use lxcup_agent::{
+    AgentAction, AgentClient, AgentClientConfig, AgentCommandRequest, AgentHealth, AgentMetrics,
+};
 use lxcup_core::{
     Container, ContainerId, Execution, ExecutionId, Node, NodeId, PlanStatus, Scan, ScanId,
     UpdatePlan, UpdatePlanId,
 };
 use lxcup_execution::{ExecutionCoordinator, ExecutionRequest, ExecutionStart};
+use lxcup_persistence::Repositories;
 use lxcup_planner::{DryRunChange, PlannerInput, UpdatePlanner};
 use lxcup_safety::{HealthCheckResult, RebootRequirement, SnapshotState};
 use serde::{Deserialize, Serialize};
@@ -29,6 +42,10 @@ pub struct ApiState {
     store: Arc<RwLock<ApiStore>>,
     execution: Arc<RwLock<ExecutionCoordinator>>,
     events: broadcast::Sender<ApiEvent>,
+    agents: Arc<RwLock<HashMap<ContainerId, RegisteredAgent>>>,
+    metrics: Arc<ApiMetrics>,
+    auth: AuthConfig,
+    repositories: Option<Repositories>,
 }
 
 impl ApiState {
@@ -38,7 +55,21 @@ impl ApiState {
             store: Arc::new(RwLock::new(ApiStore::default())),
             execution: Arc::new(RwLock::new(ExecutionCoordinator::default())),
             events,
+            agents: Arc::new(RwLock::new(HashMap::new())),
+            metrics: Arc::new(ApiMetrics::default()),
+            auth: AuthConfig::from_env(),
+            repositories: None,
         }
+    }
+
+    pub fn with_repositories(mut self, repositories: Repositories) -> Self {
+        self.repositories = Some(repositories);
+        self
+    }
+
+    pub fn with_auth_config(mut self, auth: AuthConfig) -> Self {
+        self.auth = auth;
+        self
     }
 
     pub async fn replace_nodes(&self, nodes: Vec<Node>) {
@@ -50,6 +81,9 @@ impl ApiState {
     }
 
     pub fn publish(&self, event: ApiEvent) {
+        self.metrics
+            .events_published
+            .fetch_add(1, Ordering::Relaxed);
         let _ = self.events.send(event);
     }
 
@@ -77,10 +111,19 @@ struct ApiStore {
     plans: Vec<UpdatePlan>,
     executions: Vec<Execution>,
     safety: HashMap<ExecutionId, SafetyDto>,
+    results: HashMap<ExecutionId, ExecutionResultDto>,
+}
+
+#[derive(Clone)]
+struct RegisteredAgent {
+    client: AgentClient,
 }
 
 pub fn router(state: ApiState) -> Router {
     Router::new()
+        .route("/health/live", get(live_health))
+        .route("/health/ready", get(ready_health))
+        .route("/metrics", get(metrics))
         .route("/api/v1/nodes", get(list_nodes))
         .route(
             "/api/v1/nodes/{node_id}/containers",
@@ -91,6 +134,7 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/containers/{container_id}/scans",
             get(list_scans).post(start_scan),
         )
+        .route("/api/v1/scans/{scan_id}/run", post(run_scan))
         .route(
             "/api/v1/containers/{container_id}/plans",
             get(list_container_plans).post(create_plan),
@@ -101,11 +145,33 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/executions/{execution_id}/abort",
             post(abort_execution),
         )
+        .route("/api/v1/executions/{execution_id}/run", post(run_execution))
+        .route(
+            "/api/v1/executions/{execution_id}/reconcile",
+            post(reconcile_execution),
+        )
         .route("/api/v1/executions/{execution_id}", get(get_execution))
+        .route(
+            "/api/v1/executions/{execution_id}/result",
+            get(get_execution_result),
+        )
         .route("/api/v1/executions/{execution_id}/safety", get(get_safety))
+        .route(
+            "/api/v1/containers/{container_id}/agent",
+            post(register_agent),
+        )
+        .route(
+            "/api/v1/containers/{container_id}/agent/health",
+            get(get_agent_health),
+        )
+        .route(
+            "/api/v1/containers/{container_id}/agent/metrics",
+            get(get_agent_metrics),
+        )
         .route("/api/v1/openapi.json", get(openapi_document))
         .route("/api/v1/events", get(stream_events))
-        .with_state(state)
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(state, request_middleware))
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -147,6 +213,30 @@ impl ApiError {
             status: StatusCode::NOT_FOUND,
             code: "not_found",
             message: resource,
+        }
+    }
+
+    fn unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "unauthorized",
+            message: "authentication is required",
+        }
+    }
+
+    fn dependency(code: &'static str, message: &'static str) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code,
+            message,
+        }
+    }
+
+    fn storage() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "storage_error",
+            message: "the operation could not be persisted",
         }
     }
 }
@@ -237,14 +327,267 @@ async fn start_scan(
     }
     let scan = Scan::new(container_id);
     let dto = ScanDto::from(&scan);
-    store.scans.push(scan);
+    store.scans.push(scan.clone());
+    let repositories = state.repositories.clone();
     drop(store);
+    if let Some(repositories) = repositories {
+        repositories
+            .scans
+            .save(&scan)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
     state.publish(ApiEvent::status(
         "scan",
         dto.id.as_uuid().to_string(),
         "pending",
     ));
     Ok((StatusCode::ACCEPTED, Json(envelope(dto))))
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AuthConfig {
+    viewer_token: Option<Arc<str>>,
+    operator_token: Option<Arc<str>>,
+    admin_token: Option<Arc<str>>,
+    required: bool,
+}
+
+impl AuthConfig {
+    pub fn from_env() -> Self {
+        let viewer_token = std::env::var("LXCUP_AUTH_VIEWER_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(Arc::<str>::from);
+        let operator_token = std::env::var("LXCUP_AUTH_OPERATOR_TOKEN")
+            .ok()
+            .or_else(|| std::env::var("LXCUP_AUTH_TOKEN").ok())
+            .filter(|value| !value.trim().is_empty())
+            .map(Arc::<str>::from);
+        let admin_token = std::env::var("LXCUP_AUTH_ADMIN_TOKEN")
+            .ok()
+            .or_else(|| std::env::var("LXCUP_AUTH_TOKEN").ok())
+            .filter(|value| !value.trim().is_empty())
+            .map(Arc::<str>::from);
+        let required = std::env::var("LXCUP_AUTH_REQUIRED")
+            .map(|value| value.eq_ignore_ascii_case("true"))
+            .unwrap_or(operator_token.is_some() || viewer_token.is_some());
+        Self {
+            viewer_token,
+            operator_token,
+            admin_token,
+            required,
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    pub fn required(mut self, required: bool) -> Self {
+        self.required = required;
+        self
+    }
+
+    pub fn with_tokens(
+        mut self,
+        viewer: Option<String>,
+        operator: Option<String>,
+        admin: Option<String>,
+    ) -> Self {
+        self.viewer_token = viewer.map(Arc::<str>::from);
+        self.operator_token = operator.map(Arc::<str>::from);
+        self.admin_token = admin.map(Arc::<str>::from);
+        self
+    }
+
+    fn allows(&self, method: &Method, headers: &HeaderMap) -> bool {
+        if !self.required {
+            return true;
+        }
+        let Some(token) = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+        else {
+            return false;
+        };
+        if self.admin_token.as_deref() == Some(token)
+            || self.operator_token.as_deref() == Some(token)
+        {
+            return true;
+        }
+        method == Method::GET && self.viewer_token.as_deref() == Some(token)
+    }
+}
+
+struct ApiMetrics {
+    started_at: Option<Instant>,
+    requests_total: AtomicU64,
+    requests_failed: AtomicU64,
+    events_published: AtomicU64,
+}
+
+impl Default for ApiMetrics {
+    fn default() -> Self {
+        Self {
+            started_at: Some(Instant::now()),
+            requests_total: AtomicU64::default(),
+            requests_failed: AtomicU64::default(),
+            events_published: AtomicU64::default(),
+        }
+    }
+}
+
+impl ApiMetrics {
+    fn started_at(&self) -> Instant {
+        self.started_at.unwrap_or_else(Instant::now)
+    }
+
+    fn render(&self) -> String {
+        format!(
+            "# TYPE lxcup_http_requests_total counter\nlxcup_http_requests_total {}\n# TYPE lxcup_http_requests_failed_total counter\nlxcup_http_requests_failed_total {}\n# TYPE lxcup_events_published_total counter\nlxcup_events_published_total {}\nlxcup_uptime_seconds {}\n",
+            self.requests_total.load(Ordering::Relaxed),
+            self.requests_failed.load(Ordering::Relaxed),
+            self.events_published.load(Ordering::Relaxed),
+            self.started_at().elapsed().as_secs()
+        )
+    }
+}
+
+async fn request_middleware(
+    State(state): State<ApiState>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path().to_owned();
+    let public = path == "/health/live" || path == "/health/ready" || path == "/metrics";
+    if !public && !state.auth.allows(request.method(), request.headers()) {
+        return ApiError::unauthorized().into_response();
+    }
+    state.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
+    let response = next.run(request).await;
+    if response.status().is_client_error() || response.status().is_server_error() {
+        state
+            .metrics
+            .requests_failed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    response
+}
+
+async fn live_health() -> impl IntoResponse {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+async fn ready_health(State(state): State<ApiState>) -> impl IntoResponse {
+    let ready = state
+        .store
+        .read()
+        .await
+        .nodes
+        .iter()
+        .all(|node| node.status != lxcup_core::NodeStatus::Disconnected);
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(serde_json::json!({ "status": if ready { "ready" } else { "degraded" } })),
+    )
+}
+
+async fn metrics(State(state): State<ApiState>) -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        state.metrics.render(),
+    )
+}
+
+async fn run_scan(
+    State(state): State<ApiState>,
+    Path(scan_id): Path<String>,
+) -> Result<Json<ApiEnvelope<ScanDto>>, ApiError> {
+    let scan_id = parse_uuid(&scan_id, "scan id")?;
+    let scan_id = ScanId::from_uuid(scan_id);
+    let (container_id, agent) = {
+        let mut store = state.store.write().await;
+        let scan = store
+            .scans
+            .iter_mut()
+            .find(|scan| scan.id == scan_id)
+            .ok_or_else(|| ApiError::not_found("scan not found"))?;
+        scan.transition_to(lxcup_core::ScanStatus::Running, chrono::Utc::now())
+            .map_err(|_| ApiError::bad_request("scan_not_runnable", "scan is not runnable"))?;
+        let container_id = scan.container_id;
+        let agent = state
+            .agents
+            .read()
+            .await
+            .get(&container_id)
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::dependency(
+                    "agent_unavailable",
+                    "no agent is registered for this container",
+                )
+            })?;
+        (container_id, agent)
+    };
+    let response = agent
+        .client
+        .command(&AgentCommandRequest {
+            action: AgentAction::Scan,
+            packages: Vec::new(),
+            idempotency_key: scan_id.as_uuid().to_string(),
+        })
+        .await
+        .map_err(|_| {
+            ApiError::dependency("agent_request_failed", "the agent scan request failed")
+        })?;
+    let mut store = state.store.write().await;
+    let scan = store
+        .scans
+        .iter_mut()
+        .find(|scan| scan.id == scan_id)
+        .ok_or_else(|| ApiError::not_found("scan not found"))?;
+    if response.success {
+        match lxcup_apt::build_scan(
+            container_id,
+            lxcup_apt::AptExecutionResult {
+                stdout: response.stdout,
+                stderr: response.stderr,
+                exit_code: Some(response.exit_code),
+            },
+        ) {
+            Ok(mut result) => {
+                result.scan.id = scan_id;
+                *scan = result.scan;
+            }
+            Err(_) => {
+                scan.transition_to(lxcup_core::ScanStatus::Failed, chrono::Utc::now())
+                    .map_err(|_| {
+                        ApiError::bad_request("scan_failed", "the agent returned invalid scan data")
+                    })?;
+            }
+        }
+    } else {
+        scan.transition_to(lxcup_core::ScanStatus::Failed, chrono::Utc::now())
+            .map_err(|_| ApiError::bad_request("scan_failed", "the agent scan failed"))?;
+    }
+    let dto = ScanDto::from(&*scan);
+    drop(store);
+    state.publish(ApiEvent::status(
+        "scan",
+        scan_id.as_uuid().to_string(),
+        dto.status.clone(),
+    ));
+    Ok(Json(envelope(dto)))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -316,7 +659,15 @@ async fn create_plan(
         })
         .map_err(|_| ApiError::bad_request("invalid_plan", "plan input is not valid"))?;
     let dto = PlanDto::from(&plan);
-    state.store.write().await.plans.push(plan);
+    let repositories = state.repositories.clone();
+    state.store.write().await.plans.push(plan.clone());
+    if let Some(repositories) = repositories {
+        repositories
+            .plans
+            .save(&plan)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
     state.publish(ApiEvent::status(
         "plan",
         dto.id.as_uuid().to_string(),
@@ -403,6 +754,7 @@ async fn confirm_plan(
             idempotency_key,
         })
         .map_err(|_| ApiError::bad_request("execution_rejected", "execution was rejected"))?;
+    let created = matches!(&start, ExecutionStart::Created(_));
     let execution = match start {
         ExecutionStart::Created(execution) => {
             store.executions.push(execution.clone());
@@ -416,7 +768,17 @@ async fn confirm_plan(
             .ok_or_else(|| ApiError::not_found("execution not found"))?,
     };
     let dto = ExecutionDto::from(&execution);
+    let repositories = state.repositories.clone();
     drop(store);
+    if let Some(repositories) = repositories {
+        if created {
+            repositories
+                .executions
+                .save(&execution)
+                .await
+                .map_err(|_| ApiError::storage())?;
+        }
+    }
     state.publish(ApiEvent::task(
         dto.id.as_uuid().to_string(),
         "execution_queued",
@@ -453,6 +815,252 @@ async fn abort_execution(
         "execution_aborted",
     ));
     Ok(Json(envelope(dto)))
+}
+
+async fn run_execution(
+    State(state): State<ApiState>,
+    Path(execution_id): Path<String>,
+) -> Result<Json<ApiEnvelope<ExecutionDto>>, ApiError> {
+    let execution_id =
+        lxcup_core::ExecutionId::from_uuid(parse_uuid(&execution_id, "execution id")?);
+    let plan = state
+        .execution
+        .read()
+        .await
+        .plan(execution_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("execution not found"))?;
+    let agent = state
+        .agents
+        .read()
+        .await
+        .get(&plan.container_id)
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::dependency(
+                "agent_unavailable",
+                "no agent is registered for this container",
+            )
+        })?;
+    state
+        .execution
+        .write()
+        .await
+        .begin(execution_id)
+        .map_err(|_| {
+            ApiError::bad_request("execution_not_runnable", "execution cannot be started")
+        })?;
+    let response = agent
+        .client
+        .command(&AgentCommandRequest {
+            action: AgentAction::Apply,
+            packages: plan
+                .requested_packages
+                .iter()
+                .map(|package| package.as_str().to_owned())
+                .collect(),
+            idempotency_key: execution_id.as_uuid().to_string(),
+        })
+        .await;
+    let result = match response {
+        Ok(response) => lxcup_execution::ExecutionResult {
+            exit_code: response.exit_code,
+            stdout: response.stdout,
+            stderr: response.stderr,
+        },
+        Err(error) => lxcup_execution::ExecutionResult {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: error.to_string(),
+        },
+    };
+    let execution = state
+        .execution
+        .write()
+        .await
+        .finish(execution_id, result.clone())
+        .map_err(|_| {
+            ApiError::bad_request("execution_failed", "execution could not be finalized")
+        })?;
+    let dto = ExecutionDto::from(&execution);
+    let mut store = state.store.write().await;
+    store.executions.retain(|item| item.id != execution_id);
+    store.executions.push(execution.clone());
+    store
+        .results
+        .insert(execution_id, ExecutionResultDto::from_result(&result));
+    let repositories = state.repositories.clone();
+    drop(store);
+    if let Some(repositories) = repositories {
+        repositories
+            .executions
+            .update(&execution)
+            .await
+            .map_err(|_| ApiError::storage())?;
+        repositories
+            .executions
+            .save_result(&lxcup_persistence::ExecutionResultRecord {
+                execution_id,
+                exit_code: result.exit_code,
+                stdout: truncate(&result.stdout),
+                stderr: truncate(&result.stderr),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    state.publish(ApiEvent::task(
+        execution_id.as_uuid().to_string(),
+        dto.status.clone(),
+    ));
+    Ok(Json(envelope(dto)))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReconcileRequest {
+    pub observed: lxcup_execution::ObservedExecutionState,
+}
+
+async fn reconcile_execution(
+    State(state): State<ApiState>,
+    Path(execution_id): Path<String>,
+    JsonBody(request): JsonBody<ReconcileRequest>,
+) -> Result<Json<ApiEnvelope<ExecutionDto>>, ApiError> {
+    let execution_id =
+        lxcup_core::ExecutionId::from_uuid(parse_uuid(&execution_id, "execution id")?);
+    let (execution, action) = state
+        .execution
+        .write()
+        .await
+        .reconcile(execution_id, request.observed)
+        .map_err(|_| {
+            ApiError::bad_request(
+                "reconciliation_failed",
+                "execution state cannot be reconciled",
+            )
+        })?;
+    let dto = ExecutionDto::from(&execution);
+    let mut store = state.store.write().await;
+    store.executions.retain(|item| item.id != execution_id);
+    store.executions.push(execution);
+    drop(store);
+    state.publish(ApiEvent::task(
+        execution_id.as_uuid().to_string(),
+        format!("reconciled_{action:?}").to_ascii_lowercase(),
+    ));
+    Ok(Json(envelope(dto)))
+}
+
+async fn get_execution_result(
+    State(state): State<ApiState>,
+    Path(execution_id): Path<String>,
+) -> Result<Json<ApiEnvelope<ExecutionResultDto>>, ApiError> {
+    let execution_id =
+        lxcup_core::ExecutionId::from_uuid(parse_uuid(&execution_id, "execution id")?);
+    let result = state
+        .store
+        .read()
+        .await
+        .results
+        .get(&execution_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("execution result not found"))?;
+    Ok(Json(envelope(result)))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RegisterAgentRequest {
+    pub endpoint: String,
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AgentRegistrationDto {
+    pub endpoint: String,
+    pub info: AgentHealth,
+}
+
+async fn register_agent(
+    State(state): State<ApiState>,
+    Path(container_id): Path<String>,
+    JsonBody(request): JsonBody<RegisterAgentRequest>,
+) -> Result<(StatusCode, Json<ApiEnvelope<AgentRegistrationDto>>), ApiError> {
+    let container_id = parse_container_id(&container_id)?;
+    if !state
+        .store
+        .read()
+        .await
+        .containers
+        .iter()
+        .any(|container| container.id == container_id)
+    {
+        return Err(ApiError::not_found("container not found"));
+    }
+    let config = AgentClientConfig::new(request.endpoint.clone(), request.token).map_err(|_| {
+        ApiError::bad_request("invalid_agent_config", "agent endpoint or token is invalid")
+    })?;
+    let client = AgentClient::new(config).map_err(|_| {
+        ApiError::dependency(
+            "agent_client_error",
+            "the agent client could not be created",
+        )
+    })?;
+    let info = client
+        .health()
+        .await
+        .map_err(|_| ApiError::dependency("agent_unavailable", "the agent healthcheck failed"))?;
+    let dto = AgentRegistrationDto {
+        endpoint: request.endpoint.clone(),
+        info: info.clone(),
+    };
+    state
+        .agents
+        .write()
+        .await
+        .insert(container_id, RegisteredAgent { client });
+    state.publish(ApiEvent::status(
+        "agent",
+        container_id.value().to_string(),
+        "registered",
+    ));
+    Ok((StatusCode::CREATED, Json(envelope(dto))))
+}
+
+async fn get_agent_health(
+    State(state): State<ApiState>,
+    Path(container_id): Path<String>,
+) -> Result<Json<ApiEnvelope<AgentHealth>>, ApiError> {
+    let container_id = parse_container_id(&container_id)?;
+    let agent = state
+        .agents
+        .read()
+        .await
+        .get(&container_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("agent not registered"))?;
+    let health =
+        agent.client.health().await.map_err(|_| {
+            ApiError::dependency("agent_unavailable", "the agent healthcheck failed")
+        })?;
+    Ok(Json(envelope(health)))
+}
+
+async fn get_agent_metrics(
+    State(state): State<ApiState>,
+    Path(container_id): Path<String>,
+) -> Result<Json<ApiEnvelope<AgentMetrics>>, ApiError> {
+    let container_id = parse_container_id(&container_id)?;
+    let agent = state
+        .agents
+        .read()
+        .await
+        .get(&container_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("agent not registered"))?;
+    let metrics = agent.client.metrics().await.map_err(|_| {
+        ApiError::dependency("agent_unavailable", "the agent metrics endpoint failed")
+    })?;
+    Ok(Json(envelope(metrics)))
 }
 
 async fn get_execution(
@@ -495,16 +1103,27 @@ async fn get_safety(
 pub const OPENAPI_CONTRACT: &str = r#"{
   "openapi": "3.1.0",
   "info": {"title": "lxcup API", "version": "v1"},
+  "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
   "paths": {
+    "/health/live": {"get": {}},
+    "/health/ready": {"get": {}},
+    "/metrics": {"get": {}},
     "/api/v1/nodes": {"get": {"responses": {"200": {"description": "Nodes"}}}},
     "/api/v1/containers": {"get": {"responses": {"200": {"description": "Containers"}}}},
     "/api/v1/containers/{container_id}/scans": {"get": {}, "post": {}},
+    "/api/v1/scans/{scan_id}/run": {"post": {}},
     "/api/v1/containers/{container_id}/plans": {"get": {}, "post": {}},
     "/api/v1/plans/{plan_id}": {"get": {}},
     "/api/v1/plans/{plan_id}/confirm": {"post": {}},
     "/api/v1/executions/{execution_id}": {"get": {}},
     "/api/v1/executions/{execution_id}/abort": {"post": {}},
+    "/api/v1/executions/{execution_id}/run": {"post": {}},
+    "/api/v1/executions/{execution_id}/reconcile": {"post": {}},
+    "/api/v1/executions/{execution_id}/result": {"get": {}},
     "/api/v1/executions/{execution_id}/safety": {"get": {}},
+    "/api/v1/containers/{container_id}/agent": {"post": {}},
+    "/api/v1/containers/{container_id}/agent/health": {"get": {}},
+    "/api/v1/containers/{container_id}/agent/metrics": {"get": {}},
     "/api/v1/events": {"get": {"description": "Typed task, log and status SSE"}}
   }
 }"#;
@@ -665,6 +1284,31 @@ pub struct ExecutionDto {
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ExecutionResultDto {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl ExecutionResultDto {
+    fn from_result(result: &lxcup_execution::ExecutionResult) -> Self {
+        Self {
+            exit_code: result.exit_code,
+            stdout: truncate(&result.stdout),
+            stderr: truncate(&result.stderr),
+        }
+    }
+}
+
+fn truncate(value: &str) -> String {
+    value
+        .replace(['\r', '\n'], " ")
+        .chars()
+        .take(4_000)
+        .collect()
+}
+
 impl From<&Execution> for ExecutionDto {
     fn from(execution: &Execution) -> Self {
         Self {
@@ -693,13 +1337,18 @@ pub enum ApiEvent {
         resource_id: String,
         state: String,
     },
+    Error {
+        code: String,
+        message: String,
+        request_id: String,
+    },
 }
 
 impl ApiEvent {
-    fn task(task_id: String, state: &'static str) -> Self {
+    fn task(task_id: String, state: impl Into<String>) -> Self {
         Self::Task {
             task_id,
-            state: state.to_owned(),
+            state: state.into(),
         }
     }
     fn status(resource: &'static str, resource_id: String, state: impl Into<String>) -> Self {
@@ -714,6 +1363,7 @@ impl ApiEvent {
             Self::Task { .. } => "task",
             Self::Log { .. } => "log",
             Self::Status { .. } => "status",
+            Self::Error { .. } => "error",
         }
     }
 }
@@ -743,6 +1393,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn configured_auth_protects_api_but_not_health() {
+        let state = ApiState::new().with_auth_config(
+            AuthConfig::disabled()
+                .with_tokens(Some("viewer".to_owned()), Some("operator".to_owned()), None)
+                .required(true),
+        );
+        let api_response = router(state.clone())
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/nodes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(api_response.status(), StatusCode::UNAUTHORIZED);
+
+        let health_response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/health/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health_response.status(), StatusCode::OK);
     }
 
     #[test]

@@ -1,4 +1,66 @@
+use serde::Serialize;
 use thiserror::Error;
+
+/// Stable error categories shared by API responses, logs and metrics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    InvalidRequest,
+    NotFound,
+    Unauthorized,
+    Forbidden,
+    Conflict,
+    DependencyUnavailable,
+    Timeout,
+    Internal,
+}
+
+impl ErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::NotFound => "not_found",
+            Self::Unauthorized => "unauthorized",
+            Self::Forbidden => "forbidden",
+            Self::Conflict => "conflict",
+            Self::DependencyUnavailable => "dependency_unavailable",
+            Self::Timeout => "timeout",
+            Self::Internal => "internal_error",
+        }
+    }
+}
+
+/// Bounded retry policy used at external-system boundaries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetryPolicy {
+    pub max_attempts: u8,
+    pub initial_backoff_ms: u64,
+    pub max_backoff_ms: u64,
+}
+
+impl RetryPolicy {
+    pub const fn conservative() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 2_000,
+        }
+    }
+
+    pub const fn delay_ms(self, retry_number: u8) -> u64 {
+        let shift = if retry_number > 6 { 6 } else { retry_number } as u32;
+        let value = self.initial_backoff_ms.saturating_mul(1_u64 << shift);
+        if value > self.max_backoff_ms {
+            self.max_backoff_ms
+        } else {
+            value
+        }
+    }
+
+    pub const fn allows_retry(self, attempts_completed: u8) -> bool {
+        attempts_completed.saturating_add(1) < self.max_attempts
+    }
+}
 
 /// Fehler, die auf ungültige Domainwerte oder Zustände hinweisen.
 #[derive(Debug, Error, PartialEq, Eq)]

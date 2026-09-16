@@ -62,7 +62,8 @@ export type ApiErrorBody = {
 export type ApiEvent =
   | { type: "Task"; payload: { task_id: string; state: string } }
   | { type: "Log"; payload: { source: string; message: string } }
-  | { type: "Status"; payload: { resource: string; resource_id: string; state: string } };
+  | { type: "Status"; payload: { resource: string; resource_id: string; state: string } }
+  | { type: "Error"; payload: { code: string; message: string; request_id?: string } };
 
 export class ApiError extends Error {
   constructor(
@@ -70,6 +71,7 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly code: string,
     public readonly requestId?: string,
+    public readonly retryable = false,
   ) {
     super(message);
     this.name = "ApiError";
@@ -94,7 +96,7 @@ export class ApiClient {
 
   subscribe(onEvent: (event: ApiEvent) => void, onError?: () => void): () => void {
     const source = new EventSource(`${this.baseUrl}/api/v1/events`);
-    const eventTypes = ["task", "log", "status"] as const;
+    const eventTypes = ["task", "log", "status", "error"] as const;
     const handlers = eventTypes.map((type) => {
       const handler = (event: MessageEvent<string>) => {
         try {
@@ -114,22 +116,35 @@ export class ApiClient {
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: { accept: "application/json", ...init?.headers },
-    });
-    const payload = (await response.json()) as ApiEnvelope<T> | ApiErrorBody;
-    if (!response.ok) {
-      const error = payload as ApiErrorBody;
-      throw new ApiError(
-        error.error?.message ?? "Die API-Anfrage ist fehlgeschlagen.",
-        response.status,
-        error.error?.code ?? "api_error",
-        error.request_id,
-      );
+    const maxAttempts = 3;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        const response = await fetch(`${this.baseUrl}${path}`, {
+          ...init,
+          headers: { accept: "application/json", ...init?.headers },
+        });
+        const text = await response.text();
+        let payload: ApiEnvelope<T> | ApiErrorBody | undefined;
+        try { payload = text ? JSON.parse(text) as ApiEnvelope<T> | ApiErrorBody : undefined; } catch { payload = undefined; }
+        if (!response.ok) {
+          const error = payload as ApiErrorBody | undefined;
+          const retryable = response.status >= 500;
+          if (retryable && attempt + 1 < maxAttempts) { await delay(attempt); continue; }
+          throw new ApiError(error?.error?.message ?? "Die API-Anfrage ist fehlgeschlagen.", response.status, error?.error?.code ?? "api_error", error?.request_id, retryable);
+        }
+        if (!payload || !("data" in payload)) throw new ApiError("Die API hat eine ungültige Antwort geliefert.", response.status, "invalid_response");
+        return (payload as ApiEnvelope<T>).data;
+      } catch (error) {
+        if (error instanceof ApiError || attempt + 1 >= maxAttempts) throw error;
+        await delay(attempt);
+      }
     }
-    return (payload as ApiEnvelope<T>).data;
+    throw new ApiError("Die API-Anfrage ist fehlgeschlagen.", 0, "api_error", undefined, true);
   }
+}
+
+function delay(attempt: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 150 * 2 ** attempt));
 }
 
 export const apiClient = new ApiClient();

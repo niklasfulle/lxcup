@@ -1,5 +1,5 @@
 [package]
-name = "lxcup-safety"
+name = "lxcup-agent"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,9 +7,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+axum.workspace = true
 chrono.workspace = true
-lxcup-proxmox = { path = "../lxcup-proxmox" }
+lxcup-observability = { path = "../lxcup-observability" }
 reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

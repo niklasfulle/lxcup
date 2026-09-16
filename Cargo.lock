@@ -1041,6 +1041,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
+name = "lxcup-agent"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "lxcup-observability",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "lxcup-apt"
 version = "0.1.0"
 dependencies = [
@@ -1143,6 +1159,7 @@ name = "lxcup-safety"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "lxcup-proxmox",
  "reqwest",
  "serde",
  "thiserror",
@@ -1155,12 +1172,16 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
+ "lxcup-agent",
+ "lxcup-apt",
  "lxcup-core",
  "lxcup-execution",
  "lxcup-observability",
+ "lxcup-persistence",
  "lxcup-planner",
  "lxcup-safety",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tower",

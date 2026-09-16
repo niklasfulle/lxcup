@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use chrono::Utc;
 use lxcup_core::{Execution, ExecutionId, ExecutionStatus, PlanStatus, UpdatePlan};
 use lxcup_planner::{PlannerError, PlannerInput, Revalidation, UpdatePlanner};
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use thiserror::Error;
@@ -39,6 +40,25 @@ pub struct ExecutionResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+/// Observation returned by an agent during reconciliation after a restart or
+/// connection loss.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservedExecutionState {
+    Running,
+    Succeeded,
+    Failed,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReconciliationAction {
+    KeepRunning,
+    MarkSucceeded,
+    MarkFailed,
+    RequireManualReview,
 }
 
 pub trait PackageExecutor {
@@ -138,20 +158,10 @@ impl ExecutionCoordinator {
         executor: &E,
     ) -> Result<Execution, ExecutionError> {
         let plan = self
-            .plans
-            .get(&id)
+            .plan(id)
             .cloned()
             .ok_or(ExecutionError::UnknownExecution)?;
-        {
-            let execution = self
-                .executions
-                .get_mut(&id)
-                .ok_or(ExecutionError::UnknownExecution)?;
-            execution
-                .transition_to(ExecutionStatus::Running, Utc::now())
-                .map_err(|_| ExecutionError::InvalidState)?;
-        }
-        self.append_event(id, "running", "execution started");
+        self.begin(id)?;
         match executor.execute(&plan) {
             Ok(result) => self.finish(id, result),
             Err(error) => {
@@ -214,6 +224,105 @@ impl ExecutionCoordinator {
 
     pub fn find(&self, id: ExecutionId) -> Option<&Execution> {
         self.executions.get(&id)
+    }
+
+    pub fn begin(&mut self, id: ExecutionId) -> Result<UpdatePlan, ExecutionError> {
+        let plan = self
+            .plan(id)
+            .cloned()
+            .ok_or(ExecutionError::UnknownExecution)?;
+        {
+            let execution = self
+                .executions
+                .get_mut(&id)
+                .ok_or(ExecutionError::UnknownExecution)?;
+            execution
+                .transition_to(ExecutionStatus::Running, Utc::now())
+                .map_err(|_| ExecutionError::InvalidState)?;
+        }
+        self.append_event(id, "running", "execution started");
+        Ok(plan)
+    }
+
+    pub fn plan(&self, id: ExecutionId) -> Option<&UpdatePlan> {
+        self.plans.get(&id)
+    }
+
+    /// Moves an execution to `unknown` when its remote state cannot be read.
+    pub fn mark_connection_lost(&mut self, id: ExecutionId) -> Result<Execution, ExecutionError> {
+        let became_unknown = {
+            let execution = self
+                .executions
+                .get_mut(&id)
+                .ok_or(ExecutionError::UnknownExecution)?;
+            if execution.status == ExecutionStatus::Running {
+                execution
+                    .transition_to(ExecutionStatus::Unknown, Utc::now())
+                    .map_err(|_| ExecutionError::InvalidState)?;
+                true
+            } else {
+                false
+            }
+        };
+        if became_unknown {
+            self.append_event(
+                id,
+                "unknown",
+                "remote agent connection lost; reconciliation required",
+            );
+        }
+        self.find(id)
+            .cloned()
+            .ok_or(ExecutionError::UnknownExecution)
+    }
+
+    /// Applies an observed remote state without allowing unsafe transitions.
+    pub fn reconcile(
+        &mut self,
+        id: ExecutionId,
+        observed: ObservedExecutionState,
+    ) -> Result<(Execution, ReconciliationAction), ExecutionError> {
+        let current = self
+            .executions
+            .get(&id)
+            .ok_or(ExecutionError::UnknownExecution)?
+            .status;
+        let action = match (current, observed) {
+            (
+                ExecutionStatus::Succeeded | ExecutionStatus::Failed | ExecutionStatus::Aborted,
+                _,
+            ) => ReconciliationAction::RequireManualReview,
+            (_, ObservedExecutionState::Running) => ReconciliationAction::KeepRunning,
+            (_, ObservedExecutionState::Succeeded) => {
+                let execution = self.finish(
+                    id,
+                    ExecutionResult {
+                        exit_code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    },
+                )?;
+                return Ok((execution, ReconciliationAction::MarkSucceeded));
+            }
+            (_, ObservedExecutionState::Failed) => {
+                let execution = self.finish(
+                    id,
+                    ExecutionResult {
+                        exit_code: 1,
+                        stdout: String::new(),
+                        stderr: "remote agent reported failure".to_owned(),
+                    },
+                )?;
+                return Ok((execution, ReconciliationAction::MarkFailed));
+            }
+            (_, ObservedExecutionState::Unknown) => ReconciliationAction::RequireManualReview,
+        };
+        Ok((
+            self.find(id)
+                .cloned()
+                .ok_or(ExecutionError::UnknownExecution)?,
+            action,
+        ))
     }
 
     pub fn events(&self, id: ExecutionId) -> &[ExecutionEvent] {
@@ -338,6 +447,26 @@ mod tests {
             coordinator.start(request(confirmed_plan(), "same-key")),
             Ok(ExecutionStart::Duplicate(id))
         );
+    }
+
+    #[test]
+    fn connection_loss_requires_reconciliation_before_final_state() {
+        let mut coordinator = ExecutionCoordinator::default();
+        let start = coordinator
+            .start(request(confirmed_plan(), "connection-loss"))
+            .unwrap();
+        let id = match start {
+            ExecutionStart::Created(execution) => execution.id,
+            _ => panic!(),
+        };
+        coordinator.begin(id).unwrap();
+        let unknown = coordinator.mark_connection_lost(id).unwrap();
+        assert_eq!(unknown.status, ExecutionStatus::Unknown);
+        let (succeeded, action) = coordinator
+            .reconcile(id, ObservedExecutionState::Succeeded)
+            .unwrap();
+        assert_eq!(succeeded.status, ExecutionStatus::Succeeded);
+        assert_eq!(action, ReconciliationAction::MarkSucceeded);
     }
 
     #[test]

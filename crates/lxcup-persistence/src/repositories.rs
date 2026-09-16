@@ -397,6 +397,16 @@ pub struct ExecutionEvent {
     pub created_at: DateTime<Utc>,
 }
 
+/// Persistiertes, gekürztes Ergebnis einer Agentenausführung.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionResultRecord {
+    pub execution_id: ExecutionId,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Repository für Update-Ausführungen und deren Events.
 #[derive(Clone)]
 pub struct ExecutionRepository {
@@ -493,6 +503,40 @@ impl ExecutionRepository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn save_result(&self, result: &ExecutionResultRecord) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "INSERT INTO execution_results (execution_id, exit_code, stdout, stderr, created_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (execution_id) DO UPDATE SET exit_code = EXCLUDED.exit_code, stdout = EXCLUDED.stdout, stderr = EXCLUDED.stderr, created_at = EXCLUDED.created_at",
+        )
+        .bind(result.execution_id.as_uuid())
+        .bind(result.exit_code)
+        .bind(&result.stdout)
+        .bind(&result.stderr)
+        .bind(result.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn find_result(
+        &self,
+        execution_id: ExecutionId,
+    ) -> Result<Option<ExecutionResultRecord>, RepositoryError> {
+        let row = sqlx::query("SELECT execution_id, exit_code, stdout, stderr, created_at FROM execution_results WHERE execution_id = $1")
+            .bind(execution_id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| {
+            Ok(ExecutionResultRecord {
+                execution_id: ExecutionId::from_uuid(row.try_get("execution_id")?),
+                exit_code: row.try_get("exit_code")?,
+                stdout: row.try_get("stdout")?,
+                stderr: row.try_get("stderr")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .transpose()
     }
 }
 

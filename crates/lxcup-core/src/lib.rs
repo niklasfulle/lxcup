@@ -13,7 +13,9 @@ pub mod scan;
 pub mod update;
 
 pub use container::{Container, ContainerManagementState, ContainerStatus, OperatingSystem};
-pub use error::{DomainError, InfrastructureError, LxcupError, LxcupResult};
+pub use error::{
+    DomainError, ErrorCode, InfrastructureError, LxcupError, LxcupResult, RetryPolicy,
+};
 pub use execution::{Execution, ExecutionStatus};
 pub use ids::{ContainerId, ExecutionId, NodeId, ScanId, UpdatePlanId};
 pub use node::{Node, NodeStatus};
