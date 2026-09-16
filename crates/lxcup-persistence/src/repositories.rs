@@ -361,6 +361,28 @@ impl UpdatePlanRepository {
             .collect::<Result<_, _>>()?;
         Ok(Some(plan))
     }
+
+    /// Liefert die Planhistorie eines Containers chronologisch aufsteigend.
+    pub async fn list_by_container(
+        &self,
+        container_id: ContainerId,
+    ) -> Result<Vec<UpdatePlan>, RepositoryError> {
+        let ids = sqlx::query(
+            "SELECT id FROM update_plans WHERE container_id = $1 ORDER BY created_at, id",
+        )
+        .bind(container_id.value() as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut plans = Vec::with_capacity(ids.len());
+        for row in ids {
+            let id = UpdatePlanId::from_uuid(row.get("id"));
+            if let Some(plan) = self.find_by_id(id).await? {
+                plans.push(plan);
+            }
+        }
+        Ok(plans)
+    }
 }
 
 /// Einzelnes Execution-Event für Audit- und Reconciliation-Zwecke.
