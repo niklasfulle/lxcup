@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${LXCUP_POSTGRES_DB:?LXCUP_POSTGRES_DB is required}
+      POSTGRES_USER: ${LXCUP_POSTGRES_USER:?LXCUP_POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${LXCUP_POSTGRES_PASSWORD:?LXCUP_POSTGRES_PASSWORD is required}
+    ports:
+      - "5433:5432"
+    volumes:
+      - lxcup-postgres-dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1g
+
+volumes:
+  lxcup-postgres-dev:
