@@ -1,0 +1,12 @@
+[package]
+name = "lxcup-persistence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lxcup-core = { path = "../lxcup-core" }
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
