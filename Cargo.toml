@@ -4,6 +4,7 @@ members = [
     "crates/lxcup-cli",
     "crates/lxcup-observability",
     "crates/lxcup-persistence",
+    "crates/lxcup-proxmox",
     "crates/lxcup-server",
     "crates/lxcup-test-support",
 ]
@@ -21,10 +22,12 @@ clap = { version = "4.5", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.8", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
 sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+url = "2.5.7"
 uuid = { version = "1.18", features = ["serde", "v4"] }
