@@ -6,13 +6,17 @@ Webbasierter Update-Manager für Proxmox-LXC-Container.
 
 ```text
 crates/
-├── lxcup-core    Domain- und Geschäftslogik
-├── lxcup-cli     optionale CLI-Oberfläche
-├── lxcup-discovery Discovery und Reconciliation von LXC-Containern
-├── lxcup-observability gemeinsame Fehler-/Logging-Infrastruktur
-├── lxcup-proxmox HTTPS-Transport für die Proxmox-REST-API
-├── lxcup-server  Backend/API und spätere Webauslieferung
-└── lxcup-test-support versionierte Fixtures für Core- und Adaptertests
+├── lxcup-core         Domain- und Geschäftslogik
+├── lxcup-apt          APT-Scanner und Parser
+├── lxcup-cli          optionale CLI-Oberfläche
+├── lxcup-discovery    LXC-Discovery und Reconciliation
+├── lxcup-execution    bestätigte Update-Ausführung und Audit-Grenze
+├── lxcup-observability Logging- und Fehler-Infrastruktur
+├── lxcup-planner      sichere Update-Pläne und Revalidierung
+├── lxcup-proxmox      HTTPS-Transport und Proxmox-API-Adapter
+├── lxcup-safety       Snapshots, Healthchecks und Reboot-Erkennung
+├── lxcup-server       Backend-REST-/SSE-API
+└── lxcup-test-support versionierte Fixtures und Integrationstest-Harness
 ```
 
 Die React-TypeScript-Vite-Weboberfläche liegt unter `frontend/`. Sie wird lokal
@@ -23,9 +27,28 @@ Die `lxcup-test-support`-Crate enthält reproduzierbare Testdaten für typische
 MVP-Szenarien. Sie ist für Test- und Integrations-Crates vorgesehen und gehört
 nicht zur fachlichen Produktionslogik.
 
-Die Infrastrukturadapter für Proxmox, APT, Docker und Windows werden ergänzt,
-sobald die zugehörigen MVP-Tickets umgesetzt werden. Sie dürfen keine
-Geschäftslogik aus `lxcup-core` duplizieren.
+Die Infrastrukturadapter dürfen keine Geschäftslogik aus `lxcup-core`
+duplizieren. Linux- und Windows-Agenten werden als getrennte Agent-Prozesse
+ergänzt; der Controller und PostgreSQL bleiben die zentrale Quelle der Wahrheit.
+
+## Aktueller Projektstand
+
+Die MVP-Grundlagen sind umgesetzt: Discovery vorhandener LXC-Container, APT-
+Scanning, sichere Update-Pläne, REST-/SSE-API, React-Dashboard, Execution-
+Lebenszyklus, Snapshots/Healthchecks sowie lokale Test- und Quality-Gates.
+
+Die API- und Safety-Grenzen sind vorbereitet. Für den Produktivbetrieb müssen
+als Nächstes der Serverzustand vollständig an PostgreSQL angebunden, die Linux-
+und Windows-Agenten integriert und echte Update-Ausführungen gegen dedizierte
+Zielsysteme aktiviert werden.
+
+Empfohlene Reihenfolge:
+
+1. PostgreSQL-Repositories mit den Backend-Services verdrahten.
+2. Linux-Agent mit sicherem Transport, Logs und Metriken integrieren.
+3. Windows-Agent mit demselben Agent-Vertrag ergänzen.
+4. Execution und Proxmox-Snapshot-Workflow gegen Test-LXCs ausführen.
+5. Authentifizierung, Rollen/Rechte, Deployment und Monitoring ergänzen.
 
 ## Lokale Prüfungen
 
@@ -111,6 +134,22 @@ Die lokale Qualitätsprüfung umfasst Rust und Frontend:
 Eine optionale SonarQube-Analyse wird mit `scripts/sonarqube.ps1` gestartet,
 wenn der lokale SonarQube-Scanner eingerichtet ist. GitHub Actions werden nicht
 verwendet.
+
+Ein opt-in Integrationstest gegen einen ausdrücklich dedizierten Test-LXC wird
+so gestartet:
+
+```powershell
+$env:DATABASE_TEST_URL = "postgres://lxcup_test:<password>@localhost:5434/lxcup_test"
+$env:PROXMOX_TEST_BASE_URL = "https://pve-test:8006"
+$env:PROXMOX_TEST_TOKEN_ID = "<test-token-id>"
+$env:PROXMOX_TEST_TOKEN_SECRET = "<test-token-secret>"
+$env:LXCUP_INTEGRATION_NODE = "pve-test"
+$env:LXCUP_INTEGRATION_VMID = "101"
+.\scripts\run-integration-tests.ps1
+```
+
+Der Test wird nicht automatisch ausgeführt und verwendet keine produktiven
+Credentials oder produktiven Zielcontainer.
 
 ## Entwicklungsprinzip
 
