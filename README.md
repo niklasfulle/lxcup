@@ -15,6 +15,10 @@ crates/
 └── lxcup-test-support versionierte Fixtures für Core- und Adaptertests
 ```
 
+Die React-TypeScript-Vite-Weboberfläche liegt unter `frontend/`. Sie wird lokal
+mit `npm install` und `npm run dev` gestartet und spricht standardmäßig über den
+Vite-Proxy mit `http://127.0.0.1:8080`.
+
 Die `lxcup-test-support`-Crate enthält reproduzierbare Testdaten für typische
 MVP-Szenarien. Sie ist für Test- und Integrations-Crates vorgesehen und gehört
 nicht zur fachlichen Produktionslogik.
