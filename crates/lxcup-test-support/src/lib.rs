@@ -7,6 +7,81 @@ use lxcup_core::{
     ResolvedPackageChange, Scan, ScanStatus, UpdateClassification, UpdatePlan,
 };
 
+/// Deterministic output used by APT and agent adapter tests.
+pub fn apt_machine_output() -> &'static str {
+    "Package: openssl\nInstalled: 3.5.0-1\nCandidate: 3.5.1-1\nSecurity: yes\nHeld: no\nAuthenticated: yes"
+}
+
+/// Deterministic Proxmox inventory fixture for discovery and snapshot tests.
+pub fn proxmox_lxc_inventory_output() -> &'static str {
+    r#"[{"vmid":101,"status":"running","name":"grafana","template":0}]"#
+}
+
+/// Deterministic Windows-agent metrics fixture for future Windows coverage.
+pub fn windows_agent_metrics_output() -> &'static str {
+    r#"{"agent":"windows","version":"0.1.0","reboot_required":false,"updates":0}"#
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MockAgentResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+pub fn successful_agent_result() -> MockAgentResult {
+    MockAgentResult {
+        exit_code: 0,
+        stdout: "ok".to_owned(),
+        stderr: String::new(),
+    }
+}
+
+/// Configuration for an explicitly dedicated, opt-in integration LXC.
+#[derive(Clone)]
+pub struct DedicatedLxcConfig {
+    pub proxmox_base_url: String,
+    pub proxmox_token_id: String,
+    pub proxmox_token_secret: String,
+    pub node_name: String,
+    pub vmid: u64,
+    pub database_test_url: String,
+}
+
+impl std::fmt::Debug for DedicatedLxcConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DedicatedLxcConfig")
+            .field("proxmox_base_url", &self.proxmox_base_url)
+            .field("proxmox_token_id", &self.proxmox_token_id)
+            .field("proxmox_token_secret", &"[REDACTED]")
+            .field("node_name", &self.node_name)
+            .field("vmid", &self.vmid)
+            .field("database_test_url", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl DedicatedLxcConfig {
+    pub fn from_env() -> Result<Self, String> {
+        let required = |name: &str| std::env::var(name).map_err(|_| format!("{name} is required"));
+        let vmid = required("LXCUP_INTEGRATION_VMID")?
+            .parse::<u64>()
+            .map_err(|_| "LXCUP_INTEGRATION_VMID must be numeric".to_owned())?;
+        if vmid == 0 {
+            return Err("LXCUP_INTEGRATION_VMID must be greater than zero".to_owned());
+        }
+        Ok(Self {
+            proxmox_base_url: required("PROXMOX_TEST_BASE_URL")?,
+            proxmox_token_id: required("PROXMOX_TEST_TOKEN_ID")?,
+            proxmox_token_secret: required("PROXMOX_TEST_TOKEN_SECRET")?,
+            node_name: required("LXCUP_INTEGRATION_NODE")?,
+            vmid,
+            database_test_url: required("DATABASE_TEST_URL")?,
+        })
+    }
+}
+
 /// Erzeugt einen typischen verwaltbaren Debian-Container.
 pub fn container() -> Container {
     Container::new(
@@ -99,7 +174,11 @@ fn version(value: &str) -> PackageVersion {
 
 #[cfg(test)]
 mod tests {
-    use super::{blocked_plan, container, ready_plan, succeeded_scan, successful_execution};
+    use super::{
+        apt_machine_output, blocked_plan, container, proxmox_lxc_inventory_output, ready_plan,
+        succeeded_scan, successful_agent_result, successful_execution,
+        windows_agent_metrics_output,
+    };
     use lxcup_core::{
         ContainerStatus, ExecutionStatus, PlanStatus, ScanStatus, UpdateClassification,
     };
@@ -122,5 +201,13 @@ mod tests {
                 .any(|update| update.classification == UpdateClassification::Security)
         );
         assert_eq!(blocked_plan().status, PlanStatus::Blocked);
+    }
+
+    #[test]
+    fn adapter_fixtures_are_stable_and_safe_to_log() {
+        assert!(apt_machine_output().contains("openssl"));
+        assert!(proxmox_lxc_inventory_output().contains("101"));
+        assert!(windows_agent_metrics_output().contains("windows"));
+        assert_eq!(successful_agent_result().exit_code, 0);
     }
 }
