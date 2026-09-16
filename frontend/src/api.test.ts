@@ -11,4 +11,19 @@ describe("ApiClient", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "not_found", message: "container not found" }, request_id: "req-2" }), { status: 404 })));
     await expect(new ApiClient().get("/api/v1/containers")).rejects.toEqual(expect.objectContaining({ status: 404, code: "not_found", requestId: "req-2" }));
   });
+
+  it("retries transient server failures before returning the envelope", async () => {
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: "internal_error", message: "temporary" }, request_id: "req-3" }), { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { ok: true }, request_id: "req-4" }), { status: 200 })));
+
+    await expect(new ApiClient().get<{ ok: boolean }>("/api/v1/health")).resolves.toEqual({ ok: true });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects successful responses without the versioned data envelope", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not-json", { status: 200 })));
+
+    await expect(new ApiClient().get("/api/v1/nodes")).rejects.toEqual(expect.objectContaining({ code: "invalid_response", status: 200 }));
+  });
 });

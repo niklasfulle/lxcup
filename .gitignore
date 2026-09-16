@@ -2,3 +2,6 @@
 /frontend/dist/
 /.env
 /target/
+**/coverage/
+/.scannerwork/
+/.sonar/

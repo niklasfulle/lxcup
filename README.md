@@ -133,9 +133,33 @@ Die lokale Qualitätsprüfung umfasst Rust und Frontend:
 .\scripts\verify.ps1
 ```
 
-Eine optionale SonarQube-Analyse wird mit `scripts/sonarqube.ps1` gestartet,
-wenn der lokale SonarQube-Scanner eingerichtet ist. GitHub Actions werden nicht
-verwendet.
+Eine optionale SonarQube-Analyse wird lokal mit dem klassischen
+`sonar-scanner` gestartet. Das Skript erzeugt davor Rust- und Frontend-LCOV-
+Reports. Der Server muss aus der aktuellen Shell erreichbar sein; bei
+Docker-Netzwerken ist `sonarqube` als Hostname nur innerhalb dieses Netzwerks
+auflösbar:
+
+Voraussetzungen:
+
+- Der klassische SonarScanner CLI muss als `sonar-scanner` im `PATH` liegen
+  oder über `SONAR_SCANNER_HOME` gefunden werden. Das separate `sonar`-CLI ist
+  dafür nicht ausreichend.
+- Für Rust-Coverage: `rustup component add llvm-tools-preview` und
+  `cargo install cargo-llvm-cov`.
+- Für Frontend-Coverage müssen die Frontend-Abhängigkeiten installiert sein.
+
+```powershell
+.\sonar.ps1 -SonarHostUrl "http://sonarqube:9000" -Token "<token>" -ProjectKey "Lxcup"
+```
+
+Alternativ kann der Token vorher als `$env:SONAR_TOKEN` gesetzt werden. Ein
+leerer `-Token ""` wird unterstützt, funktioniert aber nur bei aktivierter
+anonymer Analyse. Für Rust-Coverage wird `cargo-llvm-cov` benötigt; für
+Frontend-Coverage ist `@vitest/coverage-v8` im Projekt hinterlegt. Fehlt eines
+der Coverage-Werkzeuge, läuft der Scan mit Warnung ohne den jeweiligen Report
+weiter; der SonarScanner selbst ist dagegen zwingend erforderlich.
+Das bisherige Alias-Skript bleibt unter `scripts/sonarqube.ps1` erhalten.
+GitHub Actions werden nicht verwendet.
 
 ## Agenten und Betriebsendpunkte
 
