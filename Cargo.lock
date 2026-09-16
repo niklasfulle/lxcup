@@ -1083,6 +1083,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lxcup-execution"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "lxcup-core",
+ "lxcup-planner",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "lxcup-observability"
 version = "0.1.0"
 dependencies = [
@@ -1132,6 +1145,7 @@ dependencies = [
  "axum",
  "chrono",
  "lxcup-core",
+ "lxcup-execution",
  "lxcup-observability",
  "lxcup-planner",
  "serde",

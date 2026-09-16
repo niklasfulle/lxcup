@@ -5,7 +5,7 @@ use std::{convert::Infallible, sync::Arc};
 use axum::{
     Json, Router,
     extract::{Json as JsonBody, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
@@ -16,6 +16,7 @@ use lxcup_core::{
     Container, ContainerId, Execution, ExecutionId, Node, NodeId, PlanStatus, Scan, ScanId,
     UpdatePlan, UpdatePlanId,
 };
+use lxcup_execution::{ExecutionCoordinator, ExecutionRequest, ExecutionStart};
 use lxcup_planner::{DryRunChange, PlannerInput, UpdatePlanner};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast};
@@ -25,6 +26,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct ApiState {
     store: Arc<RwLock<ApiStore>>,
+    execution: Arc<RwLock<ExecutionCoordinator>>,
     events: broadcast::Sender<ApiEvent>,
 }
 
@@ -33,6 +35,7 @@ impl ApiState {
         let (events, _) = broadcast::channel(256);
         Self {
             store: Arc::new(RwLock::new(ApiStore::default())),
+            execution: Arc::new(RwLock::new(ExecutionCoordinator::default())),
             events,
         }
     }
@@ -327,6 +330,7 @@ async fn get_plan(
 async fn confirm_plan(
     State(state): State<ApiState>,
     Path(plan_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<(StatusCode, Json<ApiEnvelope<ExecutionDto>>), ApiError> {
     let plan_id = parse_uuid(&plan_id, "plan id")?;
     let mut store = state.store.write().await;
@@ -338,9 +342,68 @@ async fn confirm_plan(
     plan.transition_to(PlanStatus::Confirmed).map_err(|_| {
         ApiError::bad_request("plan_not_ready", "plan is not ready for confirmation")
     })?;
-    let execution = Execution::new(plan.id);
+    let planner_input = PlannerInput {
+        container_id: plan.container_id,
+        requested_packages: plan
+            .requested_packages
+            .iter()
+            .map(|package| package.as_str().to_owned())
+            .collect(),
+        dry_run_changes: plan
+            .resolved_changes
+            .iter()
+            .map(|change| DryRunChange {
+                package: change.package.as_str().to_owned(),
+                from_version: change
+                    .from_version
+                    .as_ref()
+                    .map(|version| version.as_str().to_owned()),
+                to_version: change
+                    .to_version
+                    .as_ref()
+                    .map(|version| version.as_str().to_owned()),
+                kind: change.kind,
+                held: false,
+                authenticated: true,
+            })
+            .collect(),
+        distribution_upgrade: false,
+    };
+    let actor = headers
+        .get("x-actor")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("api")
+        .to_owned();
+    let default_idempotency_key = plan_id.to_string();
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or(&default_idempotency_key)
+        .to_owned();
+    let start = state
+        .execution
+        .write()
+        .await
+        .start(ExecutionRequest {
+            plan: plan.clone(),
+            current_plan_input: planner_input,
+            actor,
+            idempotency_key,
+        })
+        .map_err(|_| ApiError::bad_request("execution_rejected", "execution was rejected"))?;
+    let execution = match start {
+        ExecutionStart::Created(execution) => {
+            store.executions.push(execution.clone());
+            execution
+        }
+        ExecutionStart::Duplicate(execution_id) => store
+            .executions
+            .iter()
+            .find(|execution| execution.id == execution_id)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found("execution not found"))?,
+    };
     let dto = ExecutionDto::from(&execution);
-    store.executions.push(execution);
     drop(store);
     state.publish(ApiEvent::task(
         dto.id.as_uuid().to_string(),
@@ -354,18 +417,24 @@ async fn abort_execution(
     Path(execution_id): Path<String>,
 ) -> Result<Json<ApiEnvelope<ExecutionDto>>, ApiError> {
     let execution_id = parse_uuid(&execution_id, "execution id")?;
-    let mut store = state.store.write().await;
-    let execution = store
-        .executions
-        .iter_mut()
-        .find(|execution| execution.id.as_uuid() == execution_id)
-        .ok_or_else(|| ApiError::not_found("execution not found"))?;
-    execution
-        .transition_to(lxcup_core::ExecutionStatus::Aborted, chrono::Utc::now())
+    let execution_id = lxcup_core::ExecutionId::from_uuid(execution_id);
+    let aborted = state
+        .execution
+        .write()
+        .await
+        .abort(execution_id)
         .map_err(|_| {
             ApiError::bad_request("execution_not_abortable", "execution cannot be aborted")
         })?;
-    let dto = ExecutionDto::from(&*execution);
+    let dto = ExecutionDto::from(&aborted);
+    let mut store = state.store.write().await;
+    if let Some(execution) = store
+        .executions
+        .iter_mut()
+        .find(|execution| execution.id == execution_id)
+    {
+        *execution = aborted;
+    }
     drop(store);
     state.publish(ApiEvent::task(
         dto.id.as_uuid().to_string(),
