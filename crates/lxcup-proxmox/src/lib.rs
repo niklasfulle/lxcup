@@ -7,7 +7,7 @@
 use std::{fmt, time::Duration};
 
 use reqwest::{Client, StatusCode, header};
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use url::Url;
 
@@ -155,6 +155,45 @@ impl ProxmoxClient {
             });
         }
 
+        let envelope = serde_json::from_str::<ApiResponse<T>>(&body)
+            .map_err(|source| ProxmoxClientError::Decode { source })?;
+        Ok(envelope.data)
+    }
+
+    /// Performs an authenticated POST and unwraps Proxmox's `data` envelope.
+    pub async fn post_json<T, B>(&self, path: &str, body: &B) -> Result<T, ProxmoxClientError>
+    where
+        T: DeserializeOwned,
+        B: Serialize,
+    {
+        let relative_path = path.trim_start_matches('/');
+        if relative_path.is_empty() {
+            return Err(ProxmoxClientError::InvalidPath);
+        }
+        let url = self
+            .api_root
+            .join(relative_path)
+            .map_err(ProxmoxClientError::InvalidUrl)?;
+        let authorization = format!("PVEAPIToken={}={}", self.token_id, self.token_secret);
+        let response = self
+            .http
+            .post(url)
+            .header(header::AUTHORIZATION, authorization)
+            .json(body)
+            .send()
+            .await
+            .map_err(ProxmoxClientError::Transport)?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(ProxmoxClientError::Transport)?;
+        if !status.is_success() {
+            return Err(ProxmoxClientError::Api {
+                status,
+                message: api_error_message(&body),
+            });
+        }
         let envelope = serde_json::from_str::<ApiResponse<T>>(&body)
             .map_err(|source| ProxmoxClientError::Decode { source })?;
         Ok(envelope.data)

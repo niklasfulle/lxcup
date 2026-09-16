@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Summary returned by `GET /nodes`.
@@ -74,6 +74,19 @@ pub struct ProxmoxTaskStatus {
     pub starttime: Option<u64>,
     #[serde(rename = "type")]
     pub task_type: Option<String>,
+}
+
+/// Request to create a named LXC snapshot.
+#[derive(Clone, Debug, Serialize)]
+pub struct LxcSnapshotRequest {
+    pub snapname: String,
+    pub description: Option<String>,
+}
+
+/// Task identifier returned by mutating Proxmox endpoints.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ProxmoxTaskStart {
+    pub upid: String,
 }
 
 #[cfg(test)]

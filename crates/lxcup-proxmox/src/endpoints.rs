@@ -51,6 +51,25 @@ impl ProxmoxClient {
         self.get_json(&format!("/nodes/{node_name}/tasks/{upid}/status"))
             .await
     }
+
+    pub async fn create_lxc_snapshot(
+        &self,
+        node_name: &str,
+        vmid: u64,
+        request: &LxcSnapshotRequest,
+    ) -> Result<ProxmoxTaskStart, ProxmoxClientError> {
+        validate_lxc_path(node_name, vmid)?;
+        if request.snapname.trim().is_empty()
+            || !request
+                .snapname
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character))
+        {
+            return Err(ProxmoxClientError::InvalidPath);
+        }
+        self.post_json(&format!("/nodes/{node_name}/lxc/{vmid}/snapshot"), request)
+            .await
+    }
 }
 
 fn validate_lxc_path(node_name: &str, vmid: u64) -> Result<(), ProxmoxClientError> {

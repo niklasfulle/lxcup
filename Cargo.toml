@@ -9,6 +9,7 @@ members = [
     "crates/lxcup-persistence",
     "crates/lxcup-planner",
     "crates/lxcup-proxmox",
+    "crates/lxcup-safety",
     "crates/lxcup-server",
     "crates/lxcup-test-support",
 ]
