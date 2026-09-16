@@ -14,6 +14,7 @@ use url::Url;
 pub mod endpoints;
 pub mod models;
 pub mod node;
+pub mod polling;
 
 const API_ROOT_PATH: &str = "api2/json/";
 
