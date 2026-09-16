@@ -857,6 +857,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "lxcup-core",
+ "lxcup-test-support",
  "serde_json",
  "sqlx",
  "thiserror",
