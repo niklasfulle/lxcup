@@ -37,6 +37,17 @@ Unter Windows können alle Prüfungen auch gemeinsam ausgeführt werden:
 .\scripts\verify.ps1
 ```
 
+Für PostgreSQL-Integrationstests wird ausschließlich eine separate
+Development-Datenbank über `DATABASE_TEST_URL` verwendet:
+
+```powershell
+$env:DATABASE_TEST_URL = "postgres://<user>:<password>@<host>:5432/lxcup_test"
+cargo test -p lxcup-persistence --test postgres_integration -- --nocapture
+```
+
+Ohne `DATABASE_TEST_URL` wird der Integrationstest übersprungen. Eine
+Produktions-`DATABASE_URL` wird dafür nicht verwendet.
+
 ## Entwicklungsprinzip
 
 Verändernde Aktionen folgen immer:

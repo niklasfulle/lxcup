@@ -13,3 +13,6 @@ sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+lxcup-test-support = { path = "../lxcup-test-support" }

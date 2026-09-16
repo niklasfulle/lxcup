@@ -6,6 +6,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use thiserror::Error;
 
 pub mod repositories;
+pub mod seeds;
 
 pub use repositories::{
     AuditEvent, AuditEventRepository, ContainerRepository, ExecutionEvent, ExecutionRepository,
