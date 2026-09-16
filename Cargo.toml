@@ -4,6 +4,7 @@ members = [
     "crates/lxcup-cli",
     "crates/lxcup-observability",
     "crates/lxcup-server",
+    "crates/lxcup-test-support",
 ]
 resolver = "2"
 

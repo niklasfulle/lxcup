@@ -1,0 +1,10 @@
+[package]
+name = "lxcup-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+lxcup-core = { path = "../lxcup-core" }
