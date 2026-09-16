@@ -27,6 +27,10 @@ pub fn development_seed() -> DevelopmentSeed {
         name: "pve-dev".to_owned(),
         address: "https://pve-dev.invalid:8006".to_owned(),
         status: NodeStatus::Unknown,
+        proxmox_version: None,
+        capabilities: Vec::new(),
+        last_checked_at: None,
+        last_check_error: None,
         created_at: timestamp,
     };
     let container = Container {
@@ -47,12 +51,16 @@ pub async fn seed_development(pool: &PgPool) -> Result<DevelopmentSeed, Reposito
     let seed = development_seed();
 
     sqlx::query(
-        "INSERT INTO nodes (id, name, address, status, created_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, address = EXCLUDED.address, status = EXCLUDED.status, created_at = EXCLUDED.created_at",
+        "INSERT INTO nodes (id, name, address, status, proxmox_version, capabilities, last_checked_at, last_check_error, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, address = EXCLUDED.address, status = EXCLUDED.status, proxmox_version = EXCLUDED.proxmox_version, capabilities = EXCLUDED.capabilities, last_checked_at = EXCLUDED.last_checked_at, last_check_error = EXCLUDED.last_check_error, created_at = EXCLUDED.created_at",
     )
     .bind(seed.node.id.as_uuid())
     .bind(&seed.node.name)
     .bind(&seed.node.address)
     .bind("unknown")
+    .bind(Option::<String>::None)
+    .bind(serde_json::json!([]))
+    .bind(Option::<DateTime<Utc>>::None)
+    .bind(Option::<String>::None)
     .bind(seed.node.created_at)
     .execute(pool)
     .await?;

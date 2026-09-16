@@ -45,6 +45,55 @@ async fn postgres_round_trip_uses_only_the_explicit_test_database() {
         .expect("seeded node must exist");
     assert_eq!(loaded_node.name, seed.node.name);
 
+    let checked_at = Utc::now();
+    let mut checked_node = loaded_node.clone();
+    checked_node.record_check_success(
+        "8.4.1",
+        vec!["version.info".to_owned(), "node.info".to_owned()],
+        checked_at,
+    );
+    repositories
+        .nodes
+        .update(&checked_node)
+        .await
+        .expect("successful node check must be persisted");
+    let loaded_checked_node = repositories
+        .nodes
+        .find_by_id(seed.node.id)
+        .await
+        .expect("checked node read must succeed")
+        .expect("checked node must exist");
+    assert_eq!(
+        loaded_checked_node.status,
+        lxcup_core::NodeStatus::Connected
+    );
+    assert_eq!(
+        loaded_checked_node.proxmox_version.as_deref(),
+        Some("8.4.1")
+    );
+    assert_eq!(loaded_checked_node.capabilities.len(), 2);
+
+    checked_node.record_check_failure("permission denied", Utc::now());
+    repositories
+        .nodes
+        .update(&checked_node)
+        .await
+        .expect("failed node check must be persisted");
+    let loaded_failed_node = repositories
+        .nodes
+        .find_by_id(seed.node.id)
+        .await
+        .expect("failed node read must succeed")
+        .expect("failed node must exist");
+    assert_eq!(
+        loaded_failed_node.status,
+        lxcup_core::NodeStatus::Disconnected
+    );
+    assert_eq!(
+        loaded_failed_node.last_check_error.as_deref(),
+        Some("permission denied")
+    );
+
     let scan = lxcup_test_support::succeeded_scan();
     repositories
         .scans
