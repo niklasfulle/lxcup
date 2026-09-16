@@ -14,10 +14,14 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidateNotNullOrEmpty()]
-    [string]$ProjectName = "lxcup"
+    [string]$ProjectName = "lxcup",
+
+    [Parameter(Mandatory = $false)]
+    [ValidateNotNullOrEmpty()]
+    [string]$ProjectVersion = "0.1.0"
 )
 
 $ErrorActionPreference = "Stop"
 $rootScript = Join-Path (Split-Path -Parent $PSScriptRoot) "sonar.ps1"
-& $rootScript -SonarHostUrl $SonarHostUrl -Token $Token -ProjectKey $ProjectKey -ProjectName $ProjectName
+& $rootScript -SonarHostUrl $SonarHostUrl -Token $Token -ProjectKey $ProjectKey -ProjectName $ProjectName -ProjectVersion $ProjectVersion
 exit $LASTEXITCODE

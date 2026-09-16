@@ -151,7 +151,7 @@ Voraussetzungen:
 - Für Frontend-Coverage müssen die Frontend-Abhängigkeiten installiert sein.
 
 ```powershell
-.\sonar.ps1 -SonarHostUrl "http://sonarqube:9000" -Token "<token>" -ProjectKey "Lxcup"
+.\sonar.ps1 -SonarHostUrl "http://sonarqube:9000" -Token "<token>" -ProjectKey "Lxcup" -ProjectVersion "0.1.0"
 ```
 
 Alternativ kann der Token vorher als `$env:SONAR_TOKEN` gesetzt werden. Ein
@@ -160,6 +160,8 @@ anonymer Analyse. Für Rust-Coverage wird `cargo-llvm-cov` benötigt; für
 Frontend-Coverage ist `@vitest/coverage-v8` im Projekt hinterlegt. Fehlt eines
 der Coverage-Werkzeuge, läuft der Scan mit Warnung ohne den jeweiligen Report
 weiter; der SonarScanner selbst ist dagegen zwingend erforderlich.
+Die Projektversion ist standardmäßig `0.1.0` und kann über `-ProjectVersion`
+überschrieben werden.
 Das bisherige Alias-Skript bleibt unter `scripts/sonarqube.ps1` erhalten.
 GitHub Actions werden nicht verwendet.
 
