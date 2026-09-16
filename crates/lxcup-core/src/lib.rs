@@ -17,7 +17,7 @@ pub use error::{DomainError, InfrastructureError, LxcupError, LxcupResult};
 pub use execution::{Execution, ExecutionStatus};
 pub use ids::{ContainerId, ExecutionId, NodeId, ScanId, UpdatePlanId};
 pub use node::{Node, NodeStatus};
-pub use plan::{PlanStatus, UpdatePlan};
+pub use plan::{PackageChangeKind, PlanStatus, ResolvedPackageChange, UpdatePlan};
 pub use scan::{Scan, ScanStatus};
 pub use update::{AvailableUpdate, PackageName, PackageVersion, UpdateClassification};
 

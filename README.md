@@ -9,8 +9,13 @@ crates/
 ├── lxcup-core    Domain- und Geschäftslogik
 ├── lxcup-cli     optionale CLI-Oberfläche
 ├── lxcup-observability gemeinsame Fehler-/Logging-Infrastruktur
-└── lxcup-server  Backend/API und spätere Webauslieferung
+├── lxcup-server  Backend/API und spätere Webauslieferung
+└── lxcup-test-support versionierte Fixtures für Core- und Adaptertests
 ```
+
+Die `lxcup-test-support`-Crate enthält reproduzierbare Testdaten für typische
+MVP-Szenarien. Sie ist für Test- und Integrations-Crates vorgesehen und gehört
+nicht zur fachlichen Produktionslogik.
 
 Die Infrastrukturadapter für Proxmox, APT, Docker und Windows werden ergänzt,
 sobald die zugehörigen MVP-Tickets umgesetzt werden. Sie dürfen keine
