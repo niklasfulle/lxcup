@@ -16,5 +16,6 @@ lxcup-core = { path = "../lxcup-core" }
 lxcup-execution = { path = "../lxcup-execution" }
 lxcup-planner = { path = "../lxcup-planner" }
 lxcup-observability = { path = "../lxcup-observability" }
+lxcup-safety = { path = "../lxcup-safety" }
 serde.workspace = true
 uuid.workspace = true

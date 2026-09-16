@@ -1139,6 +1139,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lxcup-safety"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "reqwest",
+ "serde",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "lxcup-server"
 version = "0.1.0"
 dependencies = [
@@ -1148,6 +1159,7 @@ dependencies = [
  "lxcup-execution",
  "lxcup-observability",
  "lxcup-planner",
+ "lxcup-safety",
  "serde",
  "tokio",
  "tokio-stream",

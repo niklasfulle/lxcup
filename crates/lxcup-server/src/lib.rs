@@ -1,6 +1,6 @@
 //! HTTP API boundary for the lxcup web frontend and agents.
 
-use std::{convert::Infallible, sync::Arc};
+use std::{collections::HashMap, convert::Infallible, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -18,6 +18,7 @@ use lxcup_core::{
 };
 use lxcup_execution::{ExecutionCoordinator, ExecutionRequest, ExecutionStart};
 use lxcup_planner::{DryRunChange, PlannerInput, UpdatePlanner};
+use lxcup_safety::{HealthCheckResult, RebootRequirement, SnapshotState};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
@@ -51,6 +52,15 @@ impl ApiState {
     pub fn publish(&self, event: ApiEvent) {
         let _ = self.events.send(event);
     }
+
+    pub async fn record_safety(&self, execution_id: ExecutionId, report: SafetyDto) {
+        self.store.write().await.safety.insert(execution_id, report);
+        self.publish(ApiEvent::status(
+            "safety",
+            execution_id.as_uuid().to_string(),
+            "updated",
+        ));
+    }
 }
 
 impl Default for ApiState {
@@ -66,6 +76,7 @@ struct ApiStore {
     scans: Vec<Scan>,
     plans: Vec<UpdatePlan>,
     executions: Vec<Execution>,
+    safety: HashMap<ExecutionId, SafetyDto>,
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -91,6 +102,7 @@ pub fn router(state: ApiState) -> Router {
             post(abort_execution),
         )
         .route("/api/v1/executions/{execution_id}", get(get_execution))
+        .route("/api/v1/executions/{execution_id}/safety", get(get_safety))
         .route("/api/v1/openapi.json", get(openapi_document))
         .route("/api/v1/events", get(stream_events))
         .with_state(state)
@@ -457,6 +469,28 @@ async fn get_execution(
     Ok(Json(envelope(ExecutionDto::from(execution))))
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct SafetyDto {
+    pub snapshot: SnapshotState,
+    pub healthchecks: Vec<HealthCheckResult>,
+    pub reboot: RebootRequirement,
+    pub automatic_rollback: bool,
+}
+
+async fn get_safety(
+    State(state): State<ApiState>,
+    Path(execution_id): Path<String>,
+) -> Result<Json<ApiEnvelope<SafetyDto>>, ApiError> {
+    let execution_id = parse_uuid(&execution_id, "execution id")?;
+    let store = state.store.read().await;
+    let report = store
+        .safety
+        .get(&ExecutionId::from_uuid(execution_id))
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("safety report not found"))?;
+    Ok(Json(envelope(report)))
+}
+
 /// Versioned machine-readable contract consumed by the frontend and API clients.
 pub const OPENAPI_CONTRACT: &str = r#"{
   "openapi": "3.1.0",
@@ -470,6 +504,7 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/api/v1/plans/{plan_id}/confirm": {"post": {}},
     "/api/v1/executions/{execution_id}": {"get": {}},
     "/api/v1/executions/{execution_id}/abort": {"post": {}},
+    "/api/v1/executions/{execution_id}/safety": {"get": {}},
     "/api/v1/events": {"get": {"description": "Typed task, log and status SSE"}}
   }
 }"#;

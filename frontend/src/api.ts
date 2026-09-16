@@ -47,6 +47,13 @@ export type ExecutionDto = {
   finished_at: string | null;
 };
 
+export type ExecutionSafetyDto = {
+  snapshot: "NotRequested" | { Succeeded: { task_id: string } } | { Failed: { reason: string } };
+  healthchecks: Array<{ check: { kind: string; [key: string]: unknown }; healthy: boolean; detail: string; checked_at: string }>;
+  reboot: "Required" | "NotRequired" | "Unknown";
+  automatic_rollback: boolean;
+};
+
 export type ApiErrorBody = {
   error?: { code: string; message: string };
   request_id?: string;
