@@ -10,7 +10,8 @@ pub mod seeds;
 
 pub use repositories::{
     AuditEvent, AuditEventRepository, ContainerRepository, ExecutionEvent, ExecutionRepository,
-    NodeRepository, Repositories, RepositoryError, ScanRepository, UpdatePlanRepository,
+    ExecutionResultRecord, NodeRepository, Repositories, RepositoryError, ScanRepository,
+    UpdatePlanRepository,
 };
 
 /// Konfiguration für eine PostgreSQL-Verbindung.

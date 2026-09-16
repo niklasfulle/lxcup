@@ -2,6 +2,7 @@
 members = [
     "crates/lxcup-core",
     "crates/lxcup-apt",
+    "crates/lxcup-agent",
     "crates/lxcup-discovery",
     "crates/lxcup-execution",
     "crates/lxcup-cli",
@@ -32,7 +33,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 sqlx = { version = "0.8", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
 sha2 = "0.10"
 thiserror = "2.0"
-tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.47", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower = "0.5"
 tracing = "0.1"

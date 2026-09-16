@@ -11,16 +11,18 @@ import { ContainersPage } from "./pages/ContainersPage";
 export default function App() {
   const queryClient = useQueryClient();
   const [connectionState, setConnectionState] = useState("verbunden");
+  const [streamError, setStreamError] = useState<string | null>(null);
 
   useEffect(() => {
     return apiClient.subscribe(
       (event: ApiEvent) => {
         setConnectionState("verbunden");
+        if (event.type === "Error") setStreamError(event.payload.message);
         if (event.type === "Status") {
           void queryClient.invalidateQueries({ queryKey: event.payload.resource === "node" ? queryKeys.nodes : queryKeys.containers });
         }
       },
-      () => setConnectionState("wiederverbinden"),
+      () => { setConnectionState("wiederverbinden"); setStreamError("Echtzeitverbindung unterbrochen. Der Browser versucht die Verbindung erneut."); },
     );
   }, [queryClient]);
 
@@ -40,6 +42,7 @@ export default function App() {
         </div>
       </aside>
       <main className="main-content">
+        {streamError ? <div className="api-alert" role="alert">{streamError}</div> : null}
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/nodes" element={<NodesPage />} />

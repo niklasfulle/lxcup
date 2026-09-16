@@ -6,14 +6,25 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&bind_address)
         .await
         .expect("server bind address must be available");
+    let mut state = lxcup_server::ApiState::new();
+    if std::env::var_os("DATABASE_URL").is_some() {
+        let database = lxcup_persistence::Database::connect_from_env()
+            .await
+            .expect("configured DATABASE_URL must be reachable");
+        database
+            .migrate()
+            .await
+            .expect("database migrations must complete");
+        state = state.with_repositories(lxcup_persistence::Repositories::new(&database));
+        tracing::info!("PostgreSQL persistence enabled");
+    } else {
+        tracing::warn!("DATABASE_URL is not configured; using in-memory state");
+    }
     tracing::info!(version = env!("CARGO_PKG_VERSION"), %bind_address, "lxcup server starting");
-    axum::serve(
-        listener,
-        lxcup_server::router(lxcup_server::ApiState::new()),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .expect("server must run");
+    axum::serve(listener, lxcup_server::router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("server must run");
 }
 
 async fn shutdown_signal() {

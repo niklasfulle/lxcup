@@ -8,6 +8,7 @@ Webbasierter Update-Manager für Proxmox-LXC-Container.
 crates/
 ├── lxcup-core         Domain- und Geschäftslogik
 ├── lxcup-apt          APT-Scanner und Parser
+├── lxcup-agent        Linux-/Windows-Agentvertrag und Agentdienst
 ├── lxcup-cli          optionale CLI-Oberfläche
 ├── lxcup-discovery    LXC-Discovery und Reconciliation
 ├── lxcup-execution    bestätigte Update-Ausführung und Audit-Grenze
@@ -33,22 +34,23 @@ ergänzt; der Controller und PostgreSQL bleiben die zentrale Quelle der Wahrheit
 
 ## Aktueller Projektstand
 
-Die MVP-Grundlagen sind umgesetzt: Discovery vorhandener LXC-Container, APT-
-Scanning, sichere Update-Pläne, REST-/SSE-API, React-Dashboard, Execution-
-Lebenszyklus, Snapshots/Healthchecks sowie lokale Test- und Quality-Gates.
+Die MVP-Grundlagen und der erste Ende-zu-Ende-Pfad sind umgesetzt: Discovery
+vorhandener LXC-Container, APT-Scanning, sichere Update-Pläne, REST-/SSE-API,
+React-Dashboard, authentifizierte Linux-/Windows-Agenten, Execution-Lebenszyklus,
+Snapshot-Task-Polling, Healthchecks, PostgreSQL-Ergebnisablage und lokale
+Test-/Quality-Gates.
 
-Die API- und Safety-Grenzen sind vorbereitet. Für den Produktivbetrieb müssen
-als Nächstes der Serverzustand vollständig an PostgreSQL angebunden, die Linux-
-und Windows-Agenten integriert und echte Update-Ausführungen gegen dedizierte
-Zielsysteme aktiviert werden.
+Der Server akzeptiert Agenten über den versionierten Vertrag `v1`. Agenten
+liefern Health, Metriken, gekürzte Befehlsausgaben und führen nur validierte
+Paketargumente aus. Die Weboberfläche kann Scans starten, Ausführungen gegen
+registrierte Agenten auslösen und nach Verbindungsverlust reconciliieren.
 
 Empfohlene Reihenfolge:
 
-1. PostgreSQL-Repositories mit den Backend-Services verdrahten.
-2. Linux-Agent mit sicherem Transport, Logs und Metriken integrieren.
-3. Windows-Agent mit demselben Agent-Vertrag ergänzen.
-4. Execution und Proxmox-Snapshot-Workflow gegen Test-LXCs ausführen.
-5. Authentifizierung, Rollen/Rechte, Deployment und Monitoring ergänzen.
+1. Einen dedizierten Test-LXC-Agenten registrieren und den APPLY-Pfad testen.
+2. Snapshot-/Healthcheck-Regeln gegen die echte Testumgebung verifizieren.
+3. PostgreSQL-Backup/Restore und Reverse-Proxy im Management-LXC testen.
+4. SonarQube im lokalen Quality-Gate ergänzen.
 
 ## Lokale Prüfungen
 
@@ -134,6 +136,30 @@ Die lokale Qualitätsprüfung umfasst Rust und Frontend:
 Eine optionale SonarQube-Analyse wird mit `scripts/sonarqube.ps1` gestartet,
 wenn der lokale SonarQube-Scanner eingerichtet ist. GitHub Actions werden nicht
 verwendet.
+
+## Agenten und Betriebsendpunkte
+
+Der Agent läuft im verwalteten LXC beziehungsweise als Windows-Dienst. Er wird
+mit `LXCUP_AGENT_TOKEN` und `LXCUP_AGENT_BIND_ADDRESS` konfiguriert. Der Server
+registriert ihn über `POST /api/v1/containers/{container_id}/agent`; danach
+stehen folgende Endpunkte zur Verfügung:
+
+```text
+POST /api/v1/scans/{scan_id}/run
+POST /api/v1/executions/{execution_id}/run
+POST /api/v1/executions/{execution_id}/reconcile
+GET  /api/v1/executions/{execution_id}/result
+GET  /api/v1/containers/{container_id}/agent/health
+GET  /api/v1/containers/{container_id}/agent/metrics
+GET  /health/live
+GET  /health/ready
+GET  /metrics
+```
+
+Für eine produktive Bereitstellung siehe [`deploy/README.md`](deploy/README.md).
+Die Authentifizierung verwendet Bearer-Tokens mit Viewer-, Operator- und
+Admin-Token; ohne gesetzte Authentifizierung bleibt die lokale Entwicklung
+kompatibel.
 
 Ein opt-in Integrationstest gegen einen ausdrücklich dedizierten Test-LXC wird
 so gestartet:
