@@ -73,6 +73,7 @@ Datenbank starten und Status prüfen:
 
 ```powershell
 docker compose up -d postgres
+docker compose up -d postgres-test
 docker compose ps
 ```
 
@@ -84,6 +85,14 @@ $env:DATABASE_TEST_URL = "postgres://lxcup_dev:<password>@localhost:5433/lxcup_d
 cargo test -p lxcup-persistence --test postgres_integration -- --nocapture
 ```
 
+Die Testdatenbank läuft getrennt auf Port `5434` und verwendet die Werte
+`LXCUP_TEST_POSTGRES_DB`, `LXCUP_TEST_POSTGRES_USER` und
+`LXCUP_TEST_POSTGRES_PASSWORD` aus `.env`:
+
+```powershell
+$env:DATABASE_TEST_URL = "postgres://lxcup_test:<password>@localhost:5434/lxcup_test"
+```
+
 Die Entwicklungsdatenbank stoppen, ohne ihre Daten zu löschen:
 
 ```powershell
@@ -92,6 +101,16 @@ docker compose down
 
 `docker compose down -v` löscht zusätzlich das lokale PostgreSQL-Volume und
 damit alle darin gespeicherten Entwicklungsdaten.
+
+Die lokale Qualitätsprüfung umfasst Rust und Frontend:
+
+```powershell
+.\scripts\verify.ps1
+```
+
+Eine optionale SonarQube-Analyse wird mit `scripts/sonarqube.ps1` gestartet,
+wenn der lokale SonarQube-Scanner eingerichtet ist. GitHub Actions werden nicht
+verwendet.
 
 ## Entwicklungsprinzip
 

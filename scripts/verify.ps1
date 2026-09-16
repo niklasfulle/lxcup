@@ -12,4 +12,15 @@ cargo build --workspace
 Write-Host "Running tests..."
 cargo test --workspace
 
-Write-Host "All Rust checks passed."
+if (Test-Path "frontend/package.json") {
+    Write-Host "Running frontend tests and production build..."
+    Push-Location frontend
+    if (-not (Test-Path "node_modules")) {
+        npm ci
+    }
+    npm test
+    npm run build
+    Pop-Location
+}
+
+Write-Host "All Rust and frontend checks passed."

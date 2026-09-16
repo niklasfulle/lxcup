@@ -1174,6 +1174,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "lxcup-core",
+ "lxcup-proxmox",
+ "tokio",
 ]
 
 [[package]]
