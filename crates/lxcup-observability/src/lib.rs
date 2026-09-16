@@ -2,6 +2,28 @@
 
 use tracing_subscriber::{EnvFilter, fmt};
 
+/// Werttyp für Felder, die niemals im Klartext geloggt werden dürfen.
+pub struct Redacted<T>(T);
+
+impl<T> Redacted<T> {
+    /// Verpackt einen sensiblen Wert für eine sichere Log-Ausgabe.
+    pub const fn new(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> std::fmt::Debug for Redacted<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+impl<T> std::fmt::Display for Redacted<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
 /// Initialisiert JSON-Logging mit konfigurierbarem `RUST_LOG`-Filter.
 ///
 /// Mehrfache Initialisierung ist erlaubt und wird ignoriert, damit CLI und
@@ -26,5 +48,13 @@ mod tests {
     #[test]
     fn observability_crate_is_available() {
         super::init("test");
+    }
+
+    #[test]
+    fn redacted_values_never_expose_their_contents() {
+        let value = super::Redacted::new("super-secret-token");
+
+        assert_eq!(format!("{value:?}"), "[REDACTED]");
+        assert_eq!(value.to_string(), "[REDACTED]");
     }
 }
