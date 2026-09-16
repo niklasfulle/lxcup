@@ -48,6 +48,45 @@ cargo test -p lxcup-persistence --test postgres_integration -- --nocapture
 Ohne `DATABASE_TEST_URL` wird der Integrationstest übersprungen. Eine
 Produktions-`DATABASE_URL` wird dafür nicht verwendet.
 
+## Lokale PostgreSQL-Datenbank mit Docker Compose
+
+Für die lokale Entwicklung steht eine isolierte PostgreSQL-Instanz über Docker
+Compose bereit. Sie verwendet den Host-Port `5433`, damit eine bereits
+vorhandene PostgreSQL-Instanz auf Port `5432` nicht gestört wird. Die Daten
+liegen in einem benannten Docker-Volume und bleiben nach `docker compose down`
+erhalten.
+
+Einmalig die lokale Konfiguration anlegen und das Passwort ergänzen:
+
+```powershell
+Copy-Item .env.example .env
+# LXCUP_POSTGRES_PASSWORD in .env mit einem lokalen Wert setzen
+```
+
+Datenbank starten und Status prüfen:
+
+```powershell
+docker compose up -d postgres
+docker compose ps
+```
+
+Die Migrationen werden beim Ausführen des PostgreSQL-Integrationstests durch
+die Anwendung angewendet. Dazu die Werte aus `.env` als Test-URL setzen:
+
+```powershell
+$env:DATABASE_TEST_URL = "postgres://lxcup_dev:<password>@localhost:5433/lxcup_dev"
+cargo test -p lxcup-persistence --test postgres_integration -- --nocapture
+```
+
+Die Entwicklungsdatenbank stoppen, ohne ihre Daten zu löschen:
+
+```powershell
+docker compose down
+```
+
+`docker compose down -v` löscht zusätzlich das lokale PostgreSQL-Volume und
+damit alle darin gespeicherten Entwicklungsdaten.
+
 ## Entwicklungsprinzip
 
 Verändernde Aktionen folgen immer:
