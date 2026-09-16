@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/lxcup-core",
+    "crates/lxcup-apt",
     "crates/lxcup-discovery",
     "crates/lxcup-cli",
     "crates/lxcup-observability",
