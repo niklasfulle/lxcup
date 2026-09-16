@@ -36,7 +36,7 @@ pub async fn check_node(
     })
 }
 
-fn validate_node_name(node_name: &str) -> Result<(), NodeCheckError> {
+pub(crate) fn validate_node_name(node_name: &str) -> Result<(), NodeCheckError> {
     if node_name.is_empty()
         || !node_name.chars().all(|character| {
             character.is_ascii_alphanumeric() || character == '-' || character == '_'

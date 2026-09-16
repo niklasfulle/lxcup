@@ -11,6 +11,8 @@ use serde::{Deserialize, de::DeserializeOwned};
 use thiserror::Error;
 use url::Url;
 
+pub mod endpoints;
+pub mod models;
 pub mod node;
 
 const API_ROOT_PATH: &str = "api2/json/";
