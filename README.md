@@ -26,6 +26,12 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
+Unter Windows können alle Prüfungen auch gemeinsam ausgeführt werden:
+
+```powershell
+.\scripts\verify.ps1
+```
+
 ## Entwicklungsprinzip
 
 Verändernde Aktionen folgen immer:
