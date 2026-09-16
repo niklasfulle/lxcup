@@ -14,7 +14,11 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidateNotNullOrEmpty()]
-    [string]$ProjectName = "lxcup"
+    [string]$ProjectName = "lxcup",
+
+    [Parameter(Mandatory = $false)]
+    [ValidateNotNullOrEmpty()]
+    [string]$ProjectVersion = "0.1.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -119,6 +123,7 @@ try {
         "-Dsonar.host.url=$SonarHostUrl",
         "-Dsonar.projectKey=$ProjectKey",
         "-Dsonar.projectName=$ProjectName",
+        "-Dsonar.projectVersion=$ProjectVersion",
         "-Dsonar.projectBaseDir=$root"
     )
 
