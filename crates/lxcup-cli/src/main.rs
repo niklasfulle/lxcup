@@ -14,6 +14,7 @@ enum Command {
 }
 
 fn main() {
+    lxcup_observability::init("lxcup-cli");
     let cli = Cli::parse();
 
     if let Some(Command::Version) = cli.command {
