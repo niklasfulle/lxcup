@@ -2714,3 +2714,116 @@ Geplante Nutzung:
 GitHub-Issues und SonarQube-Ergebnisse werden getrennt behandelt: GitHub beschreibt geplante Arbeit, SonarQube liefert technische Qualitäts- und Sicherheitsbefunde.
 
 ---
+
+# 52. Git- und Branch-Workflow
+
+Die Entwicklung erfolgt über issuebezogene Branches und Pull Requests. Direkte Entwicklungs-Commits auf `main` sind nicht vorgesehen.
+
+## 52.1 Branch-Grundregeln
+
+```text
+main
+ ├── feat/issue-13-rust-workspace
+ ├── feat/issue-17-domain-entities
+ ├── feat/issue-21-postgres-schema
+ └── feat/issue-25-proxmox-api
+```
+
+Regeln:
+
+- `main` enthält nur integrierten und geprüften Code.
+- Jede Umsetzung erfolgt auf einem eigenen Branch.
+- Ein Branch gehört möglichst genau zu einem GitHub-Issue.
+- Ein Unterticket erhält einen eigenen Branch.
+- Parent-Issues werden über mehrere gemergte Unterticket-Branches umgesetzt.
+- Branches bleiben kurzlebig und werden nach dem Merge gelöscht.
+
+## 52.2 Branch-Namenskonvention
+
+Format:
+
+```text
+<typ>/issue-<nummer>-<kurzer-name>
+```
+
+Erlaubte Typen:
+
+```text
+feat      neue Funktion
+fix       Fehlerbehebung
+refactor  Strukturänderung ohne neue Funktion
+test      Tests und Testinfrastruktur
+docs      Dokumentation
+chore     Wartung und Tooling
+```
+
+Beispiele:
+
+```text
+feat/issue-13-rust-workspace
+feat/issue-21-postgres-schema
+test/issue-24-postgres-integration
+docs/issue-50-open-decisions
+```
+
+## 52.3 Pull-Request-Ablauf
+
+```text
+Issue auswählen
+      ↓
+Branch von main erstellen
+      ↓
+Implementieren und testen
+      ↓
+Branch zu GitHub pushen
+      ↓
+Pull Request erstellen
+      ↓
+CI und SonarQube prüfen
+      ↓
+Review und Korrekturen
+      ↓
+Squash-Merge nach main
+      ↓
+Branch löschen
+```
+
+Jeder Pull Request enthält mindestens:
+
+- Referenz auf das zugehörige Issue,
+- kurze Zusammenfassung,
+- Testbeschreibung,
+- bekannte Einschränkungen,
+- Hinweise auf Datenbankmigrationen oder Konfigurationsänderungen.
+
+Ein abgeschlossenes Issue wird über die Pull-Request-Beschreibung automatisch verknüpft, zum Beispiel:
+
+```text
+Closes #13
+```
+
+## 52.4 Qualitätsregeln für Pull Requests
+
+- Kein Merge bei fehlgeschlagenem Build.
+- Kein Merge bei fehlgeschlagenen Tests.
+- Kein Merge bei fehlgeschlagenem Clippy- oder Format-Check.
+- SonarQube-Befunde werden vor dem Merge geprüft.
+- Sicherheitsrelevante Änderungen benötigen eine zusätzliche Prüfung.
+- Große, thematisch gemischte Pull Requests sollen aufgeteilt werden.
+- Datenbankmigrationen werden im Pull Request ausdrücklich beschrieben.
+
+## 52.5 Entwicklungs- und Release-Branches
+
+Für die aktuelle Projektphase wird kein dauerhafter `develop`-Branch benötigt. Kurzlebige Feature-Branches mit Pull Requests nach `main` halten den Ablauf übersichtlich.
+
+Später können zusätzliche Branches eingeführt werden, falls Staging und Releases das erfordern:
+
+```text
+main       produktionsnaher stabiler Stand
+staging    geprüfter Stand für Staging
+release/*  vorbereitete Version
+```
+
+Diese Branches werden erst eingeführt, wenn der entsprechende Deployment-Prozess tatsächlich benötigt wird.
+
+---
