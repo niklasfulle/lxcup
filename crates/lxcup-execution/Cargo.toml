@@ -1,20 +1,16 @@
 [package]
-name = "lxcup-server"
+name = "lxcup-execution"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
-axum.workspace = true
 chrono.workspace = true
-tokio.workspace = true
-tokio-stream.workspace = true
-tower.workspace = true
-tracing.workspace = true
 lxcup-core = { path = "../lxcup-core" }
-lxcup-execution = { path = "../lxcup-execution" }
 lxcup-planner = { path = "../lxcup-planner" }
-lxcup-observability = { path = "../lxcup-observability" }
 serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 uuid.workspace = true

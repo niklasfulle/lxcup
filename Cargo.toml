@@ -3,6 +3,7 @@ members = [
     "crates/lxcup-core",
     "crates/lxcup-apt",
     "crates/lxcup-discovery",
+    "crates/lxcup-execution",
     "crates/lxcup-cli",
     "crates/lxcup-observability",
     "crates/lxcup-persistence",

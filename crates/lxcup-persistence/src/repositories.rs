@@ -424,6 +424,50 @@ impl ExecutionRepository {
         Ok(())
     }
 
+    pub async fn update(&self, execution: &Execution) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "UPDATE executions SET plan_id = $1, status = $2, started_at = $3, finished_at = $4 WHERE id = $5",
+        )
+        .bind(execution.plan_id.as_uuid())
+        .bind(execution_status_to_db(execution.status))
+        .bind(execution.started_at)
+        .bind(execution.finished_at)
+        .bind(execution.id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Claims an idempotency key exactly once for an execution.
+    pub async fn claim_idempotency_key(
+        &self,
+        key: &str,
+        execution_id: ExecutionId,
+    ) -> Result<bool, RepositoryError> {
+        let inserted = sqlx::query(
+            "INSERT INTO execution_requests (idempotency_key, execution_id) VALUES ($1, $2) ON CONFLICT (idempotency_key) DO NOTHING",
+        )
+        .bind(key)
+        .bind(execution_id.as_uuid())
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1;
+        Ok(inserted)
+    }
+
+    pub async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<ExecutionId>, RepositoryError> {
+        let row =
+            sqlx::query("SELECT execution_id FROM execution_requests WHERE idempotency_key = $1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|row| ExecutionId::from_uuid(row.get("execution_id"))))
+    }
+
     pub async fn find_by_id(&self, id: ExecutionId) -> Result<Option<Execution>, RepositoryError> {
         let row = sqlx::query(
             "SELECT id, plan_id, status, started_at, finished_at FROM executions WHERE id = $1",
