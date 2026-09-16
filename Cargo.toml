@@ -6,6 +6,7 @@ members = [
     "crates/lxcup-cli",
     "crates/lxcup-observability",
     "crates/lxcup-persistence",
+    "crates/lxcup-planner",
     "crates/lxcup-proxmox",
     "crates/lxcup-server",
     "crates/lxcup-test-support",
