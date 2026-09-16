@@ -5,6 +5,13 @@ use std::{fmt, time::Duration};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use thiserror::Error;
 
+pub mod repositories;
+
+pub use repositories::{
+    AuditEvent, AuditEventRepository, ContainerRepository, ExecutionEvent, ExecutionRepository,
+    NodeRepository, Repositories, RepositoryError, ScanRepository, UpdatePlanRepository,
+};
+
 /// Konfiguration für eine PostgreSQL-Verbindung.
 #[derive(Clone)]
 pub struct DatabaseConfig {
