@@ -6,7 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono.workspace = true
 lxcup-core = { path = "../lxcup-core" }
+serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+uuid.workspace = true
