@@ -11,6 +11,8 @@ use serde::{Deserialize, de::DeserializeOwned};
 use thiserror::Error;
 use url::Url;
 
+pub mod node;
+
 const API_ROOT_PATH: &str = "api2/json/";
 
 /// Configuration required to connect to a Proxmox API endpoint.
