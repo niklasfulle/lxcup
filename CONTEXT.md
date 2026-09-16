@@ -68,3 +68,26 @@ TCP oder systemd.
 Ein lokaler lxcup-Prozess, der später kontrollierte Operationen für einen
 Proxmox-Node oder ein Windows-System ausführt. Ein Agent ist nicht die zentrale
 Quelle der Wahrheit; diese bleibt beim Controller und seiner PostgreSQL-Datenbank.
+
+## Lebenszyklen
+
+**Container-Verwaltung**:
+Ein entdeckter Container startet als `Discovered` und wird explizit zu
+`Managed`, `Ignored` oder `Disabled`. Nur ein deaktivierter Container kann
+wieder als `Managed` aktiviert werden; ein deaktivierter Container wird nicht
+direkt als `Ignored` behandelt.
+
+**Scan**:
+Ein Scan durchläuft `Pending` → `Running` → `Succeeded` oder `Failed`.
+Ein abgeschlossener Scan wird nicht nachträglich in einen laufenden Scan
+zurückversetzt.
+
+**Update Plan**:
+Ein Plan durchläuft `Draft` → `Ready` → `Confirmed` oder wird bei einer
+Sicherheitsverletzung `Blocked`. Ein bestätigter oder veralteter Plan kann
+nicht erneut ausgeführt werden; eine Planänderung führt zu `Invalidated`.
+
+**Execution**:
+Eine Ausführung startet als `Queued`, läuft als `Running` und endet in
+`Succeeded`, `Failed`, `Aborted` oder bei unklarer Verbindungslage zunächst in
+`Unknown`. Terminalzustände werden nicht wieder geöffnet.

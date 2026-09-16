@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    error::DomainError,
+    error::{DomainError, DomainResult},
     ids::{ContainerId, UpdatePlanId},
     update::{PackageName, PackageVersion},
 };
@@ -15,6 +15,19 @@ pub enum PlanStatus {
     Ready,
     Confirmed,
     Invalidated,
+}
+
+impl PlanStatus {
+    /// Prüft, ob ein Planstatus direkt erreicht werden darf.
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Draft, Self::Blocked | Self::Ready | Self::Invalidated)
+                | (Self::Blocked, Self::Draft | Self::Invalidated)
+                | (Self::Ready, Self::Confirmed | Self::Invalidated)
+                | (Self::Confirmed, Self::Invalidated)
+        )
+    }
 }
 
 /// Art einer tatsächlich aufgelösten Paketänderung.
@@ -68,5 +81,42 @@ impl UpdatePlan {
             created_at: Utc::now(),
             plan_hash: None,
         })
+    }
+
+    /// Ändert den Planstatus nach den Safety-Regeln.
+    pub fn transition_to(&mut self, next: PlanStatus) -> DomainResult<()> {
+        if !self.status.can_transition_to(next) {
+            return Err(DomainError::InvalidStateTransition("update plan status"));
+        }
+
+        self.status = next;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PlanStatus, UpdatePlan};
+    use crate::{ContainerId, PackageName};
+
+    #[test]
+    fn plan_must_be_ready_before_confirmation() {
+        let package = PackageName::new("openssl").unwrap();
+        let mut plan = UpdatePlan::new(ContainerId::new(101), vec![package], Vec::new()).unwrap();
+
+        assert!(plan.transition_to(PlanStatus::Confirmed).is_err());
+        plan.transition_to(PlanStatus::Ready).unwrap();
+        plan.transition_to(PlanStatus::Confirmed).unwrap();
+        assert_eq!(plan.status, PlanStatus::Confirmed);
+    }
+
+    #[test]
+    fn blocked_plan_cannot_be_confirmed() {
+        let package = PackageName::new("openssl").unwrap();
+        let mut plan = UpdatePlan::new(ContainerId::new(101), vec![package], Vec::new()).unwrap();
+
+        plan.transition_to(PlanStatus::Blocked).unwrap();
+
+        assert!(plan.transition_to(PlanStatus::Confirmed).is_err());
     }
 }
