@@ -8,6 +8,7 @@ Webbasierter Update-Manager für Proxmox-LXC-Container.
 crates/
 ├── lxcup-core    Domain- und Geschäftslogik
 ├── lxcup-cli     optionale CLI-Oberfläche
+├── lxcup-discovery Discovery und Reconciliation von LXC-Containern
 ├── lxcup-observability gemeinsame Fehler-/Logging-Infrastruktur
 ├── lxcup-proxmox HTTPS-Transport für die Proxmox-REST-API
 ├── lxcup-server  Backend/API und spätere Webauslieferung

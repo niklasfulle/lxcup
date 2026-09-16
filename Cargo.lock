@@ -991,6 +991,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lxcup-discovery"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "lxcup-core",
+ "lxcup-persistence",
+ "lxcup-proxmox",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "lxcup-observability"
 version = "0.1.0"
 dependencies = [
