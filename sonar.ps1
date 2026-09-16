@@ -20,6 +20,13 @@ param(
 $ErrorActionPreference = "Stop"
 
 function Find-SonarScanner {
+    param([string]$Root)
+
+    $localScanner = Join-Path $Root "frontend\node_modules\.bin\sonar-scanner-npm.cmd"
+    if (Test-Path -LiteralPath $localScanner) {
+        return $localScanner
+    }
+
     $command = Get-Command sonar-scanner -ErrorAction SilentlyContinue
     if ($null -ne $command) {
         return $command.Source
@@ -39,7 +46,7 @@ function Find-SonarScanner {
         }
     }
 
-    throw "sonar-scanner wurde nicht gefunden. Installiere den SonarScanner CLI oder setze SONAR_SCANNER_HOME."
+    throw "Kein Sonar-Scanner gefunden. Installiere die Projektabhängigkeit mit 'cd frontend; npm install' oder den klassischen SonarScanner CLI und setze SONAR_SCANNER_HOME."
 }
 
 function Test-SonarHost {
@@ -88,8 +95,8 @@ function Invoke-Coverage {
     }
 }
 
-$scanner = Find-SonarScanner
 $root = $PSScriptRoot
+$scanner = Find-SonarScanner -Root $root
 $properties = Join-Path $root "sonar-project.properties"
 if (-not (Test-Path -LiteralPath $properties)) {
     throw "sonar-project.properties wurde im Projektroot nicht gefunden: $root"

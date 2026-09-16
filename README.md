@@ -133,19 +133,21 @@ Die lokale Qualitätsprüfung umfasst Rust und Frontend:
 .\scripts\verify.ps1
 ```
 
-Eine optionale SonarQube-Analyse wird lokal mit dem klassischen
-`sonar-scanner` gestartet. Das Skript erzeugt davor Rust- und Frontend-LCOV-
+Eine optionale SonarQube-Analyse wird lokal mit dem projektbezogenen
+`@sonar/scan`-Scanner gestartet. Das Skript erzeugt davor Rust- und Frontend-LCOV-
 Reports. Der Server muss aus der aktuellen Shell erreichbar sein; bei
 Docker-Netzwerken ist `sonarqube` als Hostname nur innerhalb dieses Netzwerks
 auflösbar:
 
 Voraussetzungen:
 
-- Der klassische SonarScanner CLI muss als `sonar-scanner` im `PATH` liegen
-  oder über `SONAR_SCANNER_HOME` gefunden werden. Das separate `sonar`-CLI ist
-  dafür nicht ausreichend.
+- Im Frontend müssen die Abhängigkeiten installiert sein (`npm ci`); darin ist
+  `@sonar/scan` als Dev-Dependency enthalten. Der klassische Scanner bleibt als
+  Fallback über `SONAR_SCANNER_HOME` möglich.
+- Für `@sonar/scan` v5 wird Node.js 22.12 oder neuer benötigt.
 - Für Rust-Coverage: `rustup component add llvm-tools-preview` und
-  `cargo install cargo-llvm-cov`.
+  `cargo install cargo-llvm-cov --version 0.6.21 --locked` für die festgelegte
+  Rust-Version 1.85.
 - Für Frontend-Coverage müssen die Frontend-Abhängigkeiten installiert sein.
 
 ```powershell
