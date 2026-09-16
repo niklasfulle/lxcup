@@ -6,6 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+axum.workspace = true
+chrono.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
+tower.workspace = true
 tracing.workspace = true
+lxcup-core = { path = "../lxcup-core" }
+lxcup-planner = { path = "../lxcup-planner" }
 lxcup-observability = { path = "../lxcup-observability" }
+serde.workspace = true
+uuid.workspace = true
