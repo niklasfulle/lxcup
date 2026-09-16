@@ -15,6 +15,9 @@ pub mod error {
         #[error("invalid domain state transition: {0}")]
         InvalidStateTransition(&'static str),
     }
+
+    /// Einheitlicher Result-Typ für Domainoperationen.
+    pub type DomainResult<T> = Result<T, DomainError>;
 }
 
 /// Version des Core-Crates.

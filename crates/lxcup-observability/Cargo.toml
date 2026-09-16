@@ -1,11 +1,10 @@
 [package]
-name = "lxcup-server"
+name = "lxcup-observability"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-tokio.workspace = true
 tracing.workspace = true
-lxcup-observability = { path = "../lxcup-observability" }
+tracing-subscriber.workspace = true
