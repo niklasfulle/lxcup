@@ -4,6 +4,43 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Import-DotEnv {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#")) {
+            continue
+        }
+
+        if ($trimmed.StartsWith("export ")) {
+            $trimmed = $trimmed.Substring(7).TrimStart()
+        }
+
+        if ($trimmed -notmatch "^(?<name>[A-Za-z_][A-Za-z0-9_]*)=(?<value>.*)$") {
+            continue
+        }
+
+        $name = $Matches.name
+        $value = $Matches.value.Trim()
+        if (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+            ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+
+        $existing = (Get-Item "Env:$name" -ErrorAction SilentlyContinue).Value
+        if ([string]::IsNullOrWhiteSpace($existing)) {
+            [Environment]::SetEnvironmentVariable($name, $value, "Process")
+        }
+    }
+}
+
+Import-DotEnv -Path (Join-Path $PSScriptRoot "..\.env")
+
 $required = @(
     "DATABASE_TEST_URL",
     "PROXMOX_TEST_BASE_URL",
