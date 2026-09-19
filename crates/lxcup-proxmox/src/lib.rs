@@ -25,6 +25,7 @@ pub struct ProxmoxClientConfig {
     token_id: String,
     token_secret: String,
     timeout: Duration,
+    root_certificate_pem: Option<Vec<u8>>,
 }
 
 impl ProxmoxClientConfig {
@@ -57,6 +58,7 @@ impl ProxmoxClientConfig {
             token_id,
             token_secret,
             timeout: Duration::from_secs(30),
+            root_certificate_pem: None,
         })
     }
 
@@ -64,6 +66,13 @@ impl ProxmoxClientConfig {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Adds a PEM-encoded CA certificate for private Proxmox installations.
+    #[must_use]
+    pub fn with_root_certificate_pem(mut self, certificate_pem: impl AsRef<[u8]>) -> Self {
+        self.root_certificate_pem = Some(certificate_pem.as_ref().to_vec());
         self
     }
 }
@@ -106,9 +115,15 @@ impl ProxmoxClient {
             .base_url
             .join(API_ROOT_PATH)
             .map_err(ProxmoxClientError::InvalidUrl)?;
-        let http = Client::builder()
+        let mut client_builder = Client::builder()
             .use_rustls_tls()
-            .timeout(config.timeout)
+            .timeout(config.timeout);
+        if let Some(certificate_pem) = config.root_certificate_pem.as_deref() {
+            let certificate = reqwest::Certificate::from_pem(certificate_pem)
+                .map_err(ProxmoxClientError::HttpClient)?;
+            client_builder = client_builder.add_root_certificate(certificate);
+        }
+        let http = client_builder
             .build()
             .map_err(ProxmoxClientError::HttpClient)?;
 
