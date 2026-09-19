@@ -71,7 +71,10 @@ if ($caContent -notmatch "BEGIN CERTIFICATE") {
     throw "Die heruntergeladene Datei ist keine gültige PEM-Zertifikatsdatei: $caPath"
 }
 
-$env:PROXMOX_TEST_BASE_URL = "https://$ProxmoxIp`:8006"
+# Der Node-Name bleibt der TLS-Hostname (Zertifikatsprüfung/SNI). Der
+# angegebene IP-Wert wird separat als TCP-Ziel verwendet.
+$env:PROXMOX_TEST_BASE_URL = "https://$nodeName`:8006"
+$env:PROXMOX_TEST_CONNECT_IP = $ProxmoxIp
 $env:PROXMOX_TEST_CA_CERT = $caPath
 $env:LXCUP_INTEGRATION_NODE = $nodeName
 $env:LXCUP_INTEGRATION_VMID = $vmid
