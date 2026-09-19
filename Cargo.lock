@@ -1197,6 +1197,7 @@ dependencies = [
  "lxcup-core",
  "lxcup-proxmox",
  "tokio",
+ "url",
 ]
 
 [[package]]

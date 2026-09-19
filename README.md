@@ -220,6 +220,10 @@ und lädt die übrigen Testwerte aus `.env`. Es verändert keine produktiven
 Container und erstellt keine neuen Proxmox-Berechtigungen. Für die Verbindung
 verwendet es den Windows-OpenSSH-Client; vorhandene SSH-Schlüssel werden
 genutzt, alternativ kann OpenSSH interaktiv nach dem Passwort fragen.
+Die angegebene IP wird für die TCP-Verbindung verwendet, während der
+Proxmox-Node-Name für TLS/SNI und die Zertifikatsprüfung genutzt wird. Dadurch
+funktioniert der Test auch, wenn die IP nicht im Proxmox-Zertifikat enthalten
+ist.
 
 Standardmäßig wird `root` verwendet. Falls der direkte Root-Login deaktiviert
 ist, kann ein anderer SSH-Benutzer angegeben werden:

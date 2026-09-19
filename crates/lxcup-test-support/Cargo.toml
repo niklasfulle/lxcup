@@ -10,3 +10,4 @@ chrono.workspace = true
 lxcup-core = { path = "../lxcup-core" }
 lxcup-proxmox = { path = "../lxcup-proxmox" }
 tokio.workspace = true
+url.workspace = true

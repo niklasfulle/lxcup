@@ -4,7 +4,7 @@
 //! module. They can build on [`ProxmoxClient::get_json`] without exposing API
 //! credentials to the domain or frontend layers.
 
-use std::{fmt, time::Duration};
+use std::{fmt, net::SocketAddr, time::Duration};
 
 use reqwest::{Client, StatusCode, header};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -26,6 +26,7 @@ pub struct ProxmoxClientConfig {
     token_secret: String,
     timeout: Duration,
     root_certificate_pem: Option<Vec<u8>>,
+    connect_override: Option<(String, SocketAddr)>,
 }
 
 impl ProxmoxClientConfig {
@@ -59,6 +60,7 @@ impl ProxmoxClientConfig {
             token_secret,
             timeout: Duration::from_secs(30),
             root_certificate_pem: None,
+            connect_override: None,
         })
     }
 
@@ -73,6 +75,18 @@ impl ProxmoxClientConfig {
     #[must_use]
     pub fn with_root_certificate_pem(mut self, certificate_pem: impl AsRef<[u8]>) -> Self {
         self.root_certificate_pem = Some(certificate_pem.as_ref().to_vec());
+        self
+    }
+
+    /// Routes a TLS hostname to a fixed socket address without changing the
+    /// hostname used for certificate validation and SNI.
+    #[must_use]
+    pub fn with_connect_override(
+        mut self,
+        hostname: impl Into<String>,
+        address: SocketAddr,
+    ) -> Self {
+        self.connect_override = Some((hostname.into(), address));
         self
     }
 }
@@ -115,13 +129,14 @@ impl ProxmoxClient {
             .base_url
             .join(API_ROOT_PATH)
             .map_err(ProxmoxClientError::InvalidUrl)?;
-        let mut client_builder = Client::builder()
-            .use_rustls_tls()
-            .timeout(config.timeout);
+        let mut client_builder = Client::builder().use_rustls_tls().timeout(config.timeout);
         if let Some(certificate_pem) = config.root_certificate_pem.as_deref() {
             let certificate = reqwest::Certificate::from_pem(certificate_pem)
                 .map_err(ProxmoxClientError::HttpClient)?;
             client_builder = client_builder.add_root_certificate(certificate);
+        }
+        if let Some((hostname, address)) = config.connect_override {
+            client_builder = client_builder.resolve(&hostname, address);
         }
         let http = client_builder
             .build()
@@ -331,6 +346,15 @@ mod tests {
             ProxmoxClientConfig::new("https://pve.example:8006", "user!token", "unit-test-token")
                 .unwrap();
         assert!(!format!("{config:?}").contains("unit-test-token"));
+    }
+
+    #[test]
+    fn connect_override_builds_a_client_without_disabling_tls_validation() {
+        let config = ProxmoxClientConfig::new("https://pve:8006", "user!token", "unit-test-token")
+            .unwrap()
+            .with_connect_override("pve", "192.168.1.150:8006".parse().unwrap());
+
+        ProxmoxClient::new(config).expect("connect override is a valid client configuration");
     }
 
     #[tokio::test]
