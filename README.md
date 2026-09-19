@@ -217,7 +217,18 @@ Proxmox-IP gestartet werden. Der dedizierte LXC muss dafür `lxcup-test` heißen
 
 Das Skript findet Node und VMID, kopiert die Proxmox-CA nach `%LOCALAPPDATA%\lxcup`
 und lädt die übrigen Testwerte aus `.env`. Es verändert keine produktiven
-Container und erstellt keine neuen Proxmox-Berechtigungen.
+Container und erstellt keine neuen Proxmox-Berechtigungen. Für die Verbindung
+verwendet es den Windows-OpenSSH-Client; vorhandene SSH-Schlüssel werden
+genutzt, alternativ kann OpenSSH interaktiv nach dem Passwort fragen.
+
+Standardmäßig wird `root` verwendet. Falls der direkte Root-Login deaktiviert
+ist, kann ein anderer SSH-Benutzer angegeben werden:
+
+```powershell
+.\scripts\bootstrap-test-lxc.ps1 -ProxmoxIp "192.168.1.150" -SshUser "admin"
+```
+
+Der Benutzer muss `pvesh` ausführen und `/etc/pve/pve-root-ca.pem` lesen dürfen.
 
 ## Entwicklungsprinzip
 
