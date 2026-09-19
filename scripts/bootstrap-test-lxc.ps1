@@ -28,7 +28,9 @@ $sshTarget = "$SshUser@$ProxmoxIp"
 function Invoke-Remote {
     param([string]$Command)
 
-    $output = & ssh -o BatchMode=yes -o ConnectTimeout=10 $sshTarget $Command 2>&1
+    # BatchMode verhindert die Passwortabfrage. Schlüssel- und interaktive
+    # Passwort-Authentifizierung sollen beide möglich sein.
+    $output = & ssh -o ConnectTimeout=10 $sshTarget $Command 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "SSH-Befehl fehlgeschlagen: $Command`n$($output -join [Environment]::NewLine)"
     }
@@ -59,7 +61,7 @@ $localConfigDirectory = Join-Path $env:LOCALAPPDATA "lxcup"
 New-Item -ItemType Directory -Force -Path $localConfigDirectory | Out-Null
 $caPath = Join-Path $localConfigDirectory "proxmox-test-ca.pem"
 
-& scp -q "${sshTarget}:/etc/pve/pve-root-ca.pem" $caPath
+& scp -q -o ConnectTimeout=10 "${sshTarget}:/etc/pve/pve-root-ca.pem" $caPath
 if ($LASTEXITCODE -ne 0) {
     throw "Die Proxmox-CA konnte nicht per SSH nach '$caPath' kopiert werden."
 }
