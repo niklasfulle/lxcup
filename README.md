@@ -197,13 +197,16 @@ $env:DATABASE_TEST_URL = "postgres://lxcup_test:<password>@localhost:5434/lxcup_
 $env:PROXMOX_TEST_BASE_URL = "https://pve-test:8006"
 $env:PROXMOX_TEST_TOKEN_ID = "<test-token-id>"
 $env:PROXMOX_TEST_TOKEN_SECRET = "<test-token-secret>"
+$env:PROXMOX_TEST_CA_CERT = "C:\\secrets\\pve-root-ca.pem"
 $env:LXCUP_INTEGRATION_NODE = "pve-test"
 $env:LXCUP_INTEGRATION_VMID = "101"
 .\scripts\run-integration-tests.ps1
 ```
 
 Der Test wird nicht automatisch ausgeführt und verwendet keine produktiven
-Credentials oder produktiven Zielcontainer.
+Credentials oder produktiven Zielcontainer. `PROXMOX_TEST_CA_CERT` verweist auf
+die PEM-Datei der privaten Proxmox-CA; dadurch bleibt die TLS-Prüfung aktiv,
+statt Zertifikate pauschal zu akzeptieren.
 
 ## Entwicklungsprinzip
 
