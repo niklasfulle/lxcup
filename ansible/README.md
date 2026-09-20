@@ -21,3 +21,9 @@ aktualisiert den systemd-Service und prüft `/health`.
 
 Die Syntaxprüfung benötigt `ansible-playbook` und verbindet sich nicht mit
 einem Zielsystem.
+
+Das Paketupdate-Playbook akzeptiert nur die vom Backend übergebene, gehashte
+Planliste. Held Packages, Distribution-Upgrades, Shell-Kommandos und freie
+Paketnamen werden vor APT abgewiesen. Im Apply-Modus werden Snapshot und
+Bestätigung vorausgesetzt; das Ergebnis enthält Planhash, Änderung und
+Reboot-Anforderung.

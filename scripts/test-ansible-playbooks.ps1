@@ -16,7 +16,8 @@ if (-not (Get-Command $AnsiblePlaybook -ErrorAction SilentlyContinue)) {
 $playbooks = @(
     "ansible/playbooks/agent-linux.yml",
     "ansible/playbooks/agent-linux-repair.yml",
-    "ansible/playbooks/agent-linux-rollback.yml"
+    "ansible/playbooks/agent-linux-rollback.yml",
+    "ansible/playbooks/packages-linux.yml"
 )
 
 foreach ($playbook in $playbooks) {

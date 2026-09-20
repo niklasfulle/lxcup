@@ -1,0 +1,7 @@
+---
+- name: Apply a validated Linux package update plan
+  hosts: lxcup_targets
+  become: true
+  gather_facts: true
+  roles:
+    - role: lxcup_packages_linux
