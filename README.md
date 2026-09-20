@@ -102,8 +102,42 @@ docker compose up -d postgres-test
 docker compose ps
 ```
 
+## Development-Stack mit Docker Compose
+
+Für die tägliche lokale Entwicklung können PostgreSQL, Backend und
+React/Vite-Frontend gemeinsam gestartet werden:
+
+```powershell
+docker compose up -d --build postgres lxcup-server frontend
+docker compose ps
+```
+
+Danach ist die Weboberfläche unter
+[`http://127.0.0.1:5173`](http://127.0.0.1:5173) erreichbar. Vite leitet
+`/api` intern an den Compose-Dienst `lxcup-server` weiter. Das Backend ist
+zusätzlich direkt unter `http://127.0.0.1:8080` erreichbar und verwendet im
+Container PostgreSQL über `postgres:5432`.
+
+Logs können dienstweise verfolgt werden:
+
+```powershell
+docker compose logs -f lxcup-server frontend
+```
+
+Zum Stoppen ohne Datenverlust:
+
+```powershell
+docker compose down
+```
+
+Das Development-PostgreSQL-Volume wird als `lxcup-postgres-dev-v2` geführt,
+damit ein älteres lokales Volume mit abweichenden SQLx-Migrationsprüfsummen
+nicht automatisch überschrieben wird. Das alte Volume bleibt erhalten.
+
 Die Migrationen werden beim Ausführen des PostgreSQL-Integrationstests durch
-die Anwendung angewendet. Dazu die Werte aus `.env` als Test-URL setzen:
+die Anwendung angewendet. Beim Start des Compose-Backends werden die
+Migrationen ebenfalls automatisch ausgeführt. Für den separaten
+PostgreSQL-Integrationstest die Werte aus `.env` als Test-URL setzen:
 
 ```powershell
 $env:DATABASE_TEST_URL = "postgres://lxcup_dev:<password>@localhost:5433/lxcup_dev"

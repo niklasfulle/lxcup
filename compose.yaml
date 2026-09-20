@@ -16,6 +16,42 @@ services:
       retries: 10
     mem_limit: 1g
 
+  lxcup-server:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://${LXCUP_POSTGRES_USER}:${LXCUP_POSTGRES_PASSWORD}@postgres:5432/${LXCUP_POSTGRES_DB}
+      LXCUP_BIND_ADDRESS: 0.0.0.0:8080
+      LXCUP_DEV_SEED: ${LXCUP_DEV_SEED:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider --quiet http://127.0.0.1:8080/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      VITE_API_PROXY_TARGET: http://lxcup-server:8080
+    depends_on:
+      lxcup-server:
+        condition: service_started
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - lxcup-frontend-node-modules:/app/node_modules
+
   postgres-test:
     image: postgres:17-alpine
     environment:
@@ -35,4 +71,6 @@ services:
 
 volumes:
   lxcup-postgres-dev:
+    name: lxcup-postgres-dev-v2
   lxcup-postgres-test:
+  lxcup-frontend-node-modules:
