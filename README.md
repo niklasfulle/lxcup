@@ -192,6 +192,10 @@ kompatibel.
 Ein opt-in Integrationstest gegen einen ausdrücklich dedizierten Test-LXC wird
 so gestartet:
 
+Die vollständige Schritt-für-Schritt-Anleitung für Compose, `.env`, Proxmox-
+Token/ACL, SSH-Bootstrap, TLS/CA und die nächsten Agententests steht in
+[`docs/TEST-LXC-SETUP.md`](docs/TEST-LXC-SETUP.md).
+
 ```powershell
 $env:DATABASE_TEST_URL = "postgres://lxcup_test:<password>@localhost:5434/lxcup_test"
 $env:PROXMOX_TEST_BASE_URL = "https://pve-test:8006"
