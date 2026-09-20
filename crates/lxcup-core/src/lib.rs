@@ -16,7 +16,9 @@ pub mod scan;
 pub mod secret;
 pub mod update;
 
-pub use container::{Container, ContainerManagementState, ContainerStatus, OperatingSystem};
+pub use container::{
+    Container, ContainerAction, ContainerManagementState, ContainerStatus, OperatingSystem,
+};
 pub use enrollment::{Enrollment, EnrollmentState};
 pub use environment::{EnvironmentStatus, ProxmoxEnvironment};
 pub use error::{

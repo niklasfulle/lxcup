@@ -23,6 +23,40 @@ pub enum ContainerManagementState {
     Disabled,
 }
 
+/// Sichere, fest definierte Aktionen für den Lebenszyklus eines LXCs.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerAction {
+    Start,
+    Stop,
+    Shutdown,
+    Reboot,
+    Refresh,
+    Clone,
+    Backup,
+    Restore,
+    Delete,
+}
+
+impl ContainerAction {
+    pub const fn requires_confirmation(self) -> bool {
+        matches!(
+            self,
+            Self::Clone | Self::Backup | Self::Restore | Self::Delete
+        )
+    }
+
+    pub const fn is_supported_for(self, status: ContainerStatus) -> bool {
+        match self {
+            Self::Start => matches!(status, ContainerStatus::Stopped),
+            Self::Stop | Self::Shutdown => matches!(status, ContainerStatus::Running),
+            Self::Reboot => matches!(status, ContainerStatus::Running),
+            Self::Refresh => true,
+            Self::Clone | Self::Backup | Self::Restore | Self::Delete => true,
+        }
+    }
+}
+
 impl ContainerManagementState {
     /// Prüft, ob ein Verwaltungszustand direkt erreicht werden darf.
     pub const fn can_transition_to(self, next: Self) -> bool {
@@ -95,11 +129,43 @@ impl Container {
         self.management_state = next;
         Ok(())
     }
+
+    /// Validiert eine Aktion, bevor ein Adapter oder Worker angesprochen wird.
+    pub fn validate_action(
+        &self,
+        action: ContainerAction,
+        confirmed: bool,
+        idempotency_key: &str,
+    ) -> DomainResult<()> {
+        if self.management_state == ContainerManagementState::Disabled
+            && !matches!(action, ContainerAction::Refresh)
+        {
+            return Err(DomainError::InvalidStateTransition(
+                "disabled container cannot run lifecycle actions",
+            ));
+        }
+        if !action.is_supported_for(self.status) {
+            return Err(DomainError::InvalidStateTransition(
+                "container status does not support this action",
+            ));
+        }
+        if action.requires_confirmation() && !confirmed {
+            return Err(DomainError::ConfirmationRequired);
+        }
+        if idempotency_key.trim().is_empty() {
+            return Err(DomainError::EmptyValue {
+                field: "idempotency key",
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Container, ContainerManagementState, ContainerStatus, OperatingSystem};
+    use super::{
+        Container, ContainerAction, ContainerManagementState, ContainerStatus, OperatingSystem,
+    };
     use crate::{ContainerId, NodeId};
 
     fn container() -> Container {
@@ -140,6 +206,36 @@ mod tests {
         assert!(
             container
                 .transition_management_to(ContainerManagementState::Ignored)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn lifecycle_actions_fail_closed_on_status_and_confirmation() {
+        let mut container = container();
+        assert!(
+            container
+                .validate_action(ContainerAction::Start, false, "start-1")
+                .is_err()
+        );
+        assert!(
+            container
+                .validate_action(ContainerAction::Shutdown, false, "shutdown-1")
+                .is_ok()
+        );
+        assert_eq!(
+            container.validate_action(ContainerAction::Delete, false, "delete-1"),
+            Err(crate::DomainError::ConfirmationRequired)
+        );
+        container.management_state = ContainerManagementState::Disabled;
+        assert!(
+            container
+                .validate_action(ContainerAction::Refresh, false, "refresh-1")
+                .is_ok()
+        );
+        assert!(
+            container
+                .validate_action(ContainerAction::Reboot, true, "reboot-1")
                 .is_err()
         );
     }

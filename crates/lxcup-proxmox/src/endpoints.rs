@@ -35,6 +35,57 @@ impl ProxmoxClient {
             .await
     }
 
+    /// Starts an LXC and returns Proxmox's asynchronous task id.
+    pub async fn start_lxc(
+        &self,
+        node_name: &str,
+        vmid: u64,
+    ) -> Result<ProxmoxTaskStart, ProxmoxClientError> {
+        self.lxc_action(node_name, vmid, "start").await
+    }
+
+    /// Stops an LXC immediately and returns Proxmox's asynchronous task id.
+    pub async fn stop_lxc(
+        &self,
+        node_name: &str,
+        vmid: u64,
+    ) -> Result<ProxmoxTaskStart, ProxmoxClientError> {
+        self.lxc_action(node_name, vmid, "stop").await
+    }
+
+    /// Requests a graceful LXC shutdown.
+    pub async fn shutdown_lxc(
+        &self,
+        node_name: &str,
+        vmid: u64,
+    ) -> Result<ProxmoxTaskStart, ProxmoxClientError> {
+        self.lxc_action(node_name, vmid, "shutdown").await
+    }
+
+    /// Reboots a running LXC.
+    pub async fn reboot_lxc(
+        &self,
+        node_name: &str,
+        vmid: u64,
+    ) -> Result<ProxmoxTaskStart, ProxmoxClientError> {
+        self.lxc_action(node_name, vmid, "reboot").await
+    }
+
+    async fn lxc_action(
+        &self,
+        node_name: &str,
+        vmid: u64,
+        action: &str,
+    ) -> Result<ProxmoxTaskStart, ProxmoxClientError> {
+        validate_lxc_path(node_name, vmid)?;
+        let body = serde_json::json!({});
+        self.post_json(
+            &format!("/nodes/{node_name}/lxc/{vmid}/status/{action}"),
+            &body,
+        )
+        .await
+    }
+
     pub async fn get_task_status(
         &self,
         node_name: &str,
