@@ -19,4 +19,14 @@ nav { display: grid; gap: .35rem; }
 .table-wrap { overflow-x: auto; }.table-filter { display: flex; align-items: center; gap: .65rem; margin-bottom: 1rem; color: #8ea4b9; }.table-filter input { width: min(20rem, 100%); padding: .55rem .7rem; border: 1px solid #39516a; border-radius: .45rem; color: #fff; background: #0b1624; }table { width: 100%; border-collapse: collapse; }th, td { padding: .8rem .65rem; border-bottom: 1px solid #25364a; text-align: left; white-space: nowrap; }th { color: #8ea4b9; font-size: .8rem; text-transform: uppercase; }.sort-button { border: 0; color: inherit; background: transparent; cursor: pointer; font-weight: 700; }
 .empty-state { padding: 2rem 0; color: #8ea4b9; }.error-state { color: #ff9e9e; }
 .api-alert { margin-bottom: 1rem; padding: .8rem 1rem; border: 1px solid #9e5d5d; border-radius: .55rem; color: #ffd0d0; background: #4a202055; }
+.workflow-panel form { display: grid; gap: 1.2rem; max-width: 900px; }
+.workflow-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+.workflow-grid label, .workflow-field { display: grid; gap: .45rem; color: #a8bbcd; font-size: .85rem; }
+.workflow-grid select, .workflow-field input { width: 100%; padding: .7rem .75rem; border: 1px solid #39516a; border-radius: .45rem; color: #fff; background: #0b1624; }
+.workflow-field { max-width: 30rem; }
+.workflow-summary { display: flex; flex-wrap: wrap; gap: 1rem; padding: .85rem 1rem; border-left: 3px solid #79d8c7; color: #a8bbcd; background: #0b1624; }
+.confirm-field { display: flex; gap: .6rem; align-items: center; color: #dce7f2; }
+.primary-button { width: fit-content; padding: .7rem 1rem; border: 0; border-radius: .45rem; color: #07131e; background: #79d8c7; cursor: pointer; font-weight: 700; }
+.primary-button:disabled { cursor: not-allowed; opacity: .45; }
+.success-state { color: #8be6ae; }
 @media (max-width: 700px) { .app-shell { display: block; }.sidebar { position: static; border-right: 0; border-bottom: 1px solid #25364a; padding: 1rem; }.brand-caption { margin-bottom: .75rem; }.connection-indicator { margin-top: 1rem; }.main-content { padding-top: 2rem; }.summary-grid, .panel-grid { grid-template-columns: 1fr; } }

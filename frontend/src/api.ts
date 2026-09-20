@@ -54,6 +54,30 @@ export type ExecutionSafetyDto = {
   automatic_rollback: boolean;
 };
 
+export type AnsibleOperation = "deploy_agent" | "update_agent" | "repair_agent" | "update_packages" | "configure_target" | "health_check";
+export type AnsibleExecutionMode = "check" | "plan" | "apply" | "reconcile";
+export type AnsibleJobDto = {
+  id: string;
+  operation: AnsibleOperation;
+  playbook: string;
+  playbook_version: string;
+  target: { container: number } | { node: string };
+  mode: AnsibleExecutionMode;
+  status: string;
+  parameter_hash: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CreateAnsibleJobRequest = {
+  operation: AnsibleOperation;
+  container_id: number;
+  mode: AnsibleExecutionMode;
+  parameters: Record<string, unknown>;
+  idempotency_key: string;
+  confirmed: boolean;
+};
+
 export type ApiErrorBody = {
   error?: { code: string; message: string };
   request_id?: string;
@@ -144,7 +168,11 @@ export class ApiClient {
 }
 
 function delay(attempt: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, 150 * 2 ** attempt));
+  return new Promise((resolve) => globalThis.setTimeout(resolve, 150 * 2 ** attempt));
 }
 
 export const apiClient = new ApiClient();
+
+export function createAnsibleJob(request: CreateAnsibleJobRequest, signal?: AbortSignal) {
+  return apiClient.post<AnsibleJobDto>("/api/v1/ansible/jobs", request, signal);
+}

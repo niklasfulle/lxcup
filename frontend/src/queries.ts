@@ -6,6 +6,7 @@ export const queryKeys = {
   containers: ["containers"] as const,
   nodeContainers: (nodeId: string) => ["nodes", nodeId, "containers"] as const,
   executionSafety: (executionId: string) => ["executions", executionId, "safety"] as const,
+  ansibleJobs: ["ansible-jobs"] as const,
 };
 
 export function useNodes() {

@@ -12,7 +12,7 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Json as JsonBody, Path, State},
+    extract::{Extension, Json as JsonBody, Path, State},
     http::{HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{
@@ -24,9 +24,14 @@ use axum::{
 use lxcup_agent::{
     AgentAction, AgentClient, AgentClientConfig, AgentCommandRequest, AgentHealth, AgentMetrics,
 };
+use lxcup_ansible::{
+    AnsibleJob, AnsibleJobCoordinator, AnsibleJobRequest, AnsibleJobStatus, AnsibleOperation,
+    AnsibleParameters, ExecutionMode, JobSubmission,
+};
 use lxcup_core::{
-    Container, ContainerId, Enrollment, EnrollmentId, EnrollmentState, Execution, ExecutionId,
-    Node, NodeId, PlanStatus, Scan, ScanId, UpdatePlan, UpdatePlanId,
+    ActorRole, Container, ContainerId, ContainerManagementState, Enrollment, EnrollmentId,
+    EnrollmentState, Execution, ExecutionId, Node, NodeId, PlanStatus, ResourceLifecycle,
+    ResourceTarget, Scan, ScanId, SecretId, UpdatePlan, UpdatePlanId,
 };
 use lxcup_execution::{ExecutionCoordinator, ExecutionRequest, ExecutionStart};
 use lxcup_persistence::Repositories;
@@ -46,6 +51,7 @@ pub struct ApiState {
     metrics: Arc<ApiMetrics>,
     auth: AuthConfig,
     repositories: Option<Repositories>,
+    ansible: Arc<RwLock<AnsibleJobCoordinator>>,
 }
 
 impl ApiState {
@@ -59,6 +65,7 @@ impl ApiState {
             metrics: Arc::new(ApiMetrics::default()),
             auth: AuthConfig::from_env(),
             repositories: None,
+            ansible: Arc::new(RwLock::new(AnsibleJobCoordinator::default())),
         }
     }
 
@@ -158,6 +165,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/nodes", get(list_nodes))
         .route("/api/v1/enrollments", post(create_enrollment))
         .route("/api/v1/enrollments/{enrollment_id}", get(get_enrollment))
+        .route("/api/v1/ansible/jobs", post(create_ansible_job))
+        .route("/api/v1/ansible/jobs/{job_id}", get(get_ansible_job))
         .route(
             "/api/v1/nodes/{node_id}/containers",
             get(list_node_containers),
@@ -262,6 +271,14 @@ impl ApiError {
             status: StatusCode::UNAUTHORIZED,
             code: "unauthorized",
             message: "authentication is required",
+        }
+    }
+
+    fn forbidden(code: &'static str, message: &'static str) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code,
+            message,
         }
     }
 
@@ -388,6 +405,189 @@ async fn get_enrollment(
         .find(|enrollment| enrollment.id == enrollment_id)
         .ok_or_else(|| ApiError::not_found("enrollment not found"))?;
     Ok(Json(envelope(EnrollmentDto::from(enrollment))))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateAnsibleJobRequest {
+    pub operation: AnsibleOperation,
+    pub container_id: u64,
+    pub mode: ExecutionMode,
+    pub parameters: AnsibleParameters,
+    pub idempotency_key: String,
+    pub confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AnsibleJobDto {
+    pub id: lxcup_core::AnsibleJobId,
+    pub operation: AnsibleOperation,
+    pub playbook: String,
+    pub playbook_version: String,
+    pub target: ResourceTarget,
+    pub mode: ExecutionMode,
+    pub status: AnsibleJobStatus,
+    pub parameter_hash: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<&AnsibleJob> for AnsibleJobDto {
+    fn from(job: &AnsibleJob) -> Self {
+        Self {
+            id: job.id,
+            operation: job.operation,
+            playbook: job.playbook.clone(),
+            playbook_version: job.playbook_version.clone(),
+            target: job.target,
+            mode: job.mode,
+            status: job.status,
+            parameter_hash: job.parameter_hash.clone(),
+            created_at: job.created_at,
+            updated_at: job.updated_at,
+        }
+    }
+}
+
+async fn create_ansible_job(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    JsonBody(request): JsonBody<CreateAnsibleJobRequest>,
+) -> Result<(StatusCode, Json<ApiEnvelope<AnsibleJobDto>>), ApiError> {
+    if request.container_id == 0 {
+        return Err(ApiError::bad_request(
+            "invalid_container_id",
+            "container id must be greater than zero",
+        ));
+    }
+    let container_id = ContainerId::new(request.container_id);
+    let lifecycle = state
+        .store
+        .read()
+        .await
+        .containers
+        .iter()
+        .find(|container| container.id == container_id)
+        .map(|container| match container.management_state {
+            ContainerManagementState::Discovered => ResourceLifecycle::Discovered,
+            ContainerManagementState::Managed => ResourceLifecycle::Managed,
+            ContainerManagementState::Ignored | ContainerManagementState::Disabled => {
+                ResourceLifecycle::Disabled
+            }
+        })
+        .ok_or_else(|| ApiError::not_found("container not found"))?;
+
+    let secret_refs = if request.operation == AnsibleOperation::HealthCheck {
+        Vec::new()
+    } else {
+        configured_ansible_secret_refs()?
+    };
+    let job_request = AnsibleJobRequest {
+        operation: request.operation,
+        target: ResourceTarget::Container(container_id),
+        lifecycle,
+        mode: request.mode,
+        parameters: request.parameters,
+        secret_refs,
+        idempotency_key: request.idempotency_key,
+        confirmed: request.confirmed,
+        actor_role,
+    };
+    let submission = state
+        .ansible
+        .write()
+        .await
+        .submit(job_request)
+        .map_err(map_ansible_error)?;
+    let (status, job) = match submission {
+        JobSubmission::Created(job) => (StatusCode::ACCEPTED, job),
+        JobSubmission::Duplicate(job) => (StatusCode::OK, job),
+    };
+    let dto = AnsibleJobDto::from(&job);
+    state.publish(ApiEvent::status(
+        "ansible_job",
+        dto.id.as_uuid().to_string(),
+        "queued",
+    ));
+    Ok((status, Json(envelope(dto))))
+}
+
+async fn get_ansible_job(
+    State(state): State<ApiState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<ApiEnvelope<AnsibleJobDto>>, ApiError> {
+    let id = lxcup_core::AnsibleJobId::from_uuid(parse_uuid(&job_id, "ansible job id")?);
+    let job = state
+        .ansible
+        .read()
+        .await
+        .job(id)
+        .map_err(map_ansible_error)?;
+    Ok(Json(envelope(AnsibleJobDto::from(&job))))
+}
+
+fn configured_ansible_secret_refs() -> Result<Vec<SecretId>, ApiError> {
+    let raw = std::env::var("LXCUP_ANSIBLE_SECRET_IDS").map_err(|_| {
+        ApiError::dependency(
+            "secret_reference_missing",
+            "no Ansible credential is configured",
+        )
+    })?;
+    let refs = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            Uuid::parse_str(value)
+                .map(SecretId::from_uuid)
+                .map_err(|_| {
+                    ApiError::bad_request("invalid_secret_reference", "secret reference is invalid")
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if refs.is_empty() {
+        return Err(ApiError::dependency(
+            "secret_reference_missing",
+            "no Ansible credential is configured",
+        ));
+    }
+    Ok(refs)
+}
+
+fn map_ansible_error(error: lxcup_ansible::CoordinatorError) -> ApiError {
+    match error {
+        lxcup_ansible::CoordinatorError::TargetBusy => ApiError::conflict(
+            "ansible_target_busy",
+            "another job is active for this target",
+        ),
+        lxcup_ansible::CoordinatorError::NotFound => ApiError::not_found("ansible job not found"),
+        lxcup_ansible::CoordinatorError::RetryNotAllowed
+        | lxcup_ansible::CoordinatorError::InvalidTransition
+        | lxcup_ansible::CoordinatorError::Terminal => {
+            ApiError::bad_request("ansible_job_invalid", "the Ansible job state is invalid")
+        }
+        lxcup_ansible::CoordinatorError::Contract(error) => match error {
+            lxcup_ansible::AnsibleContractError::PermissionDenied => ApiError::forbidden(
+                "ansible_permission_denied",
+                "the role cannot run this operation",
+            ),
+            lxcup_ansible::AnsibleContractError::ConfirmationRequired => ApiError::bad_request(
+                "ansible_confirmation_required",
+                "the operation requires explicit confirmation",
+            ),
+            lxcup_ansible::AnsibleContractError::MissingSecretReference => ApiError::dependency(
+                "secret_reference_missing",
+                "the operation has no configured credential reference",
+            ),
+            lxcup_ansible::AnsibleContractError::UnsupportedTarget => ApiError::bad_request(
+                "ansible_target_invalid",
+                "the operation is not supported for this target",
+            ),
+            lxcup_ansible::AnsibleContractError::Invalid
+            | lxcup_ansible::AnsibleContractError::InvalidTransition => {
+                ApiError::bad_request("ansible_request_invalid", "the Ansible request is invalid")
+            }
+        },
+    }
 }
 
 async fn list_node_containers(
@@ -529,19 +729,33 @@ impl AuthConfig {
         if !self.required {
             return true;
         }
+        self.role(headers).is_some_and(|role| {
+            role == lxcup_core::ActorRole::Admin
+                || role == lxcup_core::ActorRole::Operator
+                || (method == Method::GET && role == lxcup_core::ActorRole::Viewer)
+        })
+    }
+
+    fn role(&self, headers: &HeaderMap) -> Option<ActorRole> {
+        if !self.required {
+            return Some(ActorRole::Admin);
+        }
         let Some(token) = headers
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
         else {
-            return false;
+            return None;
         };
-        if self.admin_token.as_deref() == Some(token)
-            || self.operator_token.as_deref() == Some(token)
-        {
-            return true;
+        if self.admin_token.as_deref() == Some(token) {
+            Some(ActorRole::Admin)
+        } else if self.operator_token.as_deref() == Some(token) {
+            Some(ActorRole::Operator)
+        } else if self.viewer_token.as_deref() == Some(token) {
+            Some(ActorRole::Viewer)
+        } else {
+            None
         }
-        method == Method::GET && self.viewer_token.as_deref() == Some(token)
     }
 }
 
@@ -581,13 +795,16 @@ impl ApiMetrics {
 
 async fn request_middleware(
     State(state): State<ApiState>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_owned();
     let public = path == "/health/live" || path == "/health/ready" || path == "/metrics";
     if !public && !state.auth.allows(request.method(), request.headers()) {
         return ApiError::unauthorized().into_response();
+    }
+    if let Some(role) = state.auth.role(request.headers()) {
+        request.extensions_mut().insert(role);
     }
     state.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
     let response = next.run(request).await;
@@ -1235,6 +1452,8 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/api/v1/nodes": {"get": {"responses": {"200": {"description": "Nodes"}}}},
     "/api/v1/enrollments": {"post": {"responses": {"202": {"description": "Enrollment accepted"}}}},
     "/api/v1/enrollments/{enrollment_id}": {"get": {"responses": {"200": {"description": "Enrollment status"}}}},
+    "/api/v1/ansible/jobs": {"post": {"responses": {"202": {"description": "Ansible job accepted"}}}},
+    "/api/v1/ansible/jobs/{job_id}": {"get": {"responses": {"200": {"description": "Ansible job status"}}}},
     "/api/v1/containers": {"get": {"responses": {"200": {"description": "Containers"}}}},
     "/api/v1/containers/{container_id}/scans": {"get": {}, "post": {}},
     "/api/v1/scans/{scan_id}/run": {"post": {}},
@@ -1634,6 +1853,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn ansible_job_endpoint_accepts_healthcheck_and_is_idempotent() {
+        let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+        let container = Container::new(
+            ContainerId::new(101),
+            NodeId::new(),
+            "test-lxc",
+            lxcup_core::OperatingSystem::Debian,
+            lxcup_core::ContainerStatus::Running,
+        )
+        .unwrap();
+        state.replace_containers(vec![container]).await;
+        let request = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/ansible/jobs")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "operation": "health_check",
+                        "container_id": 101,
+                        "mode": "check",
+                        "parameters": {"operation": "health_check"},
+                        "idempotency_key": "health-1",
+                        "confirmed": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        let first = router(state.clone()).oneshot(request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+        let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+        let job_id = first_json["data"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(first_json["data"]["status"], "queued");
+
+        let duplicate = router(state.clone()).oneshot(request()).await.unwrap();
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        let duplicate_body = axum::body::to_bytes(duplicate.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let duplicate_json: serde_json::Value = serde_json::from_slice(&duplicate_body).unwrap();
+        assert_eq!(duplicate_json["data"]["id"], job_id);
+
+        let status = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/ansible/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
     }
 
     #[tokio::test]

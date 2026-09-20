@@ -7,6 +7,7 @@ import { DataTable } from "./components/DataTable";
 import { Dashboard } from "./pages/Dashboard";
 import { NodesPage } from "./pages/NodesPage";
 import { ContainersPage } from "./pages/ContainersPage";
+import { WorkflowsPage } from "./pages/WorkflowsPage";
 
 export default function App() {
   const queryClient = useQueryClient();
@@ -19,7 +20,8 @@ export default function App() {
         setConnectionState("verbunden");
         if (event.type === "Error") setStreamError(event.payload.message);
         if (event.type === "Status") {
-          void queryClient.invalidateQueries({ queryKey: event.payload.resource === "node" ? queryKeys.nodes : queryKeys.containers });
+          const queryKey = event.payload.resource === "node" ? queryKeys.nodes : event.payload.resource === "ansible_job" ? queryKeys.ansibleJobs : queryKeys.containers;
+          void queryClient.invalidateQueries({ queryKey });
         }
       },
       () => { setConnectionState("wiederverbinden"); setStreamError("Echtzeitverbindung unterbrochen. Der Browser versucht die Verbindung erneut."); },
@@ -35,6 +37,7 @@ export default function App() {
           <NavLink className="nav-link" to="/">Übersicht</NavLink>
           <NavLink className="nav-link" to="/nodes">Nodes</NavLink>
           <NavLink className="nav-link" to="/containers">Container</NavLink>
+          <NavLink className="nav-link" to="/workflows">Automatisierung</NavLink>
         </nav>
         <div className="connection-indicator" aria-live="polite">
           <span className={connectionState === "verbunden" ? "status-dot ok" : "status-dot warn"} />
@@ -47,6 +50,7 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/nodes" element={<NodesPage />} />
           <Route path="/containers" element={<ContainersPage />} />
+          <Route path="/workflows" element={<WorkflowsPage />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>

@@ -1221,6 +1221,7 @@ dependencies = [
  "axum",
  "chrono",
  "lxcup-agent",
+ "lxcup-ansible",
  "lxcup-apt",
  "lxcup-core",
  "lxcup-execution",

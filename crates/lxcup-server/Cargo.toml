@@ -9,6 +9,7 @@ license.workspace = true
 axum.workspace = true
 chrono.workspace = true
 lxcup-agent = { path = "../lxcup-agent" }
+lxcup-ansible = { path = "../lxcup-ansible" }
 lxcup-apt = { path = "../lxcup-apt" }
 tokio.workspace = true
 tokio-stream.workspace = true

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiClient, ApiError } from "./api";
+import { buildWorkflowRequest } from "./pages/WorkflowsPage";
 
 describe("ApiClient", () => {
   it("unwraps a versioned API envelope", async () => {
@@ -25,5 +26,18 @@ describe("ApiClient", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not-json", { status: 200 })));
 
     await expect(new ApiClient().get("/api/v1/nodes")).rejects.toEqual(expect.objectContaining({ code: "invalid_response", status: 200 }));
+  });
+
+  it("builds only allowlisted workflow fields without playbook or shell input", () => {
+    const request = buildWorkflowRequest(101, "update_packages", "plan", "nginx, curl", false);
+
+    expect(request).toMatchObject({
+      operation: "update_packages",
+      container_id: 101,
+      mode: "plan",
+      parameters: { operation: "update_packages", packages: ["nginx", "curl"] },
+    });
+    expect(request).not.toHaveProperty("playbook");
+    expect(request).not.toHaveProperty("shell");
   });
 });
