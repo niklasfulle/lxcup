@@ -73,3 +73,22 @@ body { color: var(--text); background: var(--bg); transition: background .2s eas
 .activity-list li a { color: var(--accent); font-size: .8rem; }
 .activity-badge { display: grid; place-items: center; width: 1.45rem; height: 1.45rem; border-radius: .35rem; color: #07131e; background: var(--accent); font-size: .7rem; font-weight: 800; }
 .activity-badge.error { color: #fff; background: #a34d4d; }
+@media (max-width: 900px) {
+  .app-shell { grid-template-columns: 200px 1fr; }
+  .main-content { padding-inline: 1.25rem; }
+  .workflow-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 700px) {
+  .topbar { align-items: flex-start; flex-direction: column; gap: .75rem; margin-bottom: 1.5rem; }
+  .topbar-actions { width: 100%; justify-content: space-between; }
+  .page-header { align-items: flex-start; flex-direction: column; gap: .5rem; }
+  .workflow-grid { grid-template-columns: 1fr; }
+  .table-wrap { margin-inline: -.25rem; }
+  th, td { padding-inline: .45rem; }
+  .task-monitor { padding: .8rem; }
+  .activity-list li { grid-template-columns: auto minmax(0, 1fr); }
+  .activity-list li time { grid-column: 2; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+}
