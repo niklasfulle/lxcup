@@ -1198,8 +1198,8 @@ dependencies = [
  "lxcup-agent",
  "lxcup-core",
  "lxcup-proxmox",
- "tokio",
- "url",
+  "tokio",
+  "url",
  "uuid",
 ]
 
