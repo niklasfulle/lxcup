@@ -45,13 +45,7 @@ if ($AgentId -notmatch "^[A-Za-z0-9_.-]+$") {
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptRoot
 $sshTarget = "$SshUser@$ProxmoxIp"
-$sshControlPath = Join-Path $env:TEMP "lxcup-agent-$PID.sock"
-$sshOptions = @(
-    "-o", "ConnectTimeout=10",
-    "-o", "ControlMaster=auto",
-    "-o", "ControlPersist=300",
-    "-o", "ControlPath=$sshControlPath"
-)
+$sshOptions = @("-o", "ConnectTimeout=10")
 
 function Import-DotEnv {
     param([string]$Path)
@@ -264,5 +258,4 @@ finally {
     catch {
         Write-Warning "Temporäre Proxmox-Datei konnte nicht entfernt werden: $remoteBinary"
     }
-    & ssh @sshOptions -O exit $sshTarget 2>$null | Out-Null
 }

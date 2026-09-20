@@ -24,13 +24,7 @@ foreach ($commandName in @("ssh", "scp")) {
 }
 
 $sshTarget = "$SshUser@$ProxmoxIp"
-$sshControlPath = Join-Path $env:TEMP "lxcup-bootstrap-$PID.sock"
-$sshOptions = @(
-    "-o", "ConnectTimeout=10",
-    "-o", "ControlMaster=auto",
-    "-o", "ControlPersist=300",
-    "-o", "ControlPath=$sshControlPath"
-)
+$sshOptions = @("-o", "ConnectTimeout=10")
 
 function Invoke-Remote {
     param([string]$Command)
@@ -92,6 +86,4 @@ Write-Host "Starte dedizierten Integrationstest..."
 
 $testScript = Join-Path $PSScriptRoot "run-integration-tests.ps1"
 & $testScript -ProxmoxIp $ProxmoxIp -NoBuild:$NoBuild
-$testExitCode = $LASTEXITCODE
-& ssh @sshOptions -O exit $sshTarget 2>$null | Out-Null
-exit $testExitCode
+exit $LASTEXITCODE
