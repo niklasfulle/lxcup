@@ -10,6 +10,84 @@ use lxcup_core::{Container, Node, ResourceTarget, SecretId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Secret references required by the worker runtime. Values are resolved only
+/// inside the worker and are never part of an API job or inventory payload.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WorkerSecretRefs {
+    pub proxmox_api: SecretId,
+    pub proxmox_ca: Option<SecretId>,
+    pub ssh_private_key: Option<SecretId>,
+    pub ssh_known_hosts: Option<SecretId>,
+    pub winrm_username: Option<SecretId>,
+    pub winrm_password: Option<SecretId>,
+}
+
+impl WorkerSecretRefs {
+    fn validate(&self) -> Result<(), WorkerConfigError> {
+        let refs = [
+            Some(self.proxmox_api),
+            self.proxmox_ca,
+            self.ssh_private_key,
+            self.ssh_known_hosts,
+            self.winrm_username,
+            self.winrm_password,
+        ];
+        let mut unique = HashSet::new();
+        if refs.into_iter().flatten().any(|secret| !unique.insert(secret)) {
+            return Err(WorkerConfigError::DuplicateSecretReference);
+        }
+        Ok(())
+    }
+}
+
+/// Worker-only connection configuration. It carries references, not secret
+/// material, and can therefore be safely persisted or logged after redaction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WorkerConnectionConfig {
+    pub proxmox_endpoint: String,
+    pub secret_refs: WorkerSecretRefs,
+}
+
+impl WorkerConnectionConfig {
+    pub fn new(
+        proxmox_endpoint: impl Into<String>,
+        secret_refs: WorkerSecretRefs,
+    ) -> Result<Self, WorkerConfigError> {
+        let proxmox_endpoint = proxmox_endpoint.into().trim_end_matches('/').to_owned();
+        let host = proxmox_endpoint.strip_prefix("https://").unwrap_or_default();
+        if host.is_empty() || host.chars().any(char::is_whitespace) {
+            return Err(WorkerConfigError::InvalidProxmoxEndpoint);
+        }
+        secret_refs.validate()?;
+        Ok(Self {
+            proxmox_endpoint,
+            secret_refs,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkerSecretPurpose {
+    ProxmoxApi,
+    ProxmoxCa,
+    SshPrivateKey,
+    SshKnownHosts,
+    WinrmUsername,
+    WinrmPassword,
+}
+
+/// Boundary used by the worker to obtain credentials from the configured
+/// secret provider. Implementations must never pass values to API responses.
+pub trait WorkerSecretResolver {
+    type Error;
+
+    fn resolve(
+        &self,
+        secret: SecretId,
+        purpose: WorkerSecretPurpose,
+    ) -> Result<Vec<u8>, Self::Error>;
+}
+
 /// A target generated from persisted lxcup resources, never from a frontend
 /// hostname or arbitrary inventory string.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -25,6 +103,14 @@ pub struct InventoryHost {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DynamicInventory {
     pub hosts: Vec<InventoryHost>,
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum WorkerConfigError {
+    #[error("the Proxmox worker endpoint must use HTTPS")]
+    InvalidProxmoxEndpoint,
+    #[error("worker configuration contains duplicate secret references")]
+    DuplicateSecretReference,
 }
 
 impl DynamicInventory {
@@ -207,6 +293,52 @@ mod tests {
         )
         .unwrap();
         (node, container)
+    }
+
+    #[test]
+    fn worker_connection_config_keeps_credentials_as_references() {
+        let api = SecretId::new();
+        let config = WorkerConnectionConfig::new(
+            "https://pve.example.test/",
+            WorkerSecretRefs {
+                proxmox_api: api,
+                proxmox_ca: Some(SecretId::new()),
+                ssh_private_key: Some(SecretId::new()),
+                ssh_known_hosts: Some(SecretId::new()),
+                winrm_username: None,
+                winrm_password: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(config.proxmox_endpoint, "https://pve.example.test");
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(serialized.contains(&api.as_uuid().to_string()));
+        assert!(!serialized.contains("top-secret"));
+        assert!(WorkerConnectionConfig::new(
+            "http://pve.example.test",
+            config.secret_refs.clone()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn worker_connection_config_rejects_duplicate_secret_references() {
+        let secret = SecretId::new();
+        assert_eq!(
+            WorkerConnectionConfig::new(
+                "https://pve.example.test",
+                WorkerSecretRefs {
+                    proxmox_api: secret,
+                    proxmox_ca: Some(secret),
+                    ssh_private_key: None,
+                    ssh_known_hosts: None,
+                    winrm_username: None,
+                    winrm_password: None,
+                },
+            ),
+            Err(WorkerConfigError::DuplicateSecretReference)
+        );
     }
 
     fn job_request(secret: SecretId) -> AnsibleJobRequest {
