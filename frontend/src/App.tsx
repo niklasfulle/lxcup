@@ -9,6 +9,7 @@ import { NodesPage } from "./pages/NodesPage";
 import { ContainersPage } from "./pages/ContainersPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { SecretsPage } from "./pages/SecretsPage";
+import { ResourceTree } from "./components/ResourceTree";
 
 export default function App() {
   const queryClient = useQueryClient();
@@ -50,6 +51,7 @@ export default function App() {
           <NavLink className="nav-link" to="/workflows">Automatisierung</NavLink>
           <NavLink className="nav-link" to="/secrets">Secrets</NavLink>
         </nav>
+        <ResourceTree />
         <div className="connection-indicator" aria-live="polite">
           <span className={connectionState === "verbunden" ? "status-dot ok" : "status-dot warn"} />
           SSE: {connectionState}
