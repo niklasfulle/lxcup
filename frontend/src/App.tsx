@@ -11,11 +11,13 @@ import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { SecretsPage } from "./pages/SecretsPage";
 import { ResourceTree } from "./components/ResourceTree";
 import { ContainerDetailPage } from "./pages/ContainerDetailPage";
+import { TaskMonitor, type GlobalEvent } from "./components/TaskMonitor";
 
 export default function App() {
   const queryClient = useQueryClient();
   const [connectionState, setConnectionState] = useState("verbunden");
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [events, setEvents] = useState<GlobalEvent[]>([]);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     const stored = globalThis.localStorage?.getItem("lxcup-theme");
     return stored === "light" ? "light" : "dark";
@@ -30,6 +32,8 @@ export default function App() {
     return apiClient.subscribe(
       (event: ApiEvent) => {
         setConnectionState("verbunden");
+        setStreamError(null);
+        setEvents((current) => [{ id: crypto.randomUUID(), event, receivedAt: new Date().toISOString() }, ...current].slice(0, 40));
         if (event.type === "Error") setStreamError(event.payload.message);
         if (event.type === "Status") {
           const queryKey = event.payload.resource === "node" ? queryKeys.nodes : event.payload.resource === "ansible_job" ? queryKeys.ansibleJobs : queryKeys.containers;
@@ -64,6 +68,7 @@ export default function App() {
           <div className="topbar-actions"><span className="user-pill">Admin</span><button className="theme-button" type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="Theme wechseln">{theme === "dark" ? "☼ Hell" : "☾ Dunkel"}</button></div>
         </header>
         {streamError ? <div className="api-alert" role="alert">{streamError}</div> : null}
+        <TaskMonitor events={events} />
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/nodes" element={<NodesPage />} />

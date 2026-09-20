@@ -65,3 +65,11 @@ body { color: var(--text); background: var(--bg); transition: background .2s eas
 .detail-list dt { color: var(--muted); }
 .detail-list dd { margin: 0; font-weight: 650; }
 .action-row { display: flex; flex-wrap: wrap; gap: .65rem; }
+.task-monitor { margin-bottom: 1.25rem; padding: .9rem 1.1rem; border: 1px solid var(--border); border-radius: .7rem; background: color-mix(in srgb, var(--surface) 82%, transparent); }
+.activity-list { display: grid; gap: .45rem; margin: 0; padding: 0; list-style: none; }
+.activity-list li { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: .65rem; padding: .45rem 0; border-bottom: 1px solid var(--border); }
+.activity-list li > div { display: grid; gap: .15rem; min-width: 0; }
+.activity-list li strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .85rem; }
+.activity-list li a { color: var(--accent); font-size: .8rem; }
+.activity-badge { display: grid; place-items: center; width: 1.45rem; height: 1.45rem; border-radius: .35rem; color: #07131e; background: var(--accent); font-size: .7rem; font-weight: 800; }
+.activity-badge.error { color: #fff; background: #a34d4d; }
