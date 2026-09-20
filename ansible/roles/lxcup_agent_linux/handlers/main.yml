@@ -1,0 +1,7 @@
+---
+- name: Restart lxcup agent
+  ansible.builtin.systemd_service:
+    name: lxcup-agent.service
+    state: restarted
+    enabled: true
+    daemon_reload: true

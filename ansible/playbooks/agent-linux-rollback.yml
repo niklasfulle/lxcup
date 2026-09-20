@@ -1,0 +1,37 @@
+---
+- name: Roll back lxcup Linux agent to a validated version
+  hosts: lxcup_targets
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Validate rollback version
+      ansible.builtin.assert:
+        that:
+          - lxcup_agent_rollback_version is defined
+          - lxcup_agent_rollback_version is match('^[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?$')
+        fail_msg: Rollback version is missing or invalid.
+
+    - name: Check validated rollback binary
+      ansible.builtin.stat:
+        path: "/usr/local/libexec/lxcup-agent-{{ lxcup_agent_rollback_version }}"
+      register: lxcup_rollback_binary
+
+    - name: Refuse missing rollback binary
+      ansible.builtin.assert:
+        that: lxcup_rollback_binary.stat.exists
+        fail_msg: Requested rollback binary is not installed.
+
+    - name: Switch current agent symlink
+      ansible.builtin.file:
+        src: "/usr/local/libexec/lxcup-agent-{{ lxcup_agent_rollback_version }}"
+        dest: /usr/local/libexec/lxcup-agent
+        state: link
+        force: true
+      notify: Restart lxcup agent
+
+  handlers:
+    - name: Restart lxcup agent
+      ansible.builtin.systemd_service:
+        name: lxcup-agent.service
+        state: restarted
+        daemon_reload: true

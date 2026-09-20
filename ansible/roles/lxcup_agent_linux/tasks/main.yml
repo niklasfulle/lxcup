@@ -1,0 +1,125 @@
+---
+- name: Validate supported Linux distribution
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == 'Debian'
+      - ansible_facts.distribution in ['Debian', 'Ubuntu']
+    fail_msg: Only Debian and Ubuntu targets are supported by this role.
+
+- name: Validate agent inputs
+  ansible.builtin.assert:
+    that:
+      - lxcup_agent_version is defined
+      - lxcup_agent_version is match('^[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?$')
+      - lxcup_agent_binary_src is defined
+      - lxcup_agent_token is defined
+      - lxcup_agent_token | length > 0
+      - lxcup_agent_id is defined
+      - lxcup_agent_id | length > 0
+    fail_msg: Required agent deployment inputs are missing or invalid.
+  no_log: true
+
+- name: Install runtime prerequisites
+  ansible.builtin.apt:
+    name: ca-certificates
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create restricted agent group
+  ansible.builtin.group:
+    name: "{{ lxcup_agent_service_group }}"
+    system: true
+
+- name: Create restricted agent user
+  ansible.builtin.user:
+    name: "{{ lxcup_agent_service_user }}"
+    group: "{{ lxcup_agent_service_group }}"
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: Create agent directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ lxcup_agent_service_group }}"
+    mode: "0750"
+  loop:
+    - "{{ lxcup_agent_install_dir }}"
+    - "{{ lxcup_agent_config_dir }}"
+
+- name: Read current agent target for rollback
+  ansible.builtin.command:
+    argv:
+      - readlink
+      - -f
+      - "{{ lxcup_agent_install_dir }}/lxcup-agent"
+  register: lxcup_current_agent
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Preserve previous agent target
+  ansible.builtin.file:
+    src: "{{ lxcup_current_agent.stdout }}"
+    dest: "{{ lxcup_agent_install_dir }}/lxcup-agent.previous"
+    state: link
+    force: true
+  when: lxcup_current_agent.rc == 0 and lxcup_current_agent.stdout | length > 0
+
+- name: Install versioned agent binary
+  ansible.builtin.copy:
+    src: "{{ lxcup_agent_binary_src }}"
+    dest: "{{ lxcup_agent_install_dir }}/lxcup-agent-{{ lxcup_agent_version }}"
+    owner: root
+    group: root
+    mode: "0755"
+    remote_src: "{{ lxcup_agent_binary_remote | default(false) }}"
+  notify: Restart lxcup agent
+
+- name: Activate validated agent version
+  ansible.builtin.file:
+    src: "{{ lxcup_agent_install_dir }}/lxcup-agent-{{ lxcup_agent_version }}"
+    dest: "{{ lxcup_agent_install_dir }}/lxcup-agent"
+    state: link
+    force: true
+  notify: Restart lxcup agent
+
+- name: Write agent environment with secret token
+  ansible.builtin.template:
+    src: agent.env.j2
+    dest: "{{ lxcup_agent_config_dir }}/agent.env"
+    owner: root
+    group: "{{ lxcup_agent_service_group }}"
+    mode: "0640"
+  no_log: true
+  notify: Restart lxcup agent
+
+- name: Install systemd service
+  ansible.builtin.template:
+    src: lxcup-agent.service.j2
+    dest: /etc/systemd/system/lxcup-agent.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart lxcup agent
+
+- name: Flush service handlers before healthcheck
+  ansible.builtin.meta: flush_handlers
+
+- name: Check agent health
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ lxcup_agent_bind_address.rsplit(':', 1)[1] }}/health"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ lxcup_agent_token }}"
+    status_code: 200
+    timeout: 10
+  register: lxcup_agent_health
+  retries: 5
+  delay: 2
+  until: lxcup_agent_health.status == 200
+  no_log: true
+  check_mode: false

@@ -1,0 +1,21 @@
+[Unit]
+Description=lxcup Linux Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ lxcup_agent_service_user }}
+Group={{ lxcup_agent_service_group }}
+EnvironmentFile={{ lxcup_agent_config_dir }}/agent.env
+ExecStart={{ lxcup_agent_install_dir }}/lxcup-agent
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lxcup
+
+[Install]
+WantedBy=multi-user.target

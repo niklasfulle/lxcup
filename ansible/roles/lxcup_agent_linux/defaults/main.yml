@@ -1,0 +1,7 @@
+---
+lxcup_agent_bind_address: "0.0.0.0:8090"
+lxcup_agent_service_user: lxcup-agent
+lxcup_agent_service_group: lxcup-agent
+lxcup_agent_install_dir: /usr/local/libexec
+lxcup_agent_config_dir: /etc/lxcup
+lxcup_agent_force_restart: false
