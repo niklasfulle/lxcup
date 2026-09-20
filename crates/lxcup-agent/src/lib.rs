@@ -452,7 +452,7 @@ async fn run_local_command(
         command.arg(script);
         command
     } else {
-        let mut command = Command::new("apt-get");
+        let mut command = Command::new("apt");
         match action {
             AgentAction::Health => {
                 command.arg("--version");

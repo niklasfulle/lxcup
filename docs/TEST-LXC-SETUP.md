@@ -261,6 +261,21 @@ das harmlose Health-Kommando aus. Erst wenn diese Prüfungen grün sind, wird ei
 kontrollierter APPLY-Test mit einem ausdrücklich erlaubten Testpaket
 durchgeführt.
 
+### Registrierung am lxcup-Server und read-only Scan
+
+Wenn der SSH-Tunnel noch läuft, kann der Server-Agent-Smoke-Test mit einem
+echten lxcup-Server-Prozess gestartet werden:
+
+```powershell
+.\scripts\run-agent-server-integration.ps1 -NoBuild
+```
+
+Der Test aktiviert dafür den Development-Seed im Serverprozess, registriert
+Container `101`, prüft die Server-Endpunkte für Agent-Health und Metriken und
+startet anschließend einen read-only Scan über Server und Agent. Der Server
+wird danach automatisch beendet. Dieser Test verwendet keine PostgreSQL-
+Datenbank und führt kein APPLY aus.
+
 Agent-Credentials bleiben getrennt von den Proxmox-Credentials:
 
 ```text

@@ -188,6 +188,9 @@ Für eine produktive Bereitstellung siehe [`deploy/README.md`](deploy/README.md)
 Die Authentifizierung verwendet Bearer-Tokens mit Viewer-, Operator- und
 Admin-Token; ohne gesetzte Authentifizierung bleibt die lokale Entwicklung
 kompatibel.
+Für den dedizierten Test-LXC stehen Verteilung und Server-Agent-Smoke-Test in
+[`docs/TEST-LXC-SETUP.md`](docs/TEST-LXC-SETUP.md) und
+`scripts/run-agent-server-integration.ps1` bereit.
 
 Ein opt-in Integrationstest gegen einen ausdrücklich dedizierten Test-LXC wird
 so gestartet:
