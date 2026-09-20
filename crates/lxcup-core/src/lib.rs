@@ -11,6 +11,7 @@ pub mod ids;
 pub mod node;
 pub mod plan;
 pub mod scan;
+pub mod secret;
 pub mod update;
 
 pub use container::{Container, ContainerManagementState, ContainerStatus, OperatingSystem};
@@ -19,10 +20,11 @@ pub use error::{
     DomainError, ErrorCode, InfrastructureError, LxcupError, LxcupResult, RetryPolicy,
 };
 pub use execution::{Execution, ExecutionStatus};
-pub use ids::{ContainerId, EnrollmentId, ExecutionId, NodeId, ScanId, UpdatePlanId};
+pub use ids::{ContainerId, EnrollmentId, ExecutionId, NodeId, ScanId, SecretId, UpdatePlanId};
 pub use node::{Node, NodeStatus};
 pub use plan::{PackageChangeKind, PlanStatus, ResolvedPackageChange, UpdatePlan};
 pub use scan::{Scan, ScanStatus};
+pub use secret::{SecretKind, SecretMetadata, SecretScope, SecretValue};
 pub use update::{AvailableUpdate, PackageName, PackageVersion, UpdateClassification};
 
 /// Version des Core-Crates.

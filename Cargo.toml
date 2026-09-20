@@ -11,6 +11,7 @@ members = [
     "crates/lxcup-planner",
     "crates/lxcup-proxmox",
     "crates/lxcup-safety",
+    "crates/lxcup-secrets",
     "crates/lxcup-server",
     "crates/lxcup-test-support",
 ]
