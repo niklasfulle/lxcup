@@ -1160,6 +1160,7 @@ name = "lxcup-persistence"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "lxcup-ansible",
  "lxcup-core",
  "lxcup-test-support",
  "serde_json",

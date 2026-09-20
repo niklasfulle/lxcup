@@ -190,6 +190,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/ansible/jobs", post(create_ansible_job))
         .route("/api/v1/ansible/jobs/{job_id}", get(get_ansible_job))
         .route(
+            "/api/v1/ansible/jobs/{job_id}/events",
+            get(get_ansible_job_events),
+        )
+        .route(
             "/api/v1/nodes/{node_id}/containers",
             get(list_node_containers),
         )
@@ -998,16 +1002,63 @@ async fn create_ansible_job(
         confirmed: request.confirmed,
         actor_role,
     };
+    let target = job_request.target;
+    if let Some(repositories) = state.repositories.clone() {
+        if let Some(existing) = repositories
+            .ansible_jobs
+            .find_by_idempotency_key(target, &job_request.idempotency_key)
+            .await
+            .map_err(|_| ApiError::storage())?
+        {
+            return Ok((
+                StatusCode::OK,
+                Json(envelope(AnsibleJobDto::from(&existing))),
+            ));
+        }
+        if repositories
+            .ansible_jobs
+            .has_active_target(target)
+            .await
+            .map_err(|_| ApiError::storage())?
+        {
+            return Err(ApiError::conflict(
+                "ansible_target_busy",
+                "another job is active for this target",
+            ));
+        }
+    }
     let submission = state
         .ansible
         .write()
         .await
         .submit(job_request)
         .map_err(map_ansible_error)?;
-    let (status, job) = match submission {
-        JobSubmission::Created(job) => (StatusCode::ACCEPTED, job),
-        JobSubmission::Duplicate(job) => (StatusCode::OK, job),
+    let (status, job, created) = match submission {
+        JobSubmission::Created(job) => (StatusCode::ACCEPTED, job, true),
+        JobSubmission::Duplicate(job) => (StatusCode::OK, job, false),
     };
+    if created {
+        if let Some(repositories) = state.repositories.clone() {
+            repositories
+                .ansible_jobs
+                .save(&job)
+                .await
+                .map_err(|_| ApiError::storage())?;
+            let events = state
+                .ansible
+                .read()
+                .await
+                .events(job.id)
+                .map_err(map_ansible_error)?;
+            for event in events {
+                repositories
+                    .ansible_jobs
+                    .append_event(&event)
+                    .await
+                    .map_err(|_| ApiError::storage())?;
+            }
+        }
+    }
     let dto = AnsibleJobDto::from(&job);
     state.publish(ApiEvent::status(
         "ansible_job",
@@ -1022,13 +1073,46 @@ async fn get_ansible_job(
     Path(job_id): Path<String>,
 ) -> Result<Json<ApiEnvelope<AnsibleJobDto>>, ApiError> {
     let id = lxcup_core::AnsibleJobId::from_uuid(parse_uuid(&job_id, "ansible job id")?);
-    let job = state
-        .ansible
-        .read()
-        .await
-        .job(id)
-        .map_err(map_ansible_error)?;
+    let job = match state.ansible.read().await.job(id) {
+        Ok(job) => job,
+        Err(lxcup_ansible::CoordinatorError::NotFound) => {
+            let repositories = state
+                .repositories
+                .clone()
+                .ok_or_else(|| ApiError::not_found("ansible job not found"))?;
+            repositories
+                .ansible_jobs
+                .find_by_id(id)
+                .await
+                .map_err(|_| ApiError::storage())?
+                .ok_or_else(|| ApiError::not_found("ansible job not found"))?
+        }
+        Err(error) => return Err(map_ansible_error(error)),
+    };
     Ok(Json(envelope(AnsibleJobDto::from(&job))))
+}
+
+async fn get_ansible_job_events(
+    State(state): State<ApiState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<ApiEnvelope<Vec<lxcup_ansible::JobEvent>>>, ApiError> {
+    let id = lxcup_core::AnsibleJobId::from_uuid(parse_uuid(&job_id, "ansible job id")?);
+    match state.ansible.read().await.events(id) {
+        Ok(events) => Ok(Json(envelope(events))),
+        Err(lxcup_ansible::CoordinatorError::NotFound) => {
+            let repositories = state
+                .repositories
+                .clone()
+                .ok_or_else(|| ApiError::not_found("ansible job not found"))?;
+            let events = repositories
+                .ansible_jobs
+                .events(id)
+                .await
+                .map_err(|_| ApiError::storage())?;
+            Ok(Json(envelope(events)))
+        }
+        Err(error) => Err(map_ansible_error(error)),
+    }
 }
 
 fn configured_ansible_secret_refs() -> Result<Vec<SecretId>, ApiError> {
@@ -1988,6 +2072,7 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/api/v1/enrollments/{enrollment_id}": {"get": {"responses": {"200": {"description": "Enrollment status"}}}},
     "/api/v1/ansible/jobs": {"post": {"responses": {"202": {"description": "Ansible job accepted"}}}},
     "/api/v1/ansible/jobs/{job_id}": {"get": {"responses": {"200": {"description": "Ansible job status"}}}},
+    "/api/v1/ansible/jobs/{job_id}/events": {"get": {"responses": {"200": {"description": "Audit-safe Ansible job events"}}}},
     "/api/v1/containers": {"get": {"responses": {"200": {"description": "Containers"}}}},
     "/api/v1/containers/{container_id}/scans": {"get": {}, "post": {}},
     "/api/v1/scans/{scan_id}/run": {"post": {}},
@@ -2443,6 +2528,17 @@ mod tests {
             .unwrap();
         let duplicate_json: serde_json::Value = serde_json::from_slice(&duplicate_body).unwrap();
         assert_eq!(duplicate_json["data"]["id"], job_id);
+
+        let events = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/ansible/jobs/{job_id}/events"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(events.status(), StatusCode::OK);
 
         let status = router(state)
             .oneshot(

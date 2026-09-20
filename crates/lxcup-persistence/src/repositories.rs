@@ -1,6 +1,7 @@
 //! SQL-Repositorys für die MVP-Domain.
 
 use chrono::{DateTime, Utc};
+use lxcup_ansible::{AnsibleJob, AnsibleJobStatus, JobEvent};
 use lxcup_core::{
     AvailableUpdate, Container, ContainerId, ContainerManagementState, ContainerStatus,
     EnvironmentStatus, Execution, ExecutionId, ExecutionStatus, Node, NodeId, NodeStatus,
@@ -114,6 +115,144 @@ impl EnvironmentRepository {
             .fetch_all(&self.pool)
             .await?;
         rows.into_iter().map(environment_from_row).collect()
+    }
+}
+
+/// Persistiert Ansible-Jobs und deren audit-sichere Ereignisse.
+#[derive(Clone)]
+pub struct AnsibleJobRepository {
+    pool: PgPool,
+}
+
+impl AnsibleJobRepository {
+    pub(crate) fn new(database: &Database) -> Self {
+        Self {
+            pool: database.pool().clone(),
+        }
+    }
+
+    pub async fn save(&self, job: &AnsibleJob) -> Result<(), RepositoryError> {
+        let payload = serde_json::to_value(job).map_err(RepositoryError::Serialization)?;
+        let target = serde_json::to_value(job.target).map_err(RepositoryError::Serialization)?;
+        sqlx::query(
+            "INSERT INTO ansible_jobs (id, target, idempotency_key, status, payload, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(job.id.as_uuid())
+        .bind(target)
+        .bind(&job.idempotency_key)
+        .bind(ansible_status_to_db(job.status))
+        .bind(payload)
+        .bind(job.created_at)
+        .bind(job.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update(&self, job: &AnsibleJob) -> Result<(), RepositoryError> {
+        let payload = serde_json::to_value(job).map_err(RepositoryError::Serialization)?;
+        sqlx::query(
+            "UPDATE ansible_jobs SET status = $1, payload = $2, updated_at = $3 WHERE id = $4",
+        )
+        .bind(ansible_status_to_db(job.status))
+        .bind(payload)
+        .bind(job.updated_at)
+        .bind(job.id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn find_by_id(
+        &self,
+        id: lxcup_core::AnsibleJobId,
+    ) -> Result<Option<AnsibleJob>, RepositoryError> {
+        let row = sqlx::query("SELECT payload FROM ansible_jobs WHERE id = $1")
+            .bind(id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| {
+            serde_json::from_value(row.try_get("payload")?).map_err(|_| {
+                RepositoryError::InvalidValue {
+                    field: "ansible job payload",
+                }
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn find_by_idempotency_key(
+        &self,
+        target: lxcup_core::ResourceTarget,
+        key: &str,
+    ) -> Result<Option<AnsibleJob>, RepositoryError> {
+        let target = serde_json::to_value(target).map_err(RepositoryError::Serialization)?;
+        let row = sqlx::query(
+            "SELECT payload FROM ansible_jobs WHERE target = $1 AND idempotency_key = $2",
+        )
+        .bind(target)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            serde_json::from_value(row.try_get("payload")?).map_err(|_| {
+                RepositoryError::InvalidValue {
+                    field: "ansible job payload",
+                }
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn has_active_target(
+        &self,
+        target: lxcup_core::ResourceTarget,
+    ) -> Result<bool, RepositoryError> {
+        let target = serde_json::to_value(target).map_err(RepositoryError::Serialization)?;
+        let row = sqlx::query("SELECT 1 FROM ansible_jobs WHERE target = $1 AND status NOT IN ('succeeded', 'failed', 'aborted') LIMIT 1")
+            .bind(target)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
+    pub async fn append_event(&self, event: &JobEvent) -> Result<(), RepositoryError> {
+        let payload = serde_json::to_value(event).map_err(RepositoryError::Serialization)?;
+        let sequence =
+            i64::try_from(event.sequence).map_err(|_| RepositoryError::InvalidValue {
+                field: "ansible event sequence",
+            })?;
+        sqlx::query(
+            "INSERT INTO ansible_job_events (job_id, sequence, payload, created_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(event.job_id.as_uuid())
+        .bind(sequence)
+        .bind(payload)
+        .bind(event.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn events(
+        &self,
+        id: lxcup_core::AnsibleJobId,
+    ) -> Result<Vec<JobEvent>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT payload FROM ansible_job_events WHERE job_id = $1 ORDER BY sequence",
+        )
+        .bind(id.as_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                serde_json::from_value(row.try_get("payload")?).map_err(|_| {
+                    RepositoryError::InvalidValue {
+                        field: "ansible job event payload",
+                    }
+                })
+            })
+            .collect()
     }
 }
 
@@ -665,6 +804,7 @@ impl AuditEventRepository {
 /// Erstellt alle MVP-Repositories über denselben Pool.
 #[derive(Clone)]
 pub struct Repositories {
+    pub ansible_jobs: AnsibleJobRepository,
     pub environments: EnvironmentRepository,
     pub nodes: NodeRepository,
     pub containers: ContainerRepository,
@@ -677,6 +817,7 @@ pub struct Repositories {
 impl Repositories {
     pub fn new(database: &Database) -> Self {
         Self {
+            ansible_jobs: AnsibleJobRepository::new(database),
             environments: EnvironmentRepository::new(database),
             nodes: NodeRepository::new(database),
             containers: ContainerRepository::new(database),
@@ -685,6 +826,19 @@ impl Repositories {
             executions: ExecutionRepository::new(database),
             audit_events: AuditEventRepository::new(database),
         }
+    }
+}
+
+fn ansible_status_to_db(value: AnsibleJobStatus) -> &'static str {
+    match value {
+        AnsibleJobStatus::Queued => "queued",
+        AnsibleJobStatus::Checking => "checking",
+        AnsibleJobStatus::Planned => "planned",
+        AnsibleJobStatus::Applying => "applying",
+        AnsibleJobStatus::ReconcileRequired => "reconcile_required",
+        AnsibleJobStatus::Succeeded => "succeeded",
+        AnsibleJobStatus::Failed => "failed",
+        AnsibleJobStatus::Aborted => "aborted",
     }
 }
 
