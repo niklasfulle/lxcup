@@ -9,6 +9,8 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $null = Set-Location $repositoryRoot
 $env:ANSIBLE_CONFIG = Join-Path $repositoryRoot "ansible/ansible.cfg"
 
+& (Join-Path $PSScriptRoot "test-ansible-policies.ps1")
+
 if (-not (Get-Command $AnsiblePlaybook -ErrorAction SilentlyContinue)) {
     throw "ansible-playbook wurde nicht gefunden. Installiere Ansible im Worker oder übergebe -AnsiblePlaybook."
 }
