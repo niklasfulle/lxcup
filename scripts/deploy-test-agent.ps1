@@ -133,14 +133,46 @@ function Invoke-Remote {
 function Invoke-RemoteContainerScript {
     param([Parameter(Mandatory = $true)][string]$Script)
 
-    # Bash erkennt Here-Doc-Abschlussmarker mit CRLF nicht zuverlässig. Der
-    # Windows-String wird deshalb vor der Übertragung auf LF normalisiert.
+    # Bash erkennt Here-Doc-Abschlussmarker mit CRLF nicht zuverlässig. Die
+    # Bytes werden deshalb direkt als UTF-8/LF über stdin geschrieben, ohne
+    # die PowerShell-Native-Pipeline, die Zeilenenden wieder umwandeln kann.
     $normalizedScript = $Script.Replace("`r`n", "`n").Replace("`r", "")
-    $output = $normalizedScript | & ssh @sshOptions $sshTarget "pct exec $vmid -- /bin/bash -s" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Setup im LXC fehlgeschlagen:`n$($output -join [Environment]::NewLine)"
+    $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $processInfo.FileName = "ssh"
+    $processInfo.UseShellExecute = $false
+    $processInfo.RedirectStandardInput = $true
+    $processInfo.RedirectStandardOutput = $true
+    $processInfo.RedirectStandardError = $true
+    foreach ($argument in @($sshOptions + @($sshTarget, "pct exec $vmid -- /bin/bash -s"))) {
+        [void]$processInfo.ArgumentList.Add($argument)
     }
-    return ($output -join [Environment]::NewLine)
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $processInfo
+    if (-not $process.Start()) {
+        throw "Der SSH-Prozess für das LXC-Setup konnte nicht gestartet werden."
+    }
+
+    $exitCode = $null
+    try {
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($normalizedScript)
+        $process.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+        $process.StandardInput.Close()
+        $process.WaitForExit()
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        $exitCode = $process.ExitCode
+    }
+    finally {
+        $process.Dispose()
+    }
+
+    if ($exitCode -ne 0) {
+        throw "Setup im LXC fehlgeschlagen:`n$stdout$stderr"
+    }
+    return "$stdout$stderr"
 }
 
 $resourceJson = Invoke-Remote -Command "pvesh get /cluster/resources --type vm --output-format json"
