@@ -14,6 +14,15 @@ export default function App() {
   const queryClient = useQueryClient();
   const [connectionState, setConnectionState] = useState("verbunden");
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    const stored = globalThis.localStorage?.getItem("lxcup-theme");
+    return stored === "light" ? "light" : "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    globalThis.localStorage?.setItem("lxcup-theme", theme);
+  }, [theme]);
 
   useEffect(() => {
     return apiClient.subscribe(
@@ -47,6 +56,10 @@ export default function App() {
         </div>
       </aside>
       <main className="main-content">
+        <header className="topbar">
+          <span className="topbar-context"><strong>Lokale Entwicklung</strong><span className="muted">· lxcup-control</span></span>
+          <div className="topbar-actions"><span className="user-pill">Admin</span><button className="theme-button" type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="Theme wechseln">{theme === "dark" ? "☼ Hell" : "☾ Dunkel"}</button></div>
+        </header>
         {streamError ? <div className="api-alert" role="alert">{streamError}</div> : null}
         <Routes>
           <Route path="/" element={<Dashboard />} />

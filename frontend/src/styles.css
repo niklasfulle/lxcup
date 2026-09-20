@@ -38,3 +38,16 @@ nav { display: grid; gap: .35rem; }
 .secret-actions button:disabled, .inline-form button:disabled { cursor: not-allowed; opacity: .5; }
 .inline-form { grid-column: 1 / -1; }
 @media (max-width: 700px) { .app-shell { display: block; }.sidebar { position: static; border-right: 0; border-bottom: 1px solid #25364a; padding: 1rem; }.brand-caption { margin-bottom: .75rem; }.connection-indicator { margin-top: 1rem; }.main-content { padding-top: 2rem; }.summary-grid, .panel-grid { grid-template-columns: 1fr; } }
+:root { --bg: #0b1220; --surface: #111f30dd; --surface-muted: #0b1624; --border: #25364a; --border-strong: #39516a; --text: #dce7f2; --muted: #8ea4b9; --accent: #79d8c7; }
+:root[data-theme="light"] { --bg: #eef3f7; --surface: #ffffffee; --surface-muted: #f4f7fa; --border: #d1dce6; --border-strong: #9eb1c2; --text: #172536; --muted: #5f7183; --accent: #087f76; }
+body { color: var(--text); background: var(--bg); transition: background .2s ease, color .2s ease; }
+.sidebar { border-color: var(--border); background: var(--surface); }
+.main-content { padding-top: 1.25rem; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 3rem; margin-bottom: 2.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+.topbar-context, .topbar-actions, .user-pill { display: flex; align-items: center; gap: .6rem; }
+.user-pill { padding: .35rem .6rem; border: 1px solid var(--border-strong); border-radius: 99rem; color: var(--muted); font-size: .8rem; }
+.theme-button { border: 1px solid var(--border-strong); border-radius: .45rem; color: var(--text); background: var(--surface-muted); padding: .4rem .65rem; cursor: pointer; }
+.summary-card, .panel { border-color: var(--border); background: var(--surface); }
+.summary-card span, .muted, .brand-caption { color: var(--muted); }
+.workflow-summary { border-left-color: var(--accent); color: var(--muted); background: var(--surface-muted); }
+.theme-button:focus-visible, .nav-link:focus-visible, button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
