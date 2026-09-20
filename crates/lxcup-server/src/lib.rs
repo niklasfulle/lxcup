@@ -38,6 +38,7 @@ use lxcup_execution::{ExecutionCoordinator, ExecutionRequest, ExecutionStart};
 use lxcup_persistence::Repositories;
 use lxcup_planner::{DryRunChange, PlannerInput, UpdatePlanner};
 use lxcup_safety::{HealthCheckResult, RebootRequirement, SnapshotState};
+use lxcup_secrets::{InMemorySecretStore, SecretStore, SecretStoreError};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
@@ -53,6 +54,7 @@ pub struct ApiState {
     auth: AuthConfig,
     repositories: Option<Repositories>,
     ansible: Arc<RwLock<AnsibleJobCoordinator>>,
+    secrets: Arc<dyn SecretStore>,
 }
 
 impl ApiState {
@@ -67,6 +69,7 @@ impl ApiState {
             auth: AuthConfig::from_env(),
             repositories: None,
             ansible: Arc::new(RwLock::new(AnsibleJobCoordinator::default())),
+            secrets: Arc::new(InMemorySecretStore::default()),
         }
     }
 
@@ -77,6 +80,11 @@ impl ApiState {
 
     pub fn with_auth_config(mut self, auth: AuthConfig) -> Self {
         self.auth = auth;
+        self
+    }
+
+    pub fn with_secret_store(mut self, secrets: Arc<dyn SecretStore>) -> Self {
+        self.secrets = secrets;
         self
     }
 
@@ -1902,7 +1910,12 @@ async fn get_execution_result(
 #[derive(Clone, Debug, Deserialize)]
 pub struct RegisterAgentRequest {
     pub endpoint: String,
-    pub token: String,
+    #[serde(default)]
+    pub secret_ref: Option<SecretId>,
+    /// Development-only compatibility input. Production requests must use
+    /// `secret_ref`; this field is rejected unless explicitly enabled.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1929,7 +1942,27 @@ async fn register_agent(
     {
         return Err(ApiError::not_found("container not found"));
     }
-    let config = AgentClientConfig::new(request.endpoint.clone(), request.token).map_err(|_| {
+    let token = if let Some(secret_ref) = request.secret_ref {
+        state
+            .secrets
+            .read(secret_ref)
+            .map_err(map_secret_error)?
+            .expose()
+            .to_owned()
+    } else if std::env::var("LXCUP_ALLOW_LEGACY_AGENT_TOKEN").as_deref() == Ok("true") {
+        request.token.ok_or_else(|| {
+            ApiError::bad_request(
+                "agent_secret_required",
+                "agent registration requires a secret reference",
+            )
+        })?
+    } else {
+        return Err(ApiError::bad_request(
+            "agent_secret_required",
+            "agent registration requires a secret reference",
+        ));
+    };
+    let config = AgentClientConfig::new(request.endpoint.clone(), token).map_err(|_| {
         ApiError::bad_request("invalid_agent_config", "agent endpoint or token is invalid")
     })?;
     let client = AgentClient::new(config).map_err(|_| {
@@ -1957,6 +1990,27 @@ async fn register_agent(
         "registered",
     ));
     Ok((StatusCode::CREATED, Json(envelope(dto))))
+}
+
+fn map_secret_error(error: SecretStoreError) -> ApiError {
+    match error {
+        SecretStoreError::Missing => ApiError::dependency(
+            "agent_secret_missing",
+            "the configured agent secret is missing",
+        ),
+        SecretStoreError::Denied => ApiError::forbidden(
+            "agent_secret_denied",
+            "the configured agent secret is not usable",
+        ),
+        SecretStoreError::Invalid => ApiError::bad_request(
+            "agent_secret_invalid",
+            "the configured agent secret is invalid",
+        ),
+        SecretStoreError::Unavailable => ApiError::dependency(
+            "secret_store_unavailable",
+            "the secret store is unavailable",
+        ),
+    }
 }
 
 async fn revoke_agent(
@@ -2346,6 +2400,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
+    use lxcup_secrets::CreateSecret;
     use tower::ServiceExt;
 
     #[tokio::test]
@@ -2607,7 +2662,18 @@ mod tests {
             .unwrap();
         });
 
-        let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+        let secret_store = InMemorySecretStore::default();
+        let agent_secret = secret_store
+            .create(CreateSecret {
+                name: "test-agent".to_owned(),
+                kind: lxcup_core::SecretKind::AgentToken,
+                scope: lxcup_core::SecretScope::Container(ContainerId::new(101)),
+                value: lxcup_core::SecretValue::new(agent_token).unwrap(),
+            })
+            .unwrap();
+        let state = ApiState::new()
+            .with_auth_config(AuthConfig::disabled())
+            .with_secret_store(Arc::new(secret_store));
         let container = Container::new(
             ContainerId::new(101),
             NodeId::new(),
@@ -2625,7 +2691,7 @@ mod tests {
             .body(Body::from(
                 serde_json::json!({
                     "endpoint": format!("http://{address}"),
-                    "token": agent_token,
+                    "secret_ref": agent_secret.metadata.id,
                 })
                 .to_string(),
             ))

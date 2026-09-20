@@ -21,6 +21,7 @@ lxcup-planner = { path = "../lxcup-planner" }
 lxcup-persistence = { path = "../lxcup-persistence" }
 lxcup-observability = { path = "../lxcup-observability" }
 lxcup-safety = { path = "../lxcup-safety" }
+lxcup-secrets = { path = "../lxcup-secrets" }
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
