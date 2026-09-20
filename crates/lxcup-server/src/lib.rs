@@ -32,13 +32,15 @@ use lxcup_core::{
     ActorRole, Container, ContainerAction, ContainerId, ContainerManagementState, Enrollment,
     EnrollmentId, EnrollmentState, EnvironmentId, EnvironmentStatus, Execution, ExecutionId, Node,
     NodeId, Permission, PlanStatus, ProxmoxEnvironment, ResourceLifecycle, ResourceTarget, Scan,
-    ScanId, SecretId, UpdatePlan, UpdatePlanId,
+    ScanId, SecretId, SecretKind, SecretScope, SecretValue, UpdatePlan, UpdatePlanId,
 };
 use lxcup_execution::{ExecutionCoordinator, ExecutionRequest, ExecutionStart};
 use lxcup_persistence::Repositories;
 use lxcup_planner::{DryRunChange, PlannerInput, UpdatePlanner};
 use lxcup_safety::{HealthCheckResult, RebootRequirement, SnapshotState};
-use lxcup_secrets::{InMemorySecretStore, SecretStore, SecretStoreError};
+use lxcup_secrets::{
+    CreateSecret, InMemorySecretStore, SecretStore, SecretStoreError, StoredSecretMetadata,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
@@ -133,6 +135,7 @@ struct ApiStore {
     results: HashMap<ExecutionId, ExecutionResultDto>,
     container_actions: Vec<ContainerActionTask>,
     container_action_keys: HashMap<(ContainerId, String), Uuid>,
+    secret_audit: Vec<SecretAuditEvent>,
 }
 
 #[derive(Clone)]
@@ -193,6 +196,14 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/environments/{environment_id}/disable",
             post(disable_environment),
         )
+        .route("/api/v1/secrets", get(list_secrets).post(create_secret))
+        .route("/api/v1/secrets/audit", get(list_secret_audit))
+        .route(
+            "/api/v1/secrets/{secret_id}",
+            get(get_secret).delete(delete_secret),
+        )
+        .route("/api/v1/secrets/{secret_id}/rotate", post(rotate_secret))
+        .route("/api/v1/secrets/{secret_id}/revoke", post(revoke_secret))
         .route("/api/v1/enrollments", post(create_enrollment))
         .route("/api/v1/enrollments/{enrollment_id}", get(get_enrollment))
         .route("/api/v1/ansible/jobs", post(create_ansible_job))
@@ -2013,6 +2024,167 @@ fn map_secret_error(error: SecretStoreError) -> ApiError {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateSecretRequest {
+    pub name: String,
+    pub kind: SecretKind,
+    pub scope: SecretScope,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SecretValueRequest {
+    pub value: String,
+    pub confirmed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SecretConfirmationRequest {
+    pub confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SecretMetadataDto {
+    pub metadata: StoredSecretMetadata,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SecretAuditEvent {
+    pub secret_id: SecretId,
+    pub action: String,
+    pub role: ActorRole,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn list_secrets(
+    State(state): State<ApiState>,
+) -> Result<Json<ApiEnvelope<Vec<SecretMetadataDto>>>, ApiError> {
+    let secrets = state
+        .secrets
+        .list_metadata()
+        .map_err(map_secret_error)?
+        .into_iter()
+        .map(|metadata| SecretMetadataDto { metadata })
+        .collect();
+    Ok(Json(envelope(secrets)))
+}
+
+async fn create_secret(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    JsonBody(request): JsonBody<CreateSecretRequest>,
+) -> Result<(StatusCode, Json<ApiEnvelope<SecretMetadataDto>>), ApiError> {
+    require_permission(actor_role, Permission::Configure)?;
+    let value = SecretValue::new(request.value)
+        .map_err(|_| ApiError::bad_request("invalid_secret", "the secret value is invalid"))?;
+    let metadata = state
+        .secrets
+        .create(CreateSecret {
+            name: request.name,
+            kind: request.kind,
+            scope: request.scope,
+            value,
+        })
+        .map_err(map_secret_error)?;
+    let id = metadata.metadata.id;
+    record_secret_audit(&state, id, "created", actor_role).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(envelope(SecretMetadataDto { metadata })),
+    ))
+}
+
+async fn list_secret_audit(
+    State(state): State<ApiState>,
+) -> Json<ApiEnvelope<Vec<SecretAuditEvent>>> {
+    Json(envelope(state.store.read().await.secret_audit.clone()))
+}
+
+async fn get_secret(
+    State(state): State<ApiState>,
+    Path(secret_id): Path<String>,
+) -> Result<Json<ApiEnvelope<SecretMetadataDto>>, ApiError> {
+    let id = parse_secret_id(&secret_id)?;
+    let metadata = state.secrets.metadata(id).map_err(map_secret_error)?;
+    Ok(Json(envelope(SecretMetadataDto { metadata })))
+}
+
+async fn rotate_secret(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    Path(secret_id): Path<String>,
+    JsonBody(request): JsonBody<SecretValueRequest>,
+) -> Result<Json<ApiEnvelope<SecretMetadataDto>>, ApiError> {
+    require_permission(actor_role, Permission::Configure)?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "confirmation_required",
+            "rotating a secret requires explicit confirmation",
+        ));
+    }
+    let id = parse_secret_id(&secret_id)?;
+    let value = SecretValue::new(request.value)
+        .map_err(|_| ApiError::bad_request("invalid_secret", "the secret value is invalid"))?;
+    state.secrets.rotate(id, value).map_err(map_secret_error)?;
+    let metadata = state.secrets.metadata(id).map_err(map_secret_error)?;
+    record_secret_audit(&state, id, "rotated", actor_role).await;
+    Ok(Json(envelope(SecretMetadataDto { metadata })))
+}
+
+async fn revoke_secret(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    Path(secret_id): Path<String>,
+    JsonBody(request): JsonBody<SecretConfirmationRequest>,
+) -> Result<Json<ApiEnvelope<SecretMetadataDto>>, ApiError> {
+    require_permission(actor_role, Permission::Destructive)?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "confirmation_required",
+            "revoking a secret requires explicit confirmation",
+        ));
+    }
+    let id = parse_secret_id(&secret_id)?;
+    state.secrets.revoke(id).map_err(map_secret_error)?;
+    let metadata = state.secrets.metadata(id).map_err(map_secret_error)?;
+    record_secret_audit(&state, id, "revoked", actor_role).await;
+    Ok(Json(envelope(SecretMetadataDto { metadata })))
+}
+
+async fn delete_secret(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    Path(secret_id): Path<String>,
+    JsonBody(request): JsonBody<SecretConfirmationRequest>,
+) -> Result<StatusCode, ApiError> {
+    require_permission(actor_role, Permission::Destructive)?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "confirmation_required",
+            "deleting a secret requires explicit confirmation",
+        ));
+    }
+    let id = parse_secret_id(&secret_id)?;
+    state.secrets.delete(id).map_err(map_secret_error)?;
+    record_secret_audit(&state, id, "deleted", actor_role).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn record_secret_audit(state: &ApiState, id: SecretId, action: &str, role: ActorRole) {
+    let event = SecretAuditEvent {
+        secret_id: id,
+        action: action.to_owned(),
+        role,
+        occurred_at: chrono::Utc::now(),
+    };
+    state.store.write().await.secret_audit.push(event);
+    state.publish(ApiEvent::status("secret", id.as_uuid().to_string(), action));
+}
+
+fn parse_secret_id(value: &str) -> Result<SecretId, ApiError> {
+    Ok(SecretId::from_uuid(parse_uuid(value, "secret id")?))
+}
+
 async fn revoke_agent(
     State(state): State<ApiState>,
     Extension(actor_role): Extension<ActorRole>,
@@ -2127,6 +2299,11 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/api/v1/ansible/jobs": {"post": {"responses": {"202": {"description": "Ansible job accepted"}}}},
     "/api/v1/ansible/jobs/{job_id}": {"get": {"responses": {"200": {"description": "Ansible job status"}}}},
     "/api/v1/ansible/jobs/{job_id}/events": {"get": {"responses": {"200": {"description": "Audit-safe Ansible job events"}}}},
+    "/api/v1/secrets": {"get": {}, "post": {"description": "Create or list secret metadata; values are never returned"}},
+    "/api/v1/secrets/{secret_id}": {"get": {}, "delete": {}},
+    "/api/v1/secrets/{secret_id}/rotate": {"post": {}},
+    "/api/v1/secrets/{secret_id}/revoke": {"post": {}},
+    "/api/v1/secrets/audit": {"get": {}},
     "/api/v1/containers": {"get": {"responses": {"200": {"description": "Containers"}}}},
     "/api/v1/containers/{container_id}/scans": {"get": {}, "post": {}},
     "/api/v1/scans/{scan_id}/run": {"post": {}},
@@ -2892,6 +3069,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn secret_api_redacts_values_and_records_lifecycle_audit() {
+        let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+        let create = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/secrets")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "name": "test-proxmox-token",
+                    "kind": "proxmox_api_token",
+                    "scope": {"type": "global"},
+                    "value": "never-return-this-value"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let response = router(state.clone()).oneshot(create).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = json["data"]["metadata"]["metadata"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!json.to_string().contains("never-return-this-value"));
+
+        let rotate_without_confirmation = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v1/secrets/{id}/rotate"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"value":"rotated-value","confirmed":false}).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            router(state.clone())
+                .oneshot(rotate_without_confirmation)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let revoke = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v1/secrets/{id}/revoke"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"confirmed":true}"#))
+            .unwrap();
+        assert_eq!(
+            router(state.clone())
+                .oneshot(revoke)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+
+        let audit = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/secrets/audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(audit.status(), StatusCode::OK);
+        let audit_body = axum::body::to_bytes(audit.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let audit_json: serde_json::Value = serde_json::from_slice(&audit_body).unwrap();
+        assert_eq!(audit_json["data"][0]["action"], "created");
+        assert!(!audit_json.to_string().contains("never-return-this-value"));
     }
 
     #[test]

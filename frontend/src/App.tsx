@@ -8,6 +8,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { NodesPage } from "./pages/NodesPage";
 import { ContainersPage } from "./pages/ContainersPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
+import { SecretsPage } from "./pages/SecretsPage";
 
 export default function App() {
   const queryClient = useQueryClient();
@@ -38,6 +39,7 @@ export default function App() {
           <NavLink className="nav-link" to="/nodes">Nodes</NavLink>
           <NavLink className="nav-link" to="/containers">Container</NavLink>
           <NavLink className="nav-link" to="/workflows">Automatisierung</NavLink>
+          <NavLink className="nav-link" to="/secrets">Secrets</NavLink>
         </nav>
         <div className="connection-indicator" aria-live="polite">
           <span className={connectionState === "verbunden" ? "status-dot ok" : "status-dot warn"} />
@@ -51,6 +53,7 @@ export default function App() {
           <Route path="/nodes" element={<NodesPage />} />
           <Route path="/containers" element={<ContainersPage />} />
           <Route path="/workflows" element={<WorkflowsPage />} />
+          <Route path="/secrets" element={<SecretsPage />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>

@@ -78,6 +78,23 @@ export type CreateAnsibleJobRequest = {
   confirmed: boolean;
 };
 
+export type SecretKind = "proxmox_api_token" | "ssh_private_key" | "ssh_password" | "agent_token" | "generic";
+export type SecretScope = { type: "global" } | { type: "node"; id: string } | { type: "container"; id: number };
+export type SecretMetadata = {
+  metadata: {
+    metadata: {
+      id: string;
+      name: string;
+      kind: SecretKind;
+      scope: SecretScope;
+      created_at: string;
+      updated_at: string;
+    };
+    status: "active" | "revoked";
+  };
+};
+export type SecretAuditEvent = { secret_id: string; action: string; role: string; occurred_at: string };
+
 export type ApiErrorBody = {
   error?: { code: string; message: string };
   request_id?: string;
@@ -118,6 +135,15 @@ export class ApiClient {
     });
   }
 
+  async delete<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    return this.request<T>(path, {
+      method: "DELETE",
+      signal,
+      headers: { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  }
+
   subscribe(onEvent: (event: ApiEvent) => void, onError?: () => void): () => void {
     const source = new EventSource(`${this.baseUrl}/api/v1/events`);
     const eventTypes = ["task", "log", "status", "error"] as const;
@@ -148,6 +174,7 @@ export class ApiClient {
           headers: { accept: "application/json", ...init?.headers },
         });
         const text = await response.text();
+        if (response.status === 204) return undefined as T;
         let payload: ApiEnvelope<T> | ApiErrorBody | undefined;
         try { payload = text ? JSON.parse(text) as ApiEnvelope<T> | ApiErrorBody : undefined; } catch { payload = undefined; }
         if (!response.ok) {
@@ -175,4 +202,28 @@ export const apiClient = new ApiClient();
 
 export function createAnsibleJob(request: CreateAnsibleJobRequest, signal?: AbortSignal) {
   return apiClient.post<AnsibleJobDto>("/api/v1/ansible/jobs", request, signal);
+}
+
+export function listSecrets(signal?: AbortSignal) {
+  return apiClient.get<SecretMetadata[]>("/api/v1/secrets", signal);
+}
+
+export function listSecretAudit(signal?: AbortSignal) {
+  return apiClient.get<SecretAuditEvent[]>("/api/v1/secrets/audit", signal);
+}
+
+export function createSecret(request: { name: string; kind: SecretKind; scope: SecretScope; value: string }, signal?: AbortSignal) {
+  return apiClient.post<SecretMetadata>("/api/v1/secrets", request, signal);
+}
+
+export function rotateSecret(id: string, value: string, confirmed = true, signal?: AbortSignal) {
+  return apiClient.post<SecretMetadata>(`/api/v1/secrets/${id}/rotate`, { value, confirmed }, signal);
+}
+
+export function revokeSecret(id: string, confirmed = true, signal?: AbortSignal) {
+  return apiClient.post<SecretMetadata>(`/api/v1/secrets/${id}/revoke`, { confirmed }, signal);
+}
+
+export function deleteSecret(id: string, confirmed = true, signal?: AbortSignal) {
+  return apiClient.delete<void>(`/api/v1/secrets/${id}`, { confirmed }, signal);
 }

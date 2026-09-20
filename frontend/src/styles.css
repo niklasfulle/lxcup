@@ -29,4 +29,12 @@ nav { display: grid; gap: .35rem; }
 .primary-button { width: fit-content; padding: .7rem 1rem; border: 0; border-radius: .45rem; color: #07131e; background: #79d8c7; cursor: pointer; font-weight: 700; }
 .primary-button:disabled { cursor: not-allowed; opacity: .45; }
 .success-state { color: #8be6ae; }
+.section-heading, .secret-row, .audit-list li { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.secret-list, .audit-list { display: grid; gap: .75rem; margin: 0; padding: 0; list-style: none; }
+.secret-row, .audit-list li { padding: .9rem 0; border-bottom: 1px solid #25364a; }
+.secret-row > div:first-child, .audit-list li { display: grid; gap: .25rem; }
+.secret-actions, .inline-form { display: flex; align-items: center; gap: .5rem; }
+.secret-actions button, .inline-form button { border: 1px solid #39516a; border-radius: .45rem; color: inherit; background: #0b1624; padding: .45rem .7rem; cursor: pointer; }
+.secret-actions button:disabled, .inline-form button:disabled { cursor: not-allowed; opacity: .5; }
+.inline-form { grid-column: 1 / -1; }
 @media (max-width: 700px) { .app-shell { display: block; }.sidebar { position: static; border-right: 0; border-bottom: 1px solid #25364a; padding: 1rem; }.brand-caption { margin-bottom: .75rem; }.connection-indicator { margin-top: 1rem; }.main-content { padding-top: 2rem; }.summary-grid, .panel-grid { grid-template-columns: 1fr; } }

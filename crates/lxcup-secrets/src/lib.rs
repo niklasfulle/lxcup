@@ -57,6 +57,7 @@ pub enum SecretStoreError {
 
 /// Small provider interface used by the application and replaceable by fakes.
 pub trait SecretStore: Send + Sync {
+    fn list_metadata(&self) -> Result<Vec<StoredSecretMetadata>, SecretStoreError>;
     fn create(&self, request: CreateSecret) -> Result<StoredSecretMetadata, SecretStoreError>;
     fn read(&self, id: SecretId) -> Result<SecretValue, SecretStoreError>;
     fn metadata(&self, id: SecretId) -> Result<StoredSecretMetadata, SecretStoreError>;
@@ -79,6 +80,18 @@ pub struct InMemorySecretStore {
 }
 
 impl SecretStore for InMemorySecretStore {
+    fn list_metadata(&self) -> Result<Vec<StoredSecretMetadata>, SecretStoreError> {
+        let mut values = self
+            .records
+            .read()
+            .map_err(|_| SecretStoreError::Unavailable)?
+            .values()
+            .map(|record| record.metadata.clone())
+            .collect::<Vec<_>>();
+        values.sort_by_key(|secret| secret.metadata.name.clone());
+        Ok(values)
+    }
+
     fn create(&self, request: CreateSecret) -> Result<StoredSecretMetadata, SecretStoreError> {
         let metadata = SecretMetadata::new(request.name, request.kind, request.scope)
             .map_err(|_| SecretStoreError::Invalid)?;
@@ -202,6 +215,20 @@ impl FileSecretStore {
 }
 
 impl SecretStore for FileSecretStore {
+    fn list_metadata(&self) -> Result<Vec<StoredSecretMetadata>, SecretStoreError> {
+        let mut values = Vec::new();
+        for entry in fs::read_dir(&self.root).map_err(map_io_error)? {
+            let entry = entry.map_err(map_io_error)?;
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = fs::read(entry.path()).map_err(map_io_error)?;
+            values.push(serde_json::from_slice(&bytes).map_err(|_| SecretStoreError::Invalid)?);
+        }
+        values.sort_by_key(|secret: &StoredSecretMetadata| secret.metadata.name.clone());
+        Ok(values)
+    }
+
     fn create(&self, request: CreateSecret) -> Result<StoredSecretMetadata, SecretStoreError> {
         let metadata = SecretMetadata::new(request.name, request.kind, request.scope)
             .map_err(|_| SecretStoreError::Invalid)?;
@@ -381,6 +408,20 @@ impl EncryptedFileSecretStore {
 }
 
 impl SecretStore for EncryptedFileSecretStore {
+    fn list_metadata(&self) -> Result<Vec<StoredSecretMetadata>, SecretStoreError> {
+        let mut values = Vec::new();
+        for entry in fs::read_dir(&self.root).map_err(map_io_error)? {
+            let entry = entry.map_err(map_io_error)?;
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = fs::read(entry.path()).map_err(map_io_error)?;
+            values.push(serde_json::from_slice(&bytes).map_err(|_| SecretStoreError::Invalid)?);
+        }
+        values.sort_by_key(|secret: &StoredSecretMetadata| secret.metadata.name.clone());
+        Ok(values)
+    }
+
     fn create(&self, request: CreateSecret) -> Result<StoredSecretMetadata, SecretStoreError> {
         let metadata = SecretMetadata::new(request.name, request.kind, request.scope)
             .map_err(|_| SecretStoreError::Invalid)?;
@@ -494,6 +535,16 @@ impl DockerSecretStore {
 }
 
 impl SecretStore for DockerSecretStore {
+    fn list_metadata(&self) -> Result<Vec<StoredSecretMetadata>, SecretStoreError> {
+        let mut values = self
+            .entries
+            .values()
+            .map(|(metadata, _)| metadata.clone())
+            .collect::<Vec<_>>();
+        values.sort_by_key(|secret| secret.metadata.name.clone());
+        Ok(values)
+    }
+
     fn create(&self, _request: CreateSecret) -> Result<StoredSecretMetadata, SecretStoreError> {
         Err(SecretStoreError::Denied)
     }
