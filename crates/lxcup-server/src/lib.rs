@@ -29,10 +29,10 @@ use lxcup_ansible::{
     AnsibleParameters, ExecutionMode, JobSubmission,
 };
 use lxcup_core::{
-    ActorRole, Container, ContainerId, ContainerManagementState, Enrollment, EnrollmentId,
-    EnrollmentState, EnvironmentId, EnvironmentStatus, Execution, ExecutionId, Node, NodeId,
-    Permission, PlanStatus, ProxmoxEnvironment, ResourceLifecycle, ResourceTarget, Scan, ScanId,
-    SecretId, UpdatePlan, UpdatePlanId,
+    ActorRole, Container, ContainerAction, ContainerId, ContainerManagementState, Enrollment,
+    EnrollmentId, EnrollmentState, EnvironmentId, EnvironmentStatus, Execution, ExecutionId, Node,
+    NodeId, Permission, PlanStatus, ProxmoxEnvironment, ResourceLifecycle, ResourceTarget, Scan,
+    ScanId, SecretId, UpdatePlan, UpdatePlanId,
 };
 use lxcup_execution::{ExecutionCoordinator, ExecutionRequest, ExecutionStart};
 use lxcup_persistence::Repositories;
@@ -123,6 +123,8 @@ struct ApiStore {
     executions: Vec<Execution>,
     safety: HashMap<ExecutionId, SafetyDto>,
     results: HashMap<ExecutionId, ExecutionResultDto>,
+    container_actions: Vec<ContainerActionTask>,
+    container_action_keys: HashMap<(ContainerId, String), Uuid>,
 }
 
 #[derive(Clone)]
@@ -192,6 +194,14 @@ pub fn router(state: ApiState) -> Router {
             get(list_node_containers),
         )
         .route("/api/v1/containers", get(list_containers))
+        .route(
+            "/api/v1/containers/{container_id}/actions",
+            post(create_container_action),
+        )
+        .route(
+            "/api/v1/container-actions/{action_id}",
+            get(get_container_action),
+        )
         .route(
             "/api/v1/containers/{container_id}/scans",
             get(list_scans).post(start_scan),
@@ -646,6 +656,173 @@ fn map_environment_domain_error(error: lxcup_core::DomainError) -> ApiError {
             "invalid_environment_state",
             "the environment state cannot change",
         ),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerActionStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Blocked,
+}
+
+#[derive(Clone, Debug)]
+struct ContainerActionTask {
+    id: Uuid,
+    container_id: ContainerId,
+    action: ContainerAction,
+    status: ContainerActionStatus,
+    idempotency_key: String,
+    error: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateContainerActionRequest {
+    pub action: ContainerAction,
+    pub idempotency_key: String,
+    pub confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ContainerActionTaskDto {
+    pub id: Uuid,
+    pub container_id: ContainerId,
+    pub action: ContainerAction,
+    pub status: ContainerActionStatus,
+    pub idempotency_key: String,
+    pub error: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<&ContainerActionTask> for ContainerActionTaskDto {
+    fn from(task: &ContainerActionTask) -> Self {
+        Self {
+            id: task.id,
+            container_id: task.container_id,
+            action: task.action,
+            status: task.status,
+            idempotency_key: task.idempotency_key.clone(),
+            error: task.error.clone(),
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+        }
+    }
+}
+
+async fn create_container_action(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    Path(container_id): Path<String>,
+    JsonBody(request): JsonBody<CreateContainerActionRequest>,
+) -> Result<(StatusCode, Json<ApiEnvelope<ContainerActionTaskDto>>), ApiError> {
+    require_permission(actor_role, Permission::Configure)?;
+    if request.action.requires_confirmation() {
+        require_permission(actor_role, Permission::Destructive)?;
+    }
+    let container_id = parse_container_id(&container_id)?;
+    let mut store = state.store.write().await;
+    let container = store
+        .containers
+        .iter()
+        .find(|container| container.id == container_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("container not found"))?;
+    container
+        .validate_action(request.action, request.confirmed, &request.idempotency_key)
+        .map_err(map_container_action_error)?;
+
+    let key = (container_id, request.idempotency_key.clone());
+    if let Some(existing_id) = store.container_action_keys.get(&key).copied() {
+        let existing = store
+            .container_actions
+            .iter()
+            .find(|task| task.id == existing_id)
+            .expect("container action idempotency index must point to a task");
+        if existing.action != request.action {
+            return Err(ApiError::conflict(
+                "idempotency_key_reused",
+                "idempotency key is already used for another action",
+            ));
+        }
+        return Ok((
+            StatusCode::OK,
+            Json(envelope(ContainerActionTaskDto::from(existing))),
+        ));
+    }
+
+    if store.container_actions.iter().any(|task| {
+        task.container_id == container_id && task.status == ContainerActionStatus::Running
+    }) {
+        return Err(ApiError::conflict(
+            "container_action_busy",
+            "another action is already running for this container",
+        ));
+    }
+
+    let now = chrono::Utc::now();
+    let task = ContainerActionTask {
+        id: Uuid::new_v4(),
+        container_id,
+        action: request.action,
+        status: ContainerActionStatus::Queued,
+        idempotency_key: request.idempotency_key,
+        error: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let dto = ContainerActionTaskDto::from(&task);
+    store
+        .container_action_keys
+        .insert((container_id, task.idempotency_key.clone()), task.id);
+    store.container_actions.push(task);
+    drop(store);
+    state.publish(ApiEvent::status(
+        "container_action",
+        dto.id.to_string(),
+        "queued",
+    ));
+    Ok((StatusCode::ACCEPTED, Json(envelope(dto))))
+}
+
+async fn get_container_action(
+    State(state): State<ApiState>,
+    Path(action_id): Path<String>,
+) -> Result<Json<ApiEnvelope<ContainerActionTaskDto>>, ApiError> {
+    let action_id = parse_uuid(&action_id, "container action id")?;
+    let store = state.store.read().await;
+    let task = store
+        .container_actions
+        .iter()
+        .find(|task| task.id == action_id)
+        .ok_or_else(|| ApiError::not_found("container action not found"))?;
+    Ok(Json(envelope(ContainerActionTaskDto::from(task))))
+}
+
+fn map_container_action_error(error: lxcup_core::DomainError) -> ApiError {
+    match error {
+        lxcup_core::DomainError::ConfirmationRequired => ApiError::bad_request(
+            "confirmation_required",
+            "the container action requires explicit confirmation",
+        ),
+        lxcup_core::DomainError::EmptyValue { .. }
+        | lxcup_core::DomainError::InvalidPackageName
+        | lxcup_core::DomainError::InvalidEnvironmentEndpoint => ApiError::bad_request(
+            "invalid_container_action",
+            "the container action is invalid",
+        ),
+        lxcup_core::DomainError::InvalidStateTransition(_) => ApiError::conflict(
+            "container_action_invalid_state",
+            "the container status does not allow this action",
+        ),
+        lxcup_core::DomainError::PermissionDenied => {
+            ApiError::forbidden("permission_denied", "the role cannot run this action")
+        }
     }
 }
 
@@ -2440,6 +2617,76 @@ mod tests {
             router(state).oneshot(delete).await.unwrap().status(),
             StatusCode::NO_CONTENT
         );
+    }
+
+    #[tokio::test]
+    async fn container_action_api_validates_status_and_deduplicates_tasks() {
+        let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+        let container = Container::new(
+            ContainerId::new(101),
+            NodeId::new(),
+            "test-lxc",
+            lxcup_core::OperatingSystem::Debian,
+            lxcup_core::ContainerStatus::Running,
+        )
+        .unwrap();
+        state.replace_containers(vec![container]).await;
+
+        let stop_request = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/101/actions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "action": "shutdown",
+                        "idempotency_key": "shutdown-1",
+                        "confirmed": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+        let first = router(state.clone()).oneshot(stop_request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+        let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+        let task_id = first_json["data"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(first_json["data"]["status"], "queued");
+
+        let duplicate = router(state.clone()).oneshot(stop_request()).await.unwrap();
+        assert_eq!(duplicate.status(), StatusCode::OK);
+
+        let start = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/containers/101/actions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "action": "start",
+                    "idempotency_key": "start-1",
+                    "confirmed": false
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            router(state.clone()).oneshot(start).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+
+        let status = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/container-actions/{task_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
     }
 
     #[test]
