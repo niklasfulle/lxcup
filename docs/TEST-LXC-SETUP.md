@@ -312,7 +312,21 @@ Host, installiert `/usr/local/bin/lxcup-agent`, legt den systemd-Dienst
 SSH-Tunnel-Befehl mit der automatisch ermittelten LXC-IP aus. Dieser Befehl
 muss in einem zweiten Terminal geöffnet bleiben, während der Agent-Test läuft.
 
-## 9. Sicherheitsregeln
+## 9. Enrollment-Vertrag und Weboberfläche prüfen
+
+Der lokale Vertragstest prüft die idempotente Enrollment-API sowie den
+Frontend-Wizard inklusive TypeScript, JSDOM-Tests und Produktionsbuild:
+
+```powershell
+.\scripts\test-enrollment-contract.ps1
+```
+
+Der vollständige dedizierte Web-zu-Agent-Happy-Path benötigt zusätzlich den
+konfigurierten Ansible-Worker, einen laufenden Test-LXC und die in `.env`
+referenzierten Test-Secrets. Dafür werden keine Produktiv-LXCs verwendet; der
+opt-in-Pfad bleibt bewusst lokal und wird nicht über GitHub Actions ausgeführt.
+
+## 10. Sicherheitsregeln
 
 - `.env` niemals committen oder in Logs ausgeben.
 - Proxmox-Testtoken und Agent-Token niemals wiederverwenden.
