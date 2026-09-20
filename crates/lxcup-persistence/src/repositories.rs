@@ -138,13 +138,14 @@ impl AgentRegistrationRepository {
     pub async fn save(&self, registration: &AgentRegistration) -> Result<(), RepositoryError> {
         let payload = serde_json::to_value(registration).map_err(RepositoryError::Serialization)?;
         sqlx::query(
-            "INSERT INTO agent_registrations (id, container_id, agent_id, endpoint, secret_ref, state, payload, last_checked_at, last_error, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (container_id) DO UPDATE SET agent_id = EXCLUDED.agent_id, endpoint = EXCLUDED.endpoint, secret_ref = EXCLUDED.secret_ref, state = EXCLUDED.state, payload = EXCLUDED.payload, last_checked_at = EXCLUDED.last_checked_at, last_error = EXCLUDED.last_error, updated_at = EXCLUDED.updated_at",
+            "INSERT INTO agent_registrations (id, container_id, agent_id, endpoint, secret_ref, ca_secret_ref, state, payload, last_checked_at, last_error, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (container_id) DO UPDATE SET agent_id = EXCLUDED.agent_id, endpoint = EXCLUDED.endpoint, secret_ref = EXCLUDED.secret_ref, ca_secret_ref = EXCLUDED.ca_secret_ref, state = EXCLUDED.state, payload = EXCLUDED.payload, last_checked_at = EXCLUDED.last_checked_at, last_error = EXCLUDED.last_error, updated_at = EXCLUDED.updated_at",
         )
         .bind(registration.id.as_uuid())
         .bind(registration.container_id.value() as i64)
         .bind(&registration.agent_id)
         .bind(&registration.endpoint)
         .bind(registration.secret_ref.as_uuid())
+        .bind(registration.ca_secret_ref.map(SecretId::as_uuid))
         .bind(agent_state_to_db(registration.state))
         .bind(payload)
         .bind(registration.last_checked_at)

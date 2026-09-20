@@ -116,6 +116,12 @@ impl ApiState {
             let Ok(config) = AgentClientConfig::new(registration.endpoint.clone(), secret.expose()) else {
                 continue;
             };
+            let config = if let Some(ca_secret_ref) = registration.ca_secret_ref {
+                let Ok(ca) = self.secrets.read(ca_secret_ref) else { continue };
+                config.with_root_certificate_pem(ca.expose().as_bytes())
+            } else {
+                config
+            };
             let Ok(client) = AgentClient::new(config) else {
                 continue;
             };
@@ -126,6 +132,17 @@ impl ApiState {
             restored += 1;
         }
         restored
+    }
+
+    /// Drops in-memory clients when their credential is rotated or revoked so
+    /// the previous credential cannot be used through the lxcup API anymore.
+    pub async fn invalidate_agents_for_secret(&self, secret_id: SecretId) {
+        let Some(repositories) = self.repositories.as_ref() else { return };
+        let Ok(registrations) = repositories.agent_registrations.list().await else { return };
+        for registration in registrations.into_iter().filter(|item| item.secret_ref == secret_id) {
+            self.agents.write().await.remove(&registration.container_id);
+            self.publish(ApiEvent::status("agent", registration.container_id.value().to_string(), "credential_invalidated"));
+        }
     }
 
     pub fn publish(&self, event: ApiEvent) {
@@ -1996,6 +2013,8 @@ pub struct RegisterAgentRequest {
     pub endpoint: String,
     #[serde(default)]
     pub secret_ref: Option<SecretId>,
+    #[serde(default)]
+    pub ca_secret_ref: Option<SecretId>,
     /// Development-only compatibility input. Production requests must use
     /// `secret_ref`; this field is rejected unless explicitly enabled.
     #[serde(default)]
@@ -2050,6 +2069,12 @@ async fn register_agent(
     let config = AgentClientConfig::new(request.endpoint.clone(), token).map_err(|_| {
         ApiError::bad_request("invalid_agent_config", "agent endpoint or token is invalid")
     })?;
+    let config = if let Some(ca_secret_ref) = request.ca_secret_ref {
+        let ca = state.secrets.read(ca_secret_ref).map_err(map_secret_error)?;
+        config.with_root_certificate_pem(ca.expose().as_bytes())
+    } else {
+        config
+    };
     let client = AgentClient::new(config).map_err(|_| {
         ApiError::dependency(
             "agent_client_error",
@@ -2075,6 +2100,7 @@ async fn register_agent(
             info.info.agent_id.clone(),
             request.endpoint.clone(),
             secret_ref,
+            request.ca_secret_ref,
             chrono::Utc::now(),
         )
         .map_err(|_| ApiError::bad_request("invalid_agent_registration", "agent registration is invalid"))?;
@@ -2217,6 +2243,7 @@ async fn rotate_secret(
     let value = SecretValue::new(request.value)
         .map_err(|_| ApiError::bad_request("invalid_secret", "the secret value is invalid"))?;
     state.secrets.rotate(id, value).map_err(map_secret_error)?;
+    state.invalidate_agents_for_secret(id).await;
     let metadata = state.secrets.metadata(id).map_err(map_secret_error)?;
     record_secret_audit(&state, id, "rotated", actor_role).await;
     Ok(Json(envelope(SecretMetadataDto { metadata })))
@@ -2237,6 +2264,7 @@ async fn revoke_secret(
     }
     let id = parse_secret_id(&secret_id)?;
     state.secrets.revoke(id).map_err(map_secret_error)?;
+    state.invalidate_agents_for_secret(id).await;
     let metadata = state.secrets.metadata(id).map_err(map_secret_error)?;
     record_secret_audit(&state, id, "revoked", actor_role).await;
     Ok(Json(envelope(SecretMetadataDto { metadata })))

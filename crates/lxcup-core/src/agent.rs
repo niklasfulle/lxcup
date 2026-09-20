@@ -18,6 +18,7 @@ pub struct AgentRegistration {
     pub agent_id: String,
     pub endpoint: String,
     pub secret_ref: SecretId,
+    pub ca_secret_ref: Option<SecretId>,
     pub state: AgentConnectionState,
     pub last_checked_at: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
@@ -31,6 +32,7 @@ impl AgentRegistration {
         agent_id: impl Into<String>,
         endpoint: impl Into<String>,
         secret_ref: SecretId,
+        ca_secret_ref: Option<SecretId>,
         now: DateTime<Utc>,
     ) -> Result<Self, DomainError> {
         let agent_id = agent_id.into().trim().to_owned();
@@ -47,6 +49,7 @@ impl AgentRegistration {
             agent_id,
             endpoint,
             secret_ref,
+            ca_secret_ref,
             state: AgentConnectionState::Connected,
             last_checked_at: Some(now),
             last_error: None,
@@ -78,15 +81,15 @@ mod tests {
     #[test]
     fn registration_accepts_https_and_local_development_endpoints_only() {
         let now = Utc::now();
-        assert!(AgentRegistration::new(ContainerId::new(101), "agent-1", "https://agent", SecretId::new(), now).is_ok());
-        assert!(AgentRegistration::new(ContainerId::new(101), "agent-1", "http://agent", SecretId::new(), now).is_err());
-        assert!(AgentRegistration::new(ContainerId::new(101), "agent-1", "http://127.0.0.1:8090", SecretId::new(), now).is_ok());
+        assert!(AgentRegistration::new(ContainerId::new(101), "agent-1", "https://agent", SecretId::new(), None, now).is_ok());
+        assert!(AgentRegistration::new(ContainerId::new(101), "agent-1", "http://agent", SecretId::new(), None, now).is_err());
+        assert!(AgentRegistration::new(ContainerId::new(101), "agent-1", "http://127.0.0.1:8090", SecretId::new(), None, now).is_ok());
     }
 
     #[test]
     fn health_reconciliation_distinguishes_degraded_and_unreachable() {
         let now = Utc::now();
-        let mut registration = AgentRegistration::new(ContainerId::new(101), "agent-1", "https://agent", SecretId::new(), now).unwrap();
+        let mut registration = AgentRegistration::new(ContainerId::new(101), "agent-1", "https://agent", SecretId::new(), None, now).unwrap();
         registration.record_health(false, now, Some("agent reported unhealthy".to_owned()));
         assert_eq!(registration.state, AgentConnectionState::Degraded);
         registration.record_unreachable(now, "timeout");

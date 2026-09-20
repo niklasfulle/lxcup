@@ -86,6 +86,7 @@ pub struct AgentClientConfig {
     pub timeout: Duration,
     pub max_retries: u8,
     pub backoff: Duration,
+    root_certificate_pem: Option<Vec<u8>>,
 }
 
 impl fmt::Debug for AgentClientConfig {
@@ -123,6 +124,7 @@ impl AgentClientConfig {
             timeout: Duration::from_secs(20),
             max_retries: 2,
             backoff: Duration::from_millis(150),
+            root_certificate_pem: None,
         })
     }
 
@@ -130,6 +132,14 @@ impl AgentClientConfig {
     pub fn with_retry_policy(mut self, max_retries: u8, backoff: Duration) -> Self {
         self.max_retries = max_retries;
         self.backoff = backoff;
+        self
+    }
+
+    /// Adds the private CA used by a managed HTTPS agent. Certificate
+    /// validation remains enabled; this only extends the trusted roots.
+    #[must_use]
+    pub fn with_root_certificate_pem(mut self, certificate_pem: impl AsRef<[u8]>) -> Self {
+        self.root_certificate_pem = Some(certificate_pem.as_ref().to_vec());
         self
     }
 }
@@ -159,8 +169,13 @@ impl fmt::Debug for AgentClient {
 
 impl AgentClient {
     pub fn new(config: AgentClientConfig) -> Result<Self, AgentError> {
-        let http = Client::builder()
-            .timeout(config.timeout)
+        let mut builder = Client::builder().timeout(config.timeout);
+        if let Some(certificate_pem) = config.root_certificate_pem.as_deref() {
+            let certificate = reqwest::Certificate::from_pem(certificate_pem)
+                .map_err(AgentError::ClientBuild)?;
+            builder = builder.add_root_certificate(certificate);
+        }
+        let http = builder
             .build()
             .map_err(AgentError::ClientBuild)?;
         Ok(Self { http, config })
@@ -524,6 +539,11 @@ mod tests {
         assert!(AgentClientConfig::new("http://agent.example", "token").is_err());
         let config = AgentClientConfig::new("https://agent.example", "secret").unwrap();
         assert!(!format!("{config:?}").contains("secret"));
+        assert!(AgentClientConfig::new("https://agent.example", "secret")
+            .unwrap()
+            .with_root_certificate_pem(b"private-ca")
+            .root_certificate_pem
+            .is_some());
     }
 
     #[test]

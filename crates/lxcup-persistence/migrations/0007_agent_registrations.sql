@@ -4,6 +4,7 @@ CREATE TABLE agent_registrations (
     agent_id TEXT NOT NULL,
     endpoint TEXT NOT NULL,
     secret_ref UUID NOT NULL,
+    ca_secret_ref UUID,
     state TEXT NOT NULL CHECK (state IN ('connected', 'degraded', 'unreachable')),
     payload JSONB NOT NULL,
     last_checked_at TIMESTAMPTZ,
