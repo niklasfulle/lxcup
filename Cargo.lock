@@ -1082,6 +1082,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lxcup-ansible-worker"
+version = "0.1.0"
+dependencies = [
+ "lxcup-ansible",
+ "lxcup-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "lxcup-apt"
 version = "0.1.0"
 dependencies = [
