@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { apiClient, type ContainerDto, type ExecutionSafetyDto, type NodeDto } from "./api";
+import { apiClient, getEnrollment, type ContainerDto, type EnrollmentDto, type ExecutionSafetyDto, type NodeDto } from "./api";
 
 export const queryKeys = {
   nodes: ["nodes"] as const,
@@ -40,5 +40,14 @@ export function useNodeContainers(nodeId: string | undefined) {
     queryFn: ({ signal }) => apiClient.get<ContainerDto[]>(`/api/v1/nodes/${nodeId}/containers`, signal),
     enabled: Boolean(nodeId),
     staleTime: 15_000,
+  });
+}
+
+export function useEnrollment(enrollmentId: string | undefined) {
+  return useQuery<EnrollmentDto>({
+    queryKey: enrollmentId ? ["enrollments", enrollmentId] : ["enrollments", "none"],
+    queryFn: ({ signal }) => getEnrollment(enrollmentId!, signal),
+    enabled: Boolean(enrollmentId),
+    refetchInterval: (query) => query.state.data?.state === "connected" || query.state.data?.state === "failed" ? false : 1_500,
   });
 }

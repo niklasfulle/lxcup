@@ -19,6 +19,8 @@ export type ContainerDto = {
   management_state: string;
   discovered_at: string;
 };
+export type EnrollmentState = "requested" | "discovering" | "installing_agent" | "registering_agent" | "connected" | "failed" | "disabled";
+export type EnrollmentDto = { id: string; container_id: number; state: EnrollmentState; failure_reason: string | null; created_at: string; updated_at: string };
 
 export type ContainerAction = "start" | "stop" | "shutdown" | "reboot" | "refresh" | "clone" | "backup" | "restore" | "delete";
 export type ContainerActionTaskDto = {
@@ -215,6 +217,14 @@ export const apiClient = new ApiClient();
 
 export function createAnsibleJob(request: CreateAnsibleJobRequest, signal?: AbortSignal) {
   return apiClient.post<AnsibleJobDto>("/api/v1/ansible/jobs", request, signal);
+}
+
+export function createEnrollment(containerId: number, idempotencyKey = crypto.randomUUID(), signal?: AbortSignal) {
+  return apiClient.post<EnrollmentDto>("/api/v1/enrollments", { container_id: containerId, idempotency_key: idempotencyKey }, signal);
+}
+
+export function getEnrollment(id: string, signal?: AbortSignal) {
+  return apiClient.get<EnrollmentDto>(`/api/v1/enrollments/${id}`, signal);
 }
 
 export function listSecrets(signal?: AbortSignal) {

@@ -11,6 +11,7 @@ import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { SecretsPage } from "./pages/SecretsPage";
 import { ResourceTree } from "./components/ResourceTree";
 import { ContainerDetailPage } from "./pages/ContainerDetailPage";
+import { EnrollmentPage } from "./pages/EnrollmentPage";
 import { TaskMonitor, type GlobalEvent } from "./components/TaskMonitor";
 
 export default function App() {
@@ -53,6 +54,7 @@ export default function App() {
           <NavLink className="nav-link" to="/">Übersicht</NavLink>
           <NavLink className="nav-link" to="/nodes">Nodes</NavLink>
           <NavLink className="nav-link" to="/containers">Container</NavLink>
+          <NavLink className="nav-link" to="/enrollments/new">LXC hinzufügen</NavLink>
           <NavLink className="nav-link" to="/workflows">Automatisierung</NavLink>
           <NavLink className="nav-link" to="/secrets">Secrets</NavLink>
         </nav>
@@ -74,6 +76,7 @@ export default function App() {
           <Route path="/nodes" element={<NodesPage />} />
           <Route path="/containers" element={<ContainersPage />} />
           <Route path="/containers/:containerId" element={<ContainerDetailPage />} />
+          <Route path="/enrollments/new" element={<EnrollmentPage />} />
           <Route path="/workflows" element={<WorkflowsPage />} />
           <Route path="/secrets" element={<SecretsPage />} />
           <Route path="*" element={<NotFound />} />
