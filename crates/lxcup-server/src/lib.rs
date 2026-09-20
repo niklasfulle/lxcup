@@ -240,6 +240,10 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/containers/{container_id}/agent/metrics",
             get(get_agent_metrics),
         )
+        .route(
+            "/api/v1/containers/{container_id}/agent/revoke",
+            post(revoke_agent),
+        )
         .route("/api/v1/openapi.json", get(openapi_document))
         .route("/api/v1/events", get(stream_events))
         .with_state(state.clone())
@@ -1825,9 +1829,11 @@ pub struct AgentRegistrationDto {
 
 async fn register_agent(
     State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
     Path(container_id): Path<String>,
     JsonBody(request): JsonBody<RegisterAgentRequest>,
 ) -> Result<(StatusCode, Json<ApiEnvelope<AgentRegistrationDto>>), ApiError> {
+    require_permission(actor_role, Permission::Configure)?;
     let container_id = parse_container_id(&container_id)?;
     if !state
         .store
@@ -1867,6 +1873,32 @@ async fn register_agent(
         "registered",
     ));
     Ok((StatusCode::CREATED, Json(envelope(dto))))
+}
+
+async fn revoke_agent(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    Path(container_id): Path<String>,
+    JsonBody(request): JsonBody<ConfirmedRequest>,
+) -> Result<StatusCode, ApiError> {
+    require_permission(actor_role, Permission::Destructive)?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "confirmation_required",
+            "revoking an agent requires explicit confirmation",
+        ));
+    }
+    let container_id = parse_container_id(&container_id)?;
+    let removed = state.agents.write().await.remove(&container_id);
+    if removed.is_none() {
+        return Err(ApiError::not_found("agent not registered"));
+    }
+    state.publish(ApiEvent::status(
+        "agent",
+        container_id.value().to_string(),
+        "revoked",
+    ));
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_agent_health(
@@ -2522,7 +2554,7 @@ mod tests {
         assert_eq!(health_json["data"]["healthy"], true);
         assert_eq!(health_json["data"]["info"]["agent_id"], "test-agent");
 
-        let metrics_response = router(state)
+        let metrics_response = router(state.clone())
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/containers/101/agent/metrics")
@@ -2538,6 +2570,17 @@ mod tests {
         let metrics_json: serde_json::Value = serde_json::from_slice(&metrics_body).unwrap();
         assert_eq!(metrics_json["data"]["commands_total"], 0);
         assert_eq!(metrics_json["data"]["commands_failed"], 0);
+
+        let revoke = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/containers/101/agent/revoke")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"confirmed":true}"#))
+            .unwrap();
+        assert_eq!(
+            router(state).oneshot(revoke).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
 
         agent_task.abort();
     }
