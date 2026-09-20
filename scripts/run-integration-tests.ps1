@@ -1,8 +1,22 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$ProxmoxIp,
+
     [switch]$NoBuild
 )
 
 $ErrorActionPreference = "Stop"
+
+try {
+    $proxmoxAddress = [System.Net.IPAddress]::Parse($ProxmoxIp)
+}
+catch {
+    throw "ProxmoxIp muss eine gültige IP-Adresse sein: $ProxmoxIp"
+}
+if ($proxmoxAddress.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+    throw "ProxmoxIp muss aktuell eine IPv4-Adresse sein: $ProxmoxIp"
+}
 
 function Import-DotEnv {
     param([string]$Path)
@@ -40,6 +54,7 @@ function Import-DotEnv {
 }
 
 Import-DotEnv -Path (Join-Path $PSScriptRoot "..\.env")
+$env:PROXMOX_TEST_CONNECT_IP = $ProxmoxIp
 
 $required = @(
     "DATABASE_TEST_URL",

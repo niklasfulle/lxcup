@@ -168,7 +168,7 @@ werden:
 Alternativ bei bereits gesetzten Umgebungsvariablen:
 
 ```powershell
-.\scripts\run-integration-tests.ps1 -NoBuild
+.\scripts\run-integration-tests.ps1 -ProxmoxIp "<PROXMOX-IP>" -NoBuild
 ```
 
 Der aktuelle Test prüft:

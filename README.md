@@ -204,7 +204,7 @@ $env:PROXMOX_TEST_TOKEN_SECRET = "<test-token-secret>"
 $env:PROXMOX_TEST_CA_CERT = "C:\\secrets\\pve-root-ca.pem"
 $env:LXCUP_INTEGRATION_NODE = "pve-test"
 $env:LXCUP_INTEGRATION_VMID = "101"
-.\scripts\run-integration-tests.ps1
+.\scripts\run-integration-tests.ps1 -ProxmoxIp "<PROXMOX-IP>"
 ```
 
 Der Test wird nicht automatisch ausgeführt und verwendet keine produktiven

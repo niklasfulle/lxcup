@@ -84,5 +84,5 @@ Write-Host "Proxmox-CA gespeichert unter: $caPath"
 Write-Host "Starte dedizierten Integrationstest..."
 
 $testScript = Join-Path $PSScriptRoot "run-integration-tests.ps1"
-& $testScript -NoBuild:$NoBuild
+& $testScript -ProxmoxIp $ProxmoxIp -NoBuild:$NoBuild
 exit $LASTEXITCODE
