@@ -84,6 +84,7 @@ pub enum ResourceAction {
     HealthCheck,
     ConfigureTarget,
     DeployAgent,
+    UpdateAgent,
     RepairAgent,
     UpdatePackages,
     DisableResource,
@@ -96,7 +97,7 @@ impl ResourceAction {
             Self::Discover | Self::HealthCheck => Permission::Read,
             Self::ConfigureTarget => Permission::Configure,
             Self::DeployAgent => Permission::DeployAgent,
-            Self::RepairAgent | Self::UpdatePackages => Permission::Update,
+            Self::UpdateAgent | Self::RepairAgent | Self::UpdatePackages => Permission::Update,
             Self::DisableResource | Self::DeleteResource => Permission::Destructive,
         }
     }

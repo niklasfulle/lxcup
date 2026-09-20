@@ -3,6 +3,7 @@ members = [
     "crates/lxcup-core",
     "crates/lxcup-apt",
     "crates/lxcup-agent",
+    "crates/lxcup-ansible",
     "crates/lxcup-discovery",
     "crates/lxcup-execution",
     "crates/lxcup-cli",

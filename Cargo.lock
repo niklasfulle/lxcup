@@ -1070,6 +1070,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lxcup-ansible"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "lxcup-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "lxcup-apt"
 version = "0.1.0"
 dependencies = [

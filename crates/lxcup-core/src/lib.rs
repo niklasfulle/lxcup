@@ -21,7 +21,9 @@ pub use error::{
     DomainError, ErrorCode, InfrastructureError, LxcupError, LxcupResult, RetryPolicy,
 };
 pub use execution::{Execution, ExecutionStatus};
-pub use ids::{ContainerId, EnrollmentId, ExecutionId, NodeId, ScanId, SecretId, UpdatePlanId};
+pub use ids::{
+    AnsibleJobId, ContainerId, EnrollmentId, ExecutionId, NodeId, ScanId, SecretId, UpdatePlanId,
+};
 pub use node::{Node, NodeStatus};
 pub use plan::{PackageChangeKind, PlanStatus, ResolvedPackageChange, UpdatePlan};
 pub use resource::{
