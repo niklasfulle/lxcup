@@ -132,7 +132,10 @@ function Invoke-Remote {
 function Invoke-RemoteContainerScript {
     param([Parameter(Mandatory = $true)][string]$Script)
 
-    $output = $Script | & ssh -o ConnectTimeout=10 $sshTarget "pct exec $vmid -- /bin/bash -s" 2>&1
+    # Bash erkennt Here-Doc-Abschlussmarker mit CRLF nicht zuverlässig. Der
+    # Windows-String wird deshalb vor der Übertragung auf LF normalisiert.
+    $normalizedScript = $Script.Replace("`r`n", "`n").Replace("`r", "")
+    $output = $normalizedScript | & ssh -o ConnectTimeout=10 $sshTarget "pct exec $vmid -- /bin/bash -s" 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Setup im LXC fehlgeschlagen:`n$($output -join [Environment]::NewLine)"
     }
