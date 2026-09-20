@@ -239,10 +239,27 @@ GET /api/v1/containers/{container_id}/agent/health
 GET /api/v1/containers/{container_id}/agent/metrics
 ```
 
-Der nächste Umsetzungsschritt ist die Installation bzw. der Start von
-`lxcup-agent` im dedizierten Test-LXC, anschließend Registration, Health- und
-Metriktest. Erst wenn diese Prüfungen grün sind, wird ein kontrollierter
-APPLY-Test mit einem ausdrücklich erlaubten Testpaket durchgeführt.
+Nach der Installation bzw. dem Start von `lxcup-agent` im dedizierten
+Test-LXC wird der opt-in Health-/Metriktest so ausgeführt:
+
+```powershell
+$env:LXCUP_INTEGRATION_AGENT_URL = "http://127.0.0.1:8090"
+$env:LXCUP_INTEGRATION_AGENT_TOKEN = "<separates-agent-token>"
+cargo test -p lxcup-test-support --test dedicated_agent -- --ignored --nocapture
+```
+
+Der AgentClient akzeptiert HTTP nur für `localhost`. Für den entfernten LXC
+wird deshalb entweder eine HTTPS-Adresse (zum Beispiel über einen späteren
+Reverse-Proxy) oder ein lokaler SSH-Tunnel verwendet:
+
+```powershell
+ssh -N -L 8090:<LXC-IP>:8090 root@<PROXMOX-IP>
+```
+
+Der Test prüft Health, Protokollversion und Metriken und führt ausschließlich
+das harmlose Health-Kommando aus. Erst wenn diese Prüfungen grün sind, wird ein
+kontrollierter APPLY-Test mit einem ausdrücklich erlaubten Testpaket
+durchgeführt.
 
 Agent-Credentials bleiben getrennt von den Proxmox-Credentials:
 

@@ -1426,6 +1426,93 @@ mod tests {
         assert_eq!(health_response.status(), StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn agent_registration_exposes_health_and_metrics() {
+        let agent_token = "test-agent-token";
+        let agent_info = lxcup_agent::AgentInfo {
+            agent_id: "test-agent".to_owned(),
+            platform: lxcup_agent::AgentPlatform::Linux,
+            hostname: "test-lxc".to_owned(),
+            version: "0.1.0".to_owned(),
+            protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let agent_task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                lxcup_agent::agent_router(lxcup_agent::LocalAgentState::new(
+                    agent_info,
+                    agent_token,
+                )),
+            )
+            .await
+            .unwrap();
+        });
+
+        let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+        let container = Container::new(
+            ContainerId::new(101),
+            NodeId::new(),
+            "test-lxc",
+            lxcup_core::OperatingSystem::Debian,
+            lxcup_core::ContainerStatus::Running,
+        )
+        .unwrap();
+        state.replace_containers(vec![container]).await;
+
+        let registration = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/containers/101/agent")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "endpoint": format!("http://{address}"),
+                    "token": agent_token,
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let registration_response = router(state.clone()).oneshot(registration).await.unwrap();
+        assert_eq!(registration_response.status(), StatusCode::CREATED);
+
+        let health_response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/containers/101/agent/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health_response.status(), StatusCode::OK);
+        let health_body = axum::body::to_bytes(health_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let health_json: serde_json::Value = serde_json::from_slice(&health_body).unwrap();
+        assert_eq!(health_json["data"]["healthy"], true);
+        assert_eq!(health_json["data"]["info"]["agent_id"], "test-agent");
+
+        let metrics_response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/containers/101/agent/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        let metrics_body = axum::body::to_bytes(metrics_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let metrics_json: serde_json::Value = serde_json::from_slice(&metrics_body).unwrap();
+        assert_eq!(metrics_json["data"]["commands_total"], 0);
+        assert_eq!(metrics_json["data"]["commands_failed"], 0);
+
+        agent_task.abort();
+    }
+
     #[test]
     fn invalid_ids_are_rejected() {
         assert!(parse_container_id("0").is_err());

@@ -1052,6 +1052,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tower",
  "tracing",
  "uuid",
 ]
@@ -1194,10 +1195,12 @@ name = "lxcup-test-support"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "lxcup-agent",
  "lxcup-core",
  "lxcup-proxmox",
  "tokio",
  "url",
+ "uuid",
 ]
 
 [[package]]

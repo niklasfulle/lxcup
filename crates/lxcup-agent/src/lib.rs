@@ -516,6 +516,8 @@ fn normalize_apt_list(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
 
     #[test]
     fn config_redacts_tokens_and_requires_safe_urls() {
@@ -539,5 +541,99 @@ mod tests {
         assert!(output.contains("Package: openssl"));
         assert!(output.contains("Security: yes"));
         assert!(output.contains("Installed: 3.0"));
+    }
+
+    #[tokio::test]
+    async fn authenticated_health_command_is_idempotent_and_updates_metrics() {
+        let state = LocalAgentState::new(
+            AgentInfo {
+                agent_id: "test-agent".to_owned(),
+                platform: if cfg!(windows) {
+                    AgentPlatform::Windows
+                } else {
+                    AgentPlatform::Linux
+                },
+                hostname: "test-host".to_owned(),
+                version: "0.1.0".to_owned(),
+                protocol_version: PROTOCOL_VERSION.to_owned(),
+            },
+            "agent-token",
+        );
+        let app = agent_router(state);
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let request = serde_json::json!({
+            "action": "health",
+            "packages": [],
+            "idempotency_key": "health-check-1"
+        })
+        .to_string();
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/command")
+                    .header("authorization", "Bearer agent-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+
+        let second = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/command")
+                    .header("authorization", "Bearer agent-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+        assert_eq!(first_json["request_id"], second_json["request_id"]);
+
+        let metrics = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header("authorization", "Bearer agent-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metrics.status(), StatusCode::OK);
+        let metrics_body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let metrics_json: serde_json::Value = serde_json::from_slice(&metrics_body).unwrap();
+        assert_eq!(metrics_json["commands_total"], 1);
+        assert_eq!(metrics_json["commands_failed"], 0);
     }
 }
