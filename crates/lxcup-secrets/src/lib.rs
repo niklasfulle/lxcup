@@ -11,6 +11,8 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use chacha20poly1305::aead::Aead;
+use chacha20poly1305::{AeadCore, KeyInit, XChaCha20Poly1305, XNonce};
 use lxcup_core::{SecretId, SecretKind, SecretMetadata, SecretScope, SecretValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -256,6 +258,184 @@ impl SecretStore for FileSecretStore {
     }
 }
 
+/// A 256-bit master key supplied by a deployment secret, never by PostgreSQL.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SecretMasterKey([u8; 32]);
+
+impl std::fmt::Debug for SecretMasterKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SecretMasterKey([REDACTED])")
+    }
+}
+
+impl SecretMasterKey {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn from_hex(value: &str) -> Result<Self, SecretStoreError> {
+        let value = value.trim();
+        if value.len() != 64 {
+            return Err(SecretStoreError::Invalid);
+        }
+        let mut bytes = [0_u8; 32];
+        for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+            let text = std::str::from_utf8(chunk).map_err(|_| SecretStoreError::Invalid)?;
+            bytes[index] = u8::from_str_radix(text, 16).map_err(|_| SecretStoreError::Invalid)?;
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Loads a hex-encoded 256-bit key from a deployment secret variable.
+    pub fn from_env(name: &str) -> Result<Self, SecretStoreError> {
+        let value = std::env::var(name).map_err(|_| SecretStoreError::Unavailable)?;
+        Self::from_hex(&value)
+    }
+}
+
+/// File-backed provider that encrypts values with XChaCha20-Poly1305.
+///
+/// The master key is supplied by the process environment/secret manager and
+/// is never written beside metadata or into the database. Previous keys are
+/// tried only for reads, enabling controlled key rotation.
+#[derive(Clone)]
+pub struct EncryptedFileSecretStore {
+    root: PathBuf,
+    current_key: SecretMasterKey,
+    previous_keys: Vec<SecretMasterKey>,
+}
+
+impl EncryptedFileSecretStore {
+    pub fn new(
+        root: impl Into<PathBuf>,
+        current_key: SecretMasterKey,
+        previous_keys: impl IntoIterator<Item = SecretMasterKey>,
+    ) -> Result<Self, SecretStoreError> {
+        let root = root.into();
+        if root.as_os_str().is_empty() {
+            return Err(SecretStoreError::Invalid);
+        }
+        fs::create_dir_all(&root).map_err(|_| SecretStoreError::Unavailable)?;
+        Ok(Self {
+            root,
+            current_key,
+            previous_keys: previous_keys.into_iter().collect(),
+        })
+    }
+
+    fn value_path(&self, id: SecretId) -> PathBuf {
+        self.root.join(format!("{}.enc", id.as_uuid()))
+    }
+
+    fn metadata_path(&self, id: SecretId) -> PathBuf {
+        self.root.join(format!("{}.json", id.as_uuid()))
+    }
+
+    fn read_metadata(&self, id: SecretId) -> Result<StoredSecretMetadata, SecretStoreError> {
+        let bytes = fs::read(self.metadata_path(id)).map_err(map_io_error)?;
+        serde_json::from_slice(&bytes).map_err(|_| SecretStoreError::Invalid)
+    }
+
+    fn write_metadata(&self, metadata: &StoredSecretMetadata) -> Result<(), SecretStoreError> {
+        let bytes = serde_json::to_vec(metadata).map_err(|_| SecretStoreError::Invalid)?;
+        fs::write(self.metadata_path(metadata.metadata.id), bytes).map_err(map_io_error)
+    }
+
+    fn write_encrypted(&self, id: SecretId, value: &SecretValue) -> Result<(), SecretStoreError> {
+        let cipher = XChaCha20Poly1305::new((&self.current_key.0).into());
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut chacha20poly1305::aead::OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, value.expose().as_bytes())
+            .map_err(|_| SecretStoreError::Unavailable)?;
+        let mut payload = b"LXCUPENC1".to_vec();
+        payload.extend_from_slice(nonce.as_slice());
+        payload.extend_from_slice(&ciphertext);
+        write_secret_bytes(&self.value_path(id), &payload)
+    }
+
+    fn decrypt(&self, payload: &[u8]) -> Result<SecretValue, SecretStoreError> {
+        const HEADER: &[u8] = b"LXCUPENC1";
+        if !payload.starts_with(HEADER) || payload.len() <= HEADER.len() + 24 {
+            return Err(SecretStoreError::Invalid);
+        }
+        let nonce = XNonce::from_slice(&payload[HEADER.len()..HEADER.len() + 24]);
+        let ciphertext = &payload[HEADER.len() + 24..];
+        let mut keys = Vec::with_capacity(1 + self.previous_keys.len());
+        keys.push(&self.current_key);
+        keys.extend(self.previous_keys.iter());
+        for key in keys {
+            let cipher = XChaCha20Poly1305::new((&key.0).into());
+            if let Ok(value) = cipher.decrypt(nonce, ciphertext.as_ref()) {
+                let value = String::from_utf8(value).map_err(|_| SecretStoreError::Invalid)?;
+                return SecretValue::new(value).map_err(|_| SecretStoreError::Invalid);
+            }
+        }
+        Err(SecretStoreError::Denied)
+    }
+
+    /// Re-encrypts one value with the current key after a master-key rotation.
+    pub fn rewrap(&self, id: SecretId) -> Result<(), SecretStoreError> {
+        let value = self.read(id)?;
+        self.write_encrypted(id, &value)
+    }
+}
+
+impl SecretStore for EncryptedFileSecretStore {
+    fn create(&self, request: CreateSecret) -> Result<StoredSecretMetadata, SecretStoreError> {
+        let metadata = SecretMetadata::new(request.name, request.kind, request.scope)
+            .map_err(|_| SecretStoreError::Invalid)?;
+        let stored = StoredSecretMetadata {
+            metadata,
+            status: SecretStatus::Active,
+        };
+        self.write_metadata(&stored)?;
+        if let Err(error) = self.write_encrypted(stored.metadata.id, &request.value) {
+            let _ = fs::remove_file(self.metadata_path(stored.metadata.id));
+            return Err(error);
+        }
+        Ok(stored)
+    }
+
+    fn read(&self, id: SecretId) -> Result<SecretValue, SecretStoreError> {
+        let metadata = self.read_metadata(id)?;
+        if metadata.status != SecretStatus::Active {
+            return Err(SecretStoreError::Denied);
+        }
+        self.decrypt(&fs::read(self.value_path(id)).map_err(map_io_error)?)
+    }
+
+    fn metadata(&self, id: SecretId) -> Result<StoredSecretMetadata, SecretStoreError> {
+        self.read_metadata(id)
+    }
+
+    fn update(&self, id: SecretId, value: SecretValue) -> Result<(), SecretStoreError> {
+        let mut metadata = self.read_metadata(id)?;
+        if metadata.status != SecretStatus::Active {
+            return Err(SecretStoreError::Denied);
+        }
+        self.write_encrypted(id, &value)?;
+        metadata.metadata.updated_at = chrono::Utc::now();
+        self.write_metadata(&metadata)
+    }
+
+    fn rotate(&self, id: SecretId, value: SecretValue) -> Result<(), SecretStoreError> {
+        self.update(id, value)
+    }
+
+    fn revoke(&self, id: SecretId) -> Result<(), SecretStoreError> {
+        let mut metadata = self.read_metadata(id)?;
+        metadata.status = SecretStatus::Revoked;
+        metadata.metadata.updated_at = chrono::Utc::now();
+        self.write_metadata(&metadata)
+    }
+
+    fn delete(&self, id: SecretId) -> Result<(), SecretStoreError> {
+        self.read_metadata(id)?;
+        fs::remove_file(self.value_path(id)).map_err(map_io_error)?;
+        fs::remove_file(self.metadata_path(id)).map_err(map_io_error)
+    }
+}
+
 /// Read-only provider for Docker Secret mounts such as `/run/secrets`.
 /// Docker owns rotation and deletion; lxcup only resolves declared entries.
 #[derive(Clone)]
@@ -349,6 +529,10 @@ impl SecretStore for DockerSecretStore {
 }
 
 fn write_secret_file(path: &Path, value: &str) -> Result<(), SecretStoreError> {
+    write_secret_bytes(path, value.as_bytes())
+}
+
+fn write_secret_bytes(path: &Path, value: &[u8]) -> Result<(), SecretStoreError> {
     fs::write(path, value).map_err(map_io_error)?;
     set_private_permissions(path)?;
     Ok(())
@@ -379,8 +563,8 @@ fn set_private_permissions(_path: &Path) -> Result<(), SecretStoreError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateSecret, DockerSecretDefinition, DockerSecretStore, FileSecretStore,
-        InMemorySecretStore, SecretStatus, SecretStore,
+        CreateSecret, DockerSecretDefinition, DockerSecretStore, EncryptedFileSecretStore,
+        FileSecretStore, InMemorySecretStore, SecretMasterKey, SecretStatus, SecretStore,
     };
     use lxcup_core::{SecretKind, SecretScope, SecretValue};
 
@@ -440,6 +624,50 @@ mod tests {
         let error = super::SecretStoreError::Unavailable;
         assert_eq!(error.to_string(), "secret provider is unavailable");
         assert!(!error.to_string().contains("password"));
+    }
+
+    #[test]
+    fn encrypted_provider_supports_key_rotation_without_plaintext_at_rest() {
+        let directory = tempfile::tempdir().unwrap();
+        let old_key = SecretMasterKey::from_bytes([7; 32]);
+        let new_key = SecretMasterKey::from_bytes([8; 32]);
+        let store = EncryptedFileSecretStore::new(directory.path(), old_key.clone(), []).unwrap();
+        let created = store.create(request("encrypted-secret")).unwrap();
+        let payload = std::fs::read(
+            directory
+                .path()
+                .join(format!("{}.enc", created.metadata.id.as_uuid())),
+        )
+        .unwrap();
+        assert!(
+            !payload
+                .windows("encrypted-secret".len())
+                .any(|window| { window == "encrypted-secret".as_bytes() })
+        );
+
+        let rotated =
+            EncryptedFileSecretStore::new(directory.path(), new_key.clone(), [old_key]).unwrap();
+        assert_eq!(
+            rotated.read(created.metadata.id).unwrap().expose(),
+            "encrypted-secret"
+        );
+        rotated.rewrap(created.metadata.id).unwrap();
+
+        let current_only = EncryptedFileSecretStore::new(directory.path(), new_key, []).unwrap();
+        assert_eq!(
+            current_only.read(created.metadata.id).unwrap().expose(),
+            "encrypted-secret"
+        );
+        assert!(
+            EncryptedFileSecretStore::new(
+                directory.path(),
+                SecretMasterKey::from_bytes([9; 32]),
+                []
+            )
+            .unwrap()
+            .read(created.metadata.id)
+            .is_err()
+        );
     }
 
     #[test]
