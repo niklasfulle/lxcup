@@ -944,6 +944,49 @@ async fn create_enrollment(
     store.enrollments.push(enrollment);
     drop(store);
 
+    // When the worker credential references are configured, enrollment also
+    // creates the allowlisted deployment job. Development instances without
+    // worker configuration still expose the lifecycle request for contract
+    // testing; no shell or free-form playbook path is ever accepted here.
+    if configured_ansible_secret_refs().is_ok() {
+        let lifecycle = state
+            .store
+            .read()
+            .await
+            .containers
+            .iter()
+            .find(|container| container.id == container_id)
+            .map(|container| match container.management_state {
+                ContainerManagementState::Discovered => ResourceLifecycle::Discovered,
+                ContainerManagementState::Managed => ResourceLifecycle::Managed,
+                ContainerManagementState::Ignored | ContainerManagementState::Disabled => {
+                    ResourceLifecycle::Disabled
+                }
+            })
+            .unwrap_or(ResourceLifecycle::Failed);
+        let job_request = AnsibleJobRequest {
+            operation: AnsibleOperation::DeployAgent,
+            target: ResourceTarget::Container(container_id),
+            lifecycle,
+            mode: ExecutionMode::Apply,
+            parameters: AnsibleParameters::DeployAgent { agent_version: "0.1.0".to_owned() },
+            secret_refs: configured_ansible_secret_refs()?,
+            idempotency_key: format!("enrollment-{}", dto.id.as_uuid()),
+            confirmed: true,
+            actor_role: ActorRole::Operator,
+        };
+        if let Ok(JobSubmission::Created(job)) = state.ansible.write().await.submit(job_request) {
+            if let Some(repositories) = state.repositories.clone() {
+                repositories.ansible_jobs.save(&job).await.map_err(|_| ApiError::storage())?;
+            }
+            let mut store = state.store.write().await;
+            if let Some(enrollment) = store.enrollments.iter_mut().find(|item| item.id == dto.id) {
+                enrollment.transition_to(EnrollmentState::Discovering).map_err(|_| ApiError::conflict("enrollment_invalid_state", "enrollment cannot start discovery"))?;
+            }
+            state.publish(ApiEvent::status("ansible_job", job.id.as_uuid().to_string(), "queued"));
+        }
+    }
+
     state.publish(ApiEvent::status(
         "enrollment",
         dto.id.as_uuid().to_string(),
