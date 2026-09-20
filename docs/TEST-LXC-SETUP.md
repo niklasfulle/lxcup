@@ -269,6 +269,34 @@ LXCUP_AGENT_TOKEN=<separates-agent-token>
 LXCUP_AGENT_BIND_ADDRESS=0.0.0.0:8090
 ```
 
+### Agent automatisch verteilen
+
+Der Agent kann nach einer SSH-Anmeldung am Proxmox-Host per Skript in den
+dedizierten LXC installiert werden. `LXCUP_AGENT_TOKEN` wird aus der aktuellen
+Umgebung oder aus `.env` gelesen; falls er fehlt, fragt das Skript ihn verdeckt
+ab:
+
+```powershell
+.\scripts\deploy-test-agent.ps1 -ProxmoxIp "<PROXMOX-IP>"
+```
+
+Standardmäßig baut das Skript die Linux-Binary mit dem Docker-Image
+`rust:1.85-bookworm`. Alternativ kann eine bereits gebaute Linux-Binary
+übergeben werden:
+
+```powershell
+.\scripts\deploy-test-agent.ps1 `
+  -ProxmoxIp "<PROXMOX-IP>" `
+  -BinaryPath ".\target\release\lxcup-agent" `
+  -NoBuild
+```
+
+Das Skript ermittelt Node und VMID, kopiert die Binary temporär zum Proxmox-
+Host, installiert `/usr/local/bin/lxcup-agent`, legt den systemd-Dienst
+`lxcup-agent.service` an und startet ihn. Danach gibt es den passenden
+SSH-Tunnel-Befehl mit der automatisch ermittelten LXC-IP aus. Dieser Befehl
+muss in einem zweiten Terminal geöffnet bleiben, während der Agent-Test läuft.
+
 ## 9. Sicherheitsregeln
 
 - `.env` niemals committen oder in Logs ausgeben.
