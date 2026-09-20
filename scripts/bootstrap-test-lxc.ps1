@@ -24,13 +24,20 @@ foreach ($commandName in @("ssh", "scp")) {
 }
 
 $sshTarget = "$SshUser@$ProxmoxIp"
+$sshControlPath = Join-Path $env:TEMP "lxcup-bootstrap-$PID.sock"
+$sshOptions = @(
+    "-o", "ConnectTimeout=10",
+    "-o", "ControlMaster=auto",
+    "-o", "ControlPersist=300",
+    "-o", "ControlPath=$sshControlPath"
+)
 
 function Invoke-Remote {
     param([string]$Command)
 
     # BatchMode verhindert die Passwortabfrage. Schlüssel- und interaktive
     # Passwort-Authentifizierung sollen beide möglich sein.
-    $output = & ssh -o ConnectTimeout=10 $sshTarget $Command 2>&1
+    $output = & ssh @sshOptions $sshTarget $Command 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "SSH-Befehl fehlgeschlagen: $Command`n$($output -join [Environment]::NewLine)"
     }
@@ -61,7 +68,7 @@ $localConfigDirectory = Join-Path $env:LOCALAPPDATA "lxcup"
 New-Item -ItemType Directory -Force -Path $localConfigDirectory | Out-Null
 $caPath = Join-Path $localConfigDirectory "proxmox-test-ca.pem"
 
-& scp -q -o ConnectTimeout=10 "${sshTarget}:/etc/pve/pve-root-ca.pem" $caPath
+& scp -q @sshOptions "${sshTarget}:/etc/pve/pve-root-ca.pem" $caPath
 if ($LASTEXITCODE -ne 0) {
     throw "Die Proxmox-CA konnte nicht per SSH nach '$caPath' kopiert werden."
 }
@@ -85,4 +92,6 @@ Write-Host "Starte dedizierten Integrationstest..."
 
 $testScript = Join-Path $PSScriptRoot "run-integration-tests.ps1"
 & $testScript -ProxmoxIp $ProxmoxIp -NoBuild:$NoBuild
-exit $LASTEXITCODE
+$testExitCode = $LASTEXITCODE
+& ssh @sshOptions -O exit $sshTarget 2>$null | Out-Null
+exit $testExitCode

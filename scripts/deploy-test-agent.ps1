@@ -45,6 +45,13 @@ if ($AgentId -notmatch "^[A-Za-z0-9_.-]+$") {
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptRoot
 $sshTarget = "$SshUser@$ProxmoxIp"
+$sshControlPath = Join-Path $env:TEMP "lxcup-agent-$PID.sock"
+$sshOptions = @(
+    "-o", "ConnectTimeout=10",
+    "-o", "ControlMaster=auto",
+    "-o", "ControlPersist=300",
+    "-o", "ControlPath=$sshControlPath"
+)
 
 function Import-DotEnv {
     param([string]$Path)
@@ -122,7 +129,7 @@ if (-not (Test-Path -LiteralPath $BinaryPath -PathType Leaf)) {
 function Invoke-Remote {
     param([Parameter(Mandatory = $true)][string]$Command)
 
-    $output = & ssh -o ConnectTimeout=10 $sshTarget $Command 2>&1
+    $output = & ssh @sshOptions $sshTarget $Command 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "SSH-Befehl fehlgeschlagen: $Command`n$($output -join [Environment]::NewLine)"
     }
@@ -135,7 +142,7 @@ function Invoke-RemoteContainerScript {
     # Bash erkennt Here-Doc-Abschlussmarker mit CRLF nicht zuverlässig. Der
     # Windows-String wird deshalb vor der Übertragung auf LF normalisiert.
     $normalizedScript = $Script.Replace("`r`n", "`n").Replace("`r", "")
-    $output = $normalizedScript | & ssh -o ConnectTimeout=10 $sshTarget "pct exec $vmid -- /bin/bash -s" 2>&1
+    $output = $normalizedScript | & ssh @sshOptions $sshTarget "pct exec $vmid -- /bin/bash -s" 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Setup im LXC fehlgeschlagen:`n$($output -join [Environment]::NewLine)"
     }
@@ -177,7 +184,7 @@ $agentTokenBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ag
 try {
     Write-Host "Test-LXC '$ContainerName' gefunden: Node=$nodeName, VMID=$vmid"
     Write-Host "Kopiere Linux-Agent nach Proxmox..."
-    & scp -q -o ConnectTimeout=10 $BinaryPath ("{0}:{1}" -f $sshTarget, $remoteBinary)
+    & scp -q @sshOptions $BinaryPath ("{0}:{1}" -f $sshTarget, $remoteBinary)
     if ($LASTEXITCODE -ne 0) {
         throw "Die Linux-Agent-Binary konnte nicht nach Proxmox kopiert werden."
     }
@@ -257,4 +264,5 @@ finally {
     catch {
         Write-Warning "Temporäre Proxmox-Datei konnte nicht entfernt werden: $remoteBinary"
     }
+    & ssh @sshOptions -O exit $sshTarget 2>$null | Out-Null
 }
