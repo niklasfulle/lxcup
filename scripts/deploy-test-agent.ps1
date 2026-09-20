@@ -218,8 +218,18 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable lxcup-agent.service
-systemctl restart lxcup-agent.service
-systemctl is-active --quiet lxcup-agent.service
+if ! systemctl restart lxcup-agent.service; then
+    echo "lxcup-agent konnte nicht gestartet werden."
+    systemctl status lxcup-agent.service --no-pager || true
+    journalctl -u lxcup-agent.service -n 50 --no-pager || true
+    exit 1
+fi
+if ! systemctl is-active --quiet lxcup-agent.service; then
+    echo "lxcup-agent ist nach dem Start nicht aktiv."
+    systemctl status lxcup-agent.service --no-pager || true
+    journalctl -u lxcup-agent.service -n 50 --no-pager || true
+    exit 1
+fi
 '@
     $remoteSetup = $remoteSetup.Replace("__TOKEN_B64__", $agentTokenBase64)
     $remoteSetup = $remoteSetup.Replace("__AGENT_ID__", $AgentId)
