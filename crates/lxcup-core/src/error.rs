@@ -73,6 +73,10 @@ pub enum DomainError {
     #[error("package name must not contain whitespace")]
     InvalidPackageName,
 
+    /// Eine Proxmox-Endpoint-URL ist nicht sicher oder nicht kanonisch.
+    #[error("environment endpoint must be a valid https URL without whitespace")]
+    InvalidEnvironmentEndpoint,
+
     /// Eine angeforderte Zustandsänderung ist nicht erlaubt.
     #[error("invalid domain state transition: {0}")]
     InvalidStateTransition(&'static str),

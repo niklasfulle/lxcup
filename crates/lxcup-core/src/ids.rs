@@ -29,6 +29,7 @@ macro_rules! uuid_id {
 }
 
 uuid_id!(NodeId);
+uuid_id!(EnvironmentId);
 uuid_id!(EnrollmentId);
 uuid_id!(ScanId);
 uuid_id!(SecretId);

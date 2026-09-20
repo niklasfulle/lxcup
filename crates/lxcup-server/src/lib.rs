@@ -30,8 +30,9 @@ use lxcup_ansible::{
 };
 use lxcup_core::{
     ActorRole, Container, ContainerId, ContainerManagementState, Enrollment, EnrollmentId,
-    EnrollmentState, Execution, ExecutionId, Node, NodeId, PlanStatus, ResourceLifecycle,
-    ResourceTarget, Scan, ScanId, SecretId, UpdatePlan, UpdatePlanId,
+    EnrollmentState, EnvironmentId, EnvironmentStatus, Execution, ExecutionId, Node, NodeId,
+    Permission, PlanStatus, ProxmoxEnvironment, ResourceLifecycle, ResourceTarget, Scan, ScanId,
+    SecretId, UpdatePlan, UpdatePlanId,
 };
 use lxcup_execution::{ExecutionCoordinator, ExecutionRequest, ExecutionStart};
 use lxcup_persistence::Repositories;
@@ -112,6 +113,7 @@ impl Default for ApiState {
 
 #[derive(Default)]
 struct ApiStore {
+    environments: Vec<ProxmoxEnvironment>,
     nodes: Vec<Node>,
     containers: Vec<Container>,
     enrollments: Vec<Enrollment>,
@@ -163,6 +165,24 @@ pub fn router(state: ApiState) -> Router {
         .route("/health/ready", get(ready_health))
         .route("/metrics", get(metrics))
         .route("/api/v1/nodes", get(list_nodes))
+        .route(
+            "/api/v1/environments",
+            get(list_environments).post(create_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}",
+            get(get_environment)
+                .patch(update_environment)
+                .delete(delete_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/check",
+            post(check_environment),
+        )
+        .route(
+            "/api/v1/environments/{environment_id}/disable",
+            post(disable_environment),
+        )
         .route("/api/v1/enrollments", post(create_enrollment))
         .route("/api/v1/enrollments/{enrollment_id}", get(get_enrollment))
         .route("/api/v1/ansible/jobs", post(create_ansible_job))
@@ -322,6 +342,311 @@ async fn list_nodes(State(state): State<ApiState>) -> Json<ApiEnvelope<Vec<NodeD
         .map(NodeDto::from)
         .collect();
     Json(envelope(nodes))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateEnvironmentRequest {
+    pub name: String,
+    pub endpoint: String,
+    pub api_secret_ref: SecretId,
+    pub ca_secret_ref: Option<SecretId>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdateEnvironmentRequest {
+    pub name: Option<String>,
+    pub endpoint: Option<String>,
+    pub api_secret_ref: Option<SecretId>,
+    pub ca_secret_ref: Option<SecretId>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ConfirmedRequest {
+    pub confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EnvironmentDto {
+    pub id: EnvironmentId,
+    pub name: String,
+    pub endpoint: String,
+    pub api_secret_ref: SecretId,
+    pub ca_secret_ref: Option<SecretId>,
+    pub status: EnvironmentStatus,
+    pub last_checked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_check_error: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<&ProxmoxEnvironment> for EnvironmentDto {
+    fn from(environment: &ProxmoxEnvironment) -> Self {
+        Self {
+            id: environment.id,
+            name: environment.name.clone(),
+            endpoint: environment.endpoint.clone(),
+            api_secret_ref: environment.api_secret_ref,
+            ca_secret_ref: environment.ca_secret_ref,
+            status: environment.status,
+            last_checked_at: environment.last_checked_at,
+            last_check_error: environment.last_check_error.clone(),
+            created_at: environment.created_at,
+            updated_at: environment.updated_at,
+        }
+    }
+}
+
+async fn list_environments(
+    State(state): State<ApiState>,
+) -> Result<Json<ApiEnvelope<Vec<EnvironmentDto>>>, ApiError> {
+    let environments = if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .environments
+            .list()
+            .await
+            .map_err(|_| ApiError::storage())?
+    } else {
+        state.store.read().await.environments.clone()
+    };
+    Ok(Json(envelope(
+        environments.iter().map(EnvironmentDto::from).collect(),
+    )))
+}
+
+async fn create_environment(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    JsonBody(request): JsonBody<CreateEnvironmentRequest>,
+) -> Result<(StatusCode, Json<ApiEnvelope<EnvironmentDto>>), ApiError> {
+    require_permission(actor_role, Permission::Configure)?;
+    let now = chrono::Utc::now();
+    let environment = ProxmoxEnvironment::new(
+        EnvironmentId::new(),
+        request.name,
+        request.endpoint,
+        request.api_secret_ref,
+        request.ca_secret_ref,
+        now,
+    )
+    .map_err(map_environment_domain_error)?;
+    let dto = EnvironmentDto::from(&environment);
+    let store = state.store.read().await;
+    if store
+        .environments
+        .iter()
+        .any(|item| item.name.eq_ignore_ascii_case(&environment.name))
+    {
+        return Err(ApiError::conflict(
+            "environment_name_exists",
+            "an environment with this name already exists",
+        ));
+    }
+    drop(store);
+    if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .environments
+            .save(&environment)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    let mut store = state.store.write().await;
+    store.environments.push(environment);
+    drop(store);
+    state.publish(ApiEvent::status(
+        "environment",
+        dto.id.as_uuid().to_string(),
+        "configured",
+    ));
+    Ok((StatusCode::CREATED, Json(envelope(dto))))
+}
+
+async fn get_environment(
+    State(state): State<ApiState>,
+    Path(environment_id): Path<String>,
+) -> Result<Json<ApiEnvelope<EnvironmentDto>>, ApiError> {
+    let id = parse_environment_id(&environment_id)?;
+    let store = state.store.read().await;
+    let environment = store
+        .environments
+        .iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| ApiError::not_found("environment not found"))?;
+    Ok(Json(envelope(EnvironmentDto::from(&*environment))))
+}
+
+async fn update_environment(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    Path(environment_id): Path<String>,
+    JsonBody(request): JsonBody<UpdateEnvironmentRequest>,
+) -> Result<Json<ApiEnvelope<EnvironmentDto>>, ApiError> {
+    require_permission(actor_role, Permission::Configure)?;
+    let id = parse_environment_id(&environment_id)?;
+    let now = chrono::Utc::now();
+    let updated = {
+        let mut store = state.store.write().await;
+        let environment = store
+            .environments
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or_else(|| ApiError::not_found("environment not found"))?;
+        let name = request.name.unwrap_or_else(|| environment.name.clone());
+        let endpoint = request
+            .endpoint
+            .unwrap_or_else(|| environment.endpoint.clone());
+        let api_secret_ref = request.api_secret_ref.unwrap_or(environment.api_secret_ref);
+        environment
+            .update_configuration(
+                name,
+                endpoint,
+                api_secret_ref,
+                request.ca_secret_ref.or(environment.ca_secret_ref),
+                now,
+            )
+            .map_err(map_environment_domain_error)?;
+        environment.clone()
+    };
+    if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .environments
+            .update(&updated)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    Ok(Json(envelope(EnvironmentDto::from(&updated))))
+}
+
+async fn disable_environment(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    Path(environment_id): Path<String>,
+    JsonBody(request): JsonBody<ConfirmedRequest>,
+) -> Result<Json<ApiEnvelope<EnvironmentDto>>, ApiError> {
+    require_permission(actor_role, Permission::Destructive)?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "confirmation_required",
+            "disabling an environment requires explicit confirmation",
+        ));
+    }
+    let id = parse_environment_id(&environment_id)?;
+    let now = chrono::Utc::now();
+    let disabled = {
+        let mut store = state.store.write().await;
+        let environment = store
+            .environments
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or_else(|| ApiError::not_found("environment not found"))?;
+        environment
+            .transition_to(EnvironmentStatus::Disabled, now)
+            .map_err(map_environment_domain_error)?;
+        environment.clone()
+    };
+    if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .environments
+            .update(&disabled)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    Ok(Json(envelope(EnvironmentDto::from(&disabled))))
+}
+
+async fn delete_environment(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    Path(environment_id): Path<String>,
+    JsonBody(request): JsonBody<ConfirmedRequest>,
+) -> Result<StatusCode, ApiError> {
+    require_permission(actor_role, Permission::Destructive)?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "confirmation_required",
+            "deleting an environment requires explicit confirmation",
+        ));
+    }
+    let id = parse_environment_id(&environment_id)?;
+    let mut store = state.store.write().await;
+    let position = store
+        .environments
+        .iter()
+        .position(|item| item.id == id)
+        .ok_or_else(|| ApiError::not_found("environment not found"))?;
+    store.environments.remove(position);
+    drop(store);
+    if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .environments
+            .delete(id)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn check_environment(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    Path(environment_id): Path<String>,
+) -> Result<Json<ApiEnvelope<EnvironmentDto>>, ApiError> {
+    require_permission(actor_role, Permission::Read)?;
+    let id = parse_environment_id(&environment_id)?;
+    let now = chrono::Utc::now();
+    let checked = {
+        let mut store = state.store.write().await;
+        let environment = store
+            .environments
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or_else(|| ApiError::not_found("environment not found"))?;
+        // The adapter/secret-store call is intentionally a separate worker seam.
+        // Until that seam is wired, record a diagnosable, non-successful check.
+        environment
+            .record_check_failure(now, "Proxmox capability check is not scheduled")
+            .map_err(map_environment_domain_error)?;
+        environment.clone()
+    };
+    if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .environments
+            .update(&checked)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    Ok(Json(envelope(EnvironmentDto::from(&checked))))
+}
+
+fn require_permission(role: ActorRole, permission: Permission) -> Result<(), ApiError> {
+    if role.grants(permission) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(
+            "permission_denied",
+            "the role cannot change this resource",
+        ))
+    }
+}
+
+fn map_environment_domain_error(error: lxcup_core::DomainError) -> ApiError {
+    match error {
+        lxcup_core::DomainError::PermissionDenied => {
+            ApiError::forbidden("permission_denied", "the role cannot change this resource")
+        }
+        lxcup_core::DomainError::EmptyValue { .. }
+        | lxcup_core::DomainError::InvalidEnvironmentEndpoint
+        | lxcup_core::DomainError::InvalidPackageName => ApiError::bad_request(
+            "invalid_environment",
+            "the environment configuration is invalid",
+        ),
+        lxcup_core::DomainError::ConfirmationRequired => {
+            ApiError::bad_request("confirmation_required", "explicit confirmation is required")
+        }
+        lxcup_core::DomainError::InvalidStateTransition(_) => ApiError::conflict(
+            "invalid_environment_state",
+            "the environment state cannot change",
+        ),
+    }
 }
 
 async fn create_enrollment(
@@ -1509,6 +1834,13 @@ fn parse_node_id(value: &str) -> Result<NodeId, ApiError> {
     Ok(NodeId::from_uuid(parse_uuid(value, "node id")?))
 }
 
+fn parse_environment_id(value: &str) -> Result<EnvironmentId, ApiError> {
+    Ok(EnvironmentId::from_uuid(parse_uuid(
+        value,
+        "environment id",
+    )?))
+}
+
 fn parse_container_id(value: &str) -> Result<ContainerId, ApiError> {
     value
         .parse::<u64>()
@@ -2031,6 +2363,83 @@ mod tests {
         assert_eq!(metrics_json["data"]["commands_failed"], 0);
 
         agent_task.abort();
+    }
+
+    #[tokio::test]
+    async fn environment_api_keeps_secret_values_out_of_responses_and_supports_lifecycle() {
+        let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+        let create = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/environments")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "name": "pve-test",
+                    "endpoint": "https://pve.example.test/",
+                    "api_secret_ref": SecretId::new(),
+                    "ca_secret_ref": null
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let response = router(state.clone()).oneshot(create).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = json["data"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(json["data"]["endpoint"], "https://pve.example.test");
+        assert!(!json.to_string().contains("token_secret"));
+
+        let update = Request::builder()
+            .method(Method::PATCH)
+            .uri(format!("/api/v1/environments/{id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"name": "pve-renamed"}).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            router(state.clone())
+                .oneshot(update)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+
+        let check = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v1/environments/{id}/check"))
+            .body(Body::empty())
+            .unwrap();
+        let check_response = router(state.clone()).oneshot(check).await.unwrap();
+        assert_eq!(check_response.status(), StatusCode::OK);
+        let check_body = axum::body::to_bytes(check_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let check_json: serde_json::Value = serde_json::from_slice(&check_body).unwrap();
+        assert_eq!(check_json["data"]["status"], "failed");
+
+        let disable = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v1/environments/{id}/disable"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"confirmed":true}"#))
+            .unwrap();
+        let disable_response = router(state.clone()).oneshot(disable).await.unwrap();
+        assert_eq!(disable_response.status(), StatusCode::OK);
+        let delete = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("/api/v1/environments/{id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"confirmed":true}"#))
+            .unwrap();
+        assert_eq!(
+            router(state).oneshot(delete).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
     }
 
     #[test]

@@ -2,9 +2,10 @@
 
 use chrono::{DateTime, Utc};
 use lxcup_core::{
-    AvailableUpdate, Container, ContainerId, ContainerManagementState, ContainerStatus, Execution,
-    ExecutionId, ExecutionStatus, Node, NodeId, NodeStatus, OperatingSystem, PackageChangeKind,
-    PackageName, PackageVersion, PlanStatus, ResolvedPackageChange, Scan, ScanId, ScanStatus,
+    AvailableUpdate, Container, ContainerId, ContainerManagementState, ContainerStatus,
+    EnvironmentStatus, Execution, ExecutionId, ExecutionStatus, Node, NodeId, NodeStatus,
+    OperatingSystem, PackageChangeKind, PackageName, PackageVersion, PlanStatus,
+    ProxmoxEnvironment, ResolvedPackageChange, Scan, ScanId, ScanStatus, SecretId,
     UpdateClassification, UpdatePlan, UpdatePlanId,
 };
 use serde_json::Value;
@@ -37,6 +38,83 @@ impl From<sqlx::Error> for RepositoryError {
 #[derive(Clone)]
 pub struct NodeRepository {
     pool: PgPool,
+}
+
+/// Repository für credential-freie Proxmox-Umgebungskonfigurationen.
+#[derive(Clone)]
+pub struct EnvironmentRepository {
+    pool: PgPool,
+}
+
+impl EnvironmentRepository {
+    pub(crate) fn new(database: &Database) -> Self {
+        Self {
+            pool: database.pool().clone(),
+        }
+    }
+
+    pub async fn save(&self, environment: &ProxmoxEnvironment) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "INSERT INTO proxmox_environments (id, name, endpoint, api_secret_ref, ca_secret_ref, status, last_checked_at, last_check_error, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(environment.id.as_uuid())
+        .bind(&environment.name)
+        .bind(&environment.endpoint)
+        .bind(environment.api_secret_ref.as_uuid())
+        .bind(environment.ca_secret_ref.map(SecretId::as_uuid))
+        .bind(environment_status_to_db(environment.status))
+        .bind(environment.last_checked_at)
+        .bind(environment.last_check_error.as_deref())
+        .bind(environment.created_at)
+        .bind(environment.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update(&self, environment: &ProxmoxEnvironment) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "UPDATE proxmox_environments SET name = $1, endpoint = $2, api_secret_ref = $3, ca_secret_ref = $4, status = $5, last_checked_at = $6, last_check_error = $7, updated_at = $8 WHERE id = $9",
+        )
+        .bind(&environment.name)
+        .bind(&environment.endpoint)
+        .bind(environment.api_secret_ref.as_uuid())
+        .bind(environment.ca_secret_ref.map(SecretId::as_uuid))
+        .bind(environment_status_to_db(environment.status))
+        .bind(environment.last_checked_at)
+        .bind(environment.last_check_error.as_deref())
+        .bind(environment.updated_at)
+        .bind(environment.id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete(&self, id: lxcup_core::EnvironmentId) -> Result<(), RepositoryError> {
+        sqlx::query("DELETE FROM proxmox_environments WHERE id = $1")
+            .bind(id.as_uuid())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn find_by_id(
+        &self,
+        id: lxcup_core::EnvironmentId,
+    ) -> Result<Option<ProxmoxEnvironment>, RepositoryError> {
+        let row = sqlx::query("SELECT id, name, endpoint, api_secret_ref, ca_secret_ref, status, last_checked_at, last_check_error, created_at, updated_at FROM proxmox_environments WHERE id = $1")
+            .bind(id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(environment_from_row).transpose()
+    }
+
+    pub async fn list(&self) -> Result<Vec<ProxmoxEnvironment>, RepositoryError> {
+        let rows = sqlx::query("SELECT id, name, endpoint, api_secret_ref, ca_secret_ref, status, last_checked_at, last_check_error, created_at, updated_at FROM proxmox_environments ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(environment_from_row).collect()
+    }
 }
 
 impl NodeRepository {
@@ -587,6 +665,7 @@ impl AuditEventRepository {
 /// Erstellt alle MVP-Repositories über denselben Pool.
 #[derive(Clone)]
 pub struct Repositories {
+    pub environments: EnvironmentRepository,
     pub nodes: NodeRepository,
     pub containers: ContainerRepository,
     pub scans: ScanRepository,
@@ -598,6 +677,7 @@ pub struct Repositories {
 impl Repositories {
     pub fn new(database: &Database) -> Self {
         Self {
+            environments: EnvironmentRepository::new(database),
             nodes: NodeRepository::new(database),
             containers: ContainerRepository::new(database),
             scans: ScanRepository::new(database),
@@ -605,6 +685,44 @@ impl Repositories {
             executions: ExecutionRepository::new(database),
             audit_events: AuditEventRepository::new(database),
         }
+    }
+}
+
+fn environment_from_row(row: PgRow) -> Result<ProxmoxEnvironment, RepositoryError> {
+    Ok(ProxmoxEnvironment {
+        id: lxcup_core::EnvironmentId::from_uuid(row.try_get("id")?),
+        name: row.try_get("name")?,
+        endpoint: row.try_get("endpoint")?,
+        api_secret_ref: SecretId::from_uuid(row.try_get("api_secret_ref")?),
+        ca_secret_ref: row
+            .try_get::<Option<Uuid>, _>("ca_secret_ref")?
+            .map(SecretId::from_uuid),
+        status: environment_status_from_db(row.try_get("status")?)?,
+        last_checked_at: row.try_get("last_checked_at")?,
+        last_check_error: row.try_get("last_check_error")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn environment_status_to_db(value: EnvironmentStatus) -> &'static str {
+    match value {
+        EnvironmentStatus::Configured => "configured",
+        EnvironmentStatus::Connected => "connected",
+        EnvironmentStatus::Failed => "failed",
+        EnvironmentStatus::Disabled => "disabled",
+    }
+}
+
+fn environment_status_from_db(value: String) -> Result<EnvironmentStatus, RepositoryError> {
+    match value.as_str() {
+        "configured" => Ok(EnvironmentStatus::Configured),
+        "connected" => Ok(EnvironmentStatus::Connected),
+        "failed" => Ok(EnvironmentStatus::Failed),
+        "disabled" => Ok(EnvironmentStatus::Disabled),
+        _ => Err(RepositoryError::InvalidValue {
+            field: "environment status",
+        }),
     }
 }
 
