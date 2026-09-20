@@ -20,6 +20,19 @@ export type ContainerDto = {
   discovered_at: string;
 };
 
+export type ContainerAction = "start" | "stop" | "shutdown" | "reboot" | "refresh" | "clone" | "backup" | "restore" | "delete";
+export type ContainerActionTaskDto = {
+  id: string;
+  container_id: number;
+  action: ContainerAction;
+  status: "queued" | "running" | "succeeded" | "failed" | "blocked";
+  idempotency_key: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+export type AgentHealthDto = { healthy: boolean; info: { agent_id: string; platform: string; hostname: string; version: string; protocol_version: string }; metrics: { collected_at: string; commands_total: number; commands_failed: number; last_command_at: string | null } };
+
 export type ScanDto = {
   id: string;
   container_id: number;
@@ -226,4 +239,16 @@ export function revokeSecret(id: string, confirmed = true, signal?: AbortSignal)
 
 export function deleteSecret(id: string, confirmed = true, signal?: AbortSignal) {
   return apiClient.delete<void>(`/api/v1/secrets/${id}`, { confirmed }, signal);
+}
+
+export function createContainerAction(containerId: number, action: ContainerAction, confirmed = false, signal?: AbortSignal) {
+  return apiClient.post<ContainerActionTaskDto>(`/api/v1/containers/${containerId}/actions`, { action, confirmed, idempotency_key: crypto.randomUUID() }, signal);
+}
+
+export function getAgentHealth(containerId: number, signal?: AbortSignal) {
+  return apiClient.get<AgentHealthDto>(`/api/v1/containers/${containerId}/agent/health`, signal);
+}
+
+export function getAgentMetrics(containerId: number, signal?: AbortSignal) {
+  return apiClient.get<AgentHealthDto["metrics"]>(`/api/v1/containers/${containerId}/agent/metrics`, signal);
 }

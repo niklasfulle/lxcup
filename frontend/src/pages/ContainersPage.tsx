@@ -2,10 +2,11 @@ import { createColumnHelper } from "@tanstack/react-table";
 import { DataTable } from "../components/DataTable";
 import { useContainers } from "../queries";
 import { useSearchParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 import type { ContainerDto } from "../api";
 
 const column = createColumnHelper<ContainerDto>();
-const columns = [column.accessor("id", { header: "VMID" }), column.accessor("name", { header: "Name" }), column.accessor("operating_system", { header: "OS" }), column.accessor("status", { header: "Status" }), column.accessor("management_state", { header: "Verwaltung" })];
+const columns = [column.accessor("id", { header: "VMID" }), column.accessor("name", { header: "Name", cell: (info) => <Link to={`/containers/${info.row.original.id}`}>{info.getValue()}</Link> }), column.accessor("operating_system", { header: "OS" }), column.accessor("status", { header: "Status" }), column.accessor("management_state", { header: "Verwaltung" })];
 
 export function ContainersPage() {
   const containers = useContainers();

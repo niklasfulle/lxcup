@@ -10,6 +10,7 @@ import { ContainersPage } from "./pages/ContainersPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { SecretsPage } from "./pages/SecretsPage";
 import { ResourceTree } from "./components/ResourceTree";
+import { ContainerDetailPage } from "./pages/ContainerDetailPage";
 
 export default function App() {
   const queryClient = useQueryClient();
@@ -67,6 +68,7 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/nodes" element={<NodesPage />} />
           <Route path="/containers" element={<ContainersPage />} />
+          <Route path="/containers/:containerId" element={<ContainerDetailPage />} />
           <Route path="/workflows" element={<WorkflowsPage />} />
           <Route path="/secrets" element={<SecretsPage />} />
           <Route path="*" element={<NotFound />} />

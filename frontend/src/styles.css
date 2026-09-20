@@ -61,3 +61,7 @@ body { color: var(--text); background: var(--bg); transition: background .2s eas
 .tree-node summary .muted { margin-left: auto; }
 .tree-children { display: grid; gap: .1rem; margin-left: 1rem; border-left: 1px solid var(--border); padding-left: .35rem; }
 .tree-empty { padding: .35rem .45rem; }
+.detail-list { display: grid; grid-template-columns: minmax(8rem, .7fr) 1fr; gap: .65rem 1rem; margin: 0; }
+.detail-list dt { color: var(--muted); }
+.detail-list dd { margin: 0; font-weight: 650; }
+.action-row { display: flex; flex-wrap: wrap; gap: .65rem; }
