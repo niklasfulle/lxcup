@@ -1,0 +1,6 @@
+---
+- name: Deploy or update lxcup Windows agent
+  hosts: lxcup_windows_targets
+  gather_facts: true
+  roles:
+    - role: lxcup_agent_windows

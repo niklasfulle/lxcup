@@ -1,0 +1,97 @@
+---
+- name: Validate supported Windows target
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == 'Windows'
+      - ansible_facts.distribution is defined
+    fail_msg: The Windows agent role requires a Windows target over WinRM.
+
+- name: Validate Windows agent inputs
+  ansible.builtin.assert:
+    that:
+      - lxcup_agent_version is defined
+      - lxcup_agent_version is match('^[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?$')
+      - lxcup_agent_binary_src is defined
+      - lxcup_agent_token is defined
+      - lxcup_agent_token | length > 0
+      - lxcup_agent_id is defined
+      - lxcup_agent_id | length > 0
+    fail_msg: Required Windows agent deployment inputs are missing or invalid.
+  no_log: true
+
+- name: Create Windows agent directories
+  ansible.windows.win_file:
+    path: "{{ item }}"
+    state: directory
+  loop:
+    - "{{ lxcup_agent_install_dir }}"
+    - "{{ lxcup_agent_config_dir }}"
+
+- name: Check active Windows agent binary
+  ansible.windows.win_stat:
+    path: "{{ lxcup_agent_install_dir }}\\lxcup-agent.exe"
+  register: lxcup_active_agent
+
+- name: Preserve active Windows agent for rollback
+  ansible.windows.win_copy:
+    src: "{{ lxcup_agent_install_dir }}\\lxcup-agent.exe"
+    dest: "{{ lxcup_agent_install_dir }}\\lxcup-agent.previous.exe"
+    remote_src: true
+  when: lxcup_active_agent.stat.exists
+
+- name: Install versioned Windows agent binary
+  ansible.windows.win_copy:
+    src: "{{ lxcup_agent_binary_src }}"
+    dest: "{{ lxcup_agent_install_dir }}\\lxcup-agent-{{ lxcup_agent_version }}.exe"
+    remote_src: "{{ lxcup_agent_binary_remote | default(false) }}"
+  register: lxcup_agent_binary
+
+- name: Activate validated Windows agent version
+  ansible.windows.win_copy:
+    src: "{{ lxcup_agent_install_dir }}\\lxcup-agent-{{ lxcup_agent_version }}.exe"
+    dest: "{{ lxcup_agent_install_dir }}\\lxcup-agent.exe"
+    remote_src: true
+  register: lxcup_active_binary
+
+- name: Write Windows agent token file
+  ansible.windows.win_copy:
+    content: "{{ lxcup_agent_token }}"
+    dest: "{{ lxcup_agent_config_dir }}\\agent.token"
+  no_log: true
+
+- name: Write Windows agent environment file
+  ansible.windows.win_template:
+    src: agent.env.j2
+    dest: "{{ lxcup_agent_config_dir }}\\agent.env"
+  no_log: true
+
+- name: Install and start Windows service
+  ansible.windows.win_service:
+    name: "{{ lxcup_agent_service_name }}"
+    display_name: "{{ lxcup_agent_service_display_name }}"
+    description: lxcup health and metrics agent
+    path: "{{ lxcup_agent_install_dir }}\\lxcup-agent.exe"
+    start_mode: auto
+    state: started
+  register: lxcup_agent_service
+  when: lxcup_agent_binary.changed or lxcup_active_binary.changed or lxcup_agent_force_restart
+
+- name: Ensure Windows service remains enabled
+  ansible.windows.win_service:
+    name: "{{ lxcup_agent_service_name }}"
+    start_mode: auto
+    state: started
+
+- name: Check Windows agent health
+  ansible.windows.win_uri:
+    url: "http://127.0.0.1:{{ lxcup_agent_bind_address.rsplit(':', 1)[1] }}/health"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ lxcup_agent_token }}"
+    status_code: 200
+    timeout: 10
+  register: lxcup_agent_health
+  retries: 5
+  delay: 2
+  until: lxcup_agent_health.status_code == 200
+  no_log: true

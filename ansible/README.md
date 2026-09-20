@@ -27,3 +27,13 @@ Planliste. Held Packages, Distribution-Upgrades, Shell-Kommandos und freie
 Paketnamen werden vor APT abgewiesen. Im Apply-Modus werden Snapshot und
 Bestätigung vorausgesetzt; das Ergebnis enthält Planhash, Änderung und
 Reboot-Anforderung.
+
+## Windows-Testpfad
+
+Windows-Ziele werden über WinRM in einer separaten Inventory-Gruppe
+`lxcup_windows_targets` angesprochen. Für einen sicheren Test werden nur
+`ansible_connection=winrm`, TLS beziehungsweise Kerberos und Secret-Store-
+Referenzen verwendet. Das Playbook `agent-windows.yml` installiert den
+Windows-Service idempotent; `packages-windows.yml` erlaubt ausschließlich die
+Kategorien `SecurityUpdates`, `CriticalUpdates` und `Updates`. Der erste
+dedizierte Test muss auf einer isolierten Windows-11-Testmaschine erfolgen.

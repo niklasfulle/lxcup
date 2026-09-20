@@ -1,0 +1,7 @@
+---
+lxcup_agent_install_dir: 'C:\Program Files\lxcup'
+lxcup_agent_config_dir: 'C:\ProgramData\lxcup'
+lxcup_agent_service_name: lxcup-agent
+lxcup_agent_service_display_name: lxcup Agent
+lxcup_agent_bind_address: '0.0.0.0:8090'
+lxcup_agent_force_restart: false

@@ -1,0 +1,34 @@
+---
+- name: Apply controlled Windows updates
+  hosts: lxcup_windows_targets
+  gather_facts: true
+  tasks:
+    - name: Validate Windows target and update mode
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == 'Windows'
+          - lxcup_execution_mode in ['check', 'plan', 'apply', 'reconcile']
+          - lxcup_windows_update_categories is defined
+          - lxcup_windows_update_categories | difference(['SecurityUpdates', 'CriticalUpdates', 'Updates']) | length == 0
+        fail_msg: Unsupported Windows update request.
+
+    - name: Check Windows updates without applying
+      ansible.windows.win_updates:
+        category_names: "{{ lxcup_windows_update_categories }}"
+        state: searched
+      register: lxcup_windows_update_check
+      when: lxcup_execution_mode in ['check', 'plan']
+
+    - name: Apply controlled Windows updates
+      ansible.windows.win_updates:
+        category_names: "{{ lxcup_windows_update_categories }}"
+        reboot: false
+        state: installed
+      register: lxcup_windows_update_apply
+      when: lxcup_execution_mode == 'apply'
+
+    - name: Publish Windows update result
+      ansible.builtin.set_stats:
+        data:
+          lxcup_windows_update_changed: "{{ lxcup_windows_update_apply.changed | default(false) | bool }}"
+          lxcup_windows_reboot_required: "{{ lxcup_windows_update_apply.reboot_required | default(false) | bool }}"
