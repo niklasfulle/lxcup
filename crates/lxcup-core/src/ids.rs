@@ -34,6 +34,7 @@ uuid_id!(EnrollmentId);
 uuid_id!(ScanId);
 uuid_id!(SecretId);
 uuid_id!(AnsibleJobId);
+uuid_id!(AgentRegistrationId);
 uuid_id!(UpdatePlanId);
 uuid_id!(ExecutionId);
 

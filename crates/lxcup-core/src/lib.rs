@@ -5,6 +5,7 @@
 
 pub mod container;
 pub mod enrollment;
+pub mod agent;
 pub mod environment;
 pub mod error;
 pub mod execution;
@@ -20,13 +21,14 @@ pub use container::{
     Container, ContainerAction, ContainerManagementState, ContainerStatus, OperatingSystem,
 };
 pub use enrollment::{Enrollment, EnrollmentState};
+pub use agent::{AgentConnectionState, AgentRegistration};
 pub use environment::{EnvironmentStatus, ProxmoxEnvironment};
 pub use error::{
     DomainError, ErrorCode, InfrastructureError, LxcupError, LxcupResult, RetryPolicy,
 };
 pub use execution::{Execution, ExecutionStatus};
 pub use ids::{
-    AnsibleJobId, ContainerId, EnrollmentId, EnvironmentId, ExecutionId, NodeId, ScanId, SecretId,
+    AgentRegistrationId, AnsibleJobId, ContainerId, EnrollmentId, EnvironmentId, ExecutionId, NodeId, ScanId, SecretId,
     UpdatePlanId,
 };
 pub use node::{Node, NodeStatus};

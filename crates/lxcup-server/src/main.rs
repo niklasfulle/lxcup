@@ -30,6 +30,8 @@ async fn main() {
             );
         }
         state = state.with_repositories(lxcup_persistence::Repositories::new(&database));
+        let restored = state.restore_registered_agents().await;
+        tracing::info!(restored, "Persisted agent registrations restored");
         tracing::info!("PostgreSQL persistence enabled");
     } else {
         if dev_seed_enabled {

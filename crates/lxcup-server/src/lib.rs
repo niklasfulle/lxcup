@@ -29,7 +29,7 @@ use lxcup_ansible::{
     AnsibleParameters, ExecutionMode, JobSubmission,
 };
 use lxcup_core::{
-    ActorRole, Container, ContainerAction, ContainerId, ContainerManagementState, Enrollment,
+    ActorRole, AgentRegistration, Container, ContainerAction, ContainerId, ContainerManagementState, Enrollment,
     EnrollmentId, EnrollmentState, EnvironmentId, EnvironmentStatus, Execution, ExecutionId, Node,
     NodeId, Permission, PlanStatus, ProxmoxEnvironment, ResourceLifecycle, ResourceTarget, Scan,
     ScanId, SecretId, SecretKind, SecretScope, SecretValue, UpdatePlan, UpdatePlanId,
@@ -96,6 +96,36 @@ impl ApiState {
 
     pub async fn replace_containers(&self, containers: Vec<Container>) {
         self.store.write().await.containers = containers;
+    }
+
+    /// Rebuilds active agent clients from persisted registrations after a
+    /// restart. Secret values are resolved only for client construction and
+    /// are never returned or published.
+    pub async fn restore_registered_agents(&self) -> usize {
+        let Some(repositories) = self.repositories.as_ref() else {
+            return 0;
+        };
+        let Ok(registrations) = repositories.agent_registrations.list().await else {
+            return 0;
+        };
+        let mut restored = 0;
+        for registration in registrations {
+            let Ok(secret) = self.secrets.read(registration.secret_ref) else {
+                continue;
+            };
+            let Ok(config) = AgentClientConfig::new(registration.endpoint.clone(), secret.expose()) else {
+                continue;
+            };
+            let Ok(client) = AgentClient::new(config) else {
+                continue;
+            };
+            self.agents
+                .write()
+                .await
+                .insert(registration.container_id, RegisteredAgent { client });
+            restored += 1;
+        }
+        restored
     }
 
     pub fn publish(&self, event: ApiEvent) {
@@ -1953,7 +1983,8 @@ async fn register_agent(
     {
         return Err(ApiError::not_found("container not found"));
     }
-    let token = if let Some(secret_ref) = request.secret_ref {
+    let secret_ref = request.secret_ref;
+    let token = if let Some(secret_ref) = secret_ref {
         state
             .secrets
             .read(secret_ref)
@@ -1995,6 +2026,23 @@ async fn register_agent(
         .write()
         .await
         .insert(container_id, RegisteredAgent { client });
+    if let Some(secret_ref) = secret_ref {
+        let registration = AgentRegistration::new(
+            container_id,
+            info.info.agent_id.clone(),
+            request.endpoint.clone(),
+            secret_ref,
+            chrono::Utc::now(),
+        )
+        .map_err(|_| ApiError::bad_request("invalid_agent_registration", "agent registration is invalid"))?;
+        if let Some(repositories) = state.repositories.as_ref() {
+            repositories
+                .agent_registrations
+                .save(&registration)
+                .await
+                .map_err(|_| ApiError::dependency("persistence_unavailable", "agent registration could not be persisted"))?;
+        }
+    }
     state.publish(ApiEvent::status(
         "agent",
         container_id.value().to_string(),
@@ -2223,10 +2271,34 @@ async fn get_agent_health(
         .get(&container_id)
         .cloned()
         .ok_or_else(|| ApiError::not_found("agent not registered"))?;
-    let health =
-        agent.client.health().await.map_err(|_| {
-            ApiError::dependency("agent_unavailable", "the agent healthcheck failed")
-        })?;
+    let health = match agent.client.health().await {
+        Ok(health) => health,
+        Err(_) => {
+            if let Some(repositories) = state.repositories.as_ref() {
+                if let Ok(Some(mut registration)) = repositories.agent_registrations.find_by_container(container_id).await {
+                    registration.record_unreachable(chrono::Utc::now(), "agent healthcheck failed");
+                    let _ = repositories.agent_registrations.save(&registration).await;
+                }
+            }
+            state.publish(ApiEvent::status(
+                "agent",
+                container_id.value().to_string(),
+                "unreachable",
+            ));
+            return Err(ApiError::dependency("agent_unavailable", "the agent healthcheck failed"));
+        }
+    };
+    if let Some(repositories) = state.repositories.as_ref() {
+        if let Ok(Some(mut registration)) = repositories.agent_registrations.find_by_container(container_id).await {
+            registration.record_health(health.healthy, chrono::Utc::now(), None);
+            let _ = repositories.agent_registrations.save(&registration).await;
+        }
+    }
+    state.publish(ApiEvent::status(
+        "agent",
+        container_id.value().to_string(),
+        if health.healthy { "connected" } else { "degraded" },
+    ));
     Ok(Json(envelope(health)))
 }
 

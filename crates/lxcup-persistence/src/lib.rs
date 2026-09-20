@@ -9,7 +9,7 @@ pub mod repositories;
 pub mod seeds;
 
 pub use repositories::{
-    AnsibleJobRepository, AuditEvent, AuditEventRepository, ContainerRepository,
+    AgentRegistrationRepository, AnsibleJobRepository, AuditEvent, AuditEventRepository, ContainerRepository,
     EnvironmentRepository, ExecutionEvent, ExecutionRepository, ExecutionResultRecord,
     NodeRepository, Repositories, RepositoryError, ScanRepository, UpdatePlanRepository,
 };
