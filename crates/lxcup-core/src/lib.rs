@@ -4,6 +4,7 @@
 //! Proxmox- oder Betriebssystem-Adaptern.
 
 pub mod container;
+pub mod enrollment;
 pub mod error;
 pub mod execution;
 pub mod ids;
@@ -13,11 +14,12 @@ pub mod scan;
 pub mod update;
 
 pub use container::{Container, ContainerManagementState, ContainerStatus, OperatingSystem};
+pub use enrollment::{Enrollment, EnrollmentState};
 pub use error::{
     DomainError, ErrorCode, InfrastructureError, LxcupError, LxcupResult, RetryPolicy,
 };
 pub use execution::{Execution, ExecutionStatus};
-pub use ids::{ContainerId, ExecutionId, NodeId, ScanId, UpdatePlanId};
+pub use ids::{ContainerId, EnrollmentId, ExecutionId, NodeId, ScanId, UpdatePlanId};
 pub use node::{Node, NodeStatus};
 pub use plan::{PackageChangeKind, PlanStatus, ResolvedPackageChange, UpdatePlan};
 pub use scan::{Scan, ScanStatus};

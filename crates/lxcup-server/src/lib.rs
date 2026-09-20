@@ -25,8 +25,8 @@ use lxcup_agent::{
     AgentAction, AgentClient, AgentClientConfig, AgentCommandRequest, AgentHealth, AgentMetrics,
 };
 use lxcup_core::{
-    Container, ContainerId, Execution, ExecutionId, Node, NodeId, PlanStatus, Scan, ScanId,
-    UpdatePlan, UpdatePlanId,
+    Container, ContainerId, Enrollment, EnrollmentId, EnrollmentState, Execution, ExecutionId,
+    Node, NodeId, PlanStatus, Scan, ScanId, UpdatePlan, UpdatePlanId,
 };
 use lxcup_execution::{ExecutionCoordinator, ExecutionRequest, ExecutionStart};
 use lxcup_persistence::Repositories;
@@ -107,6 +107,8 @@ impl Default for ApiState {
 struct ApiStore {
     nodes: Vec<Node>,
     containers: Vec<Container>,
+    enrollments: Vec<Enrollment>,
+    enrollment_keys: HashMap<String, EnrollmentId>,
     scans: Vec<Scan>,
     plans: Vec<UpdatePlan>,
     executions: Vec<Execution>,
@@ -119,12 +121,43 @@ struct RegisteredAgent {
     client: AgentClient,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateEnrollmentRequest {
+    pub container_id: u64,
+    pub idempotency_key: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EnrollmentDto {
+    pub id: EnrollmentId,
+    pub container_id: ContainerId,
+    pub state: EnrollmentState,
+    pub failure_reason: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<&Enrollment> for EnrollmentDto {
+    fn from(enrollment: &Enrollment) -> Self {
+        Self {
+            id: enrollment.id,
+            container_id: enrollment.container_id,
+            state: enrollment.state,
+            failure_reason: enrollment.failure_reason.clone(),
+            created_at: enrollment.created_at,
+            updated_at: enrollment.updated_at,
+        }
+    }
+}
+
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/health/live", get(live_health))
         .route("/health/ready", get(ready_health))
         .route("/metrics", get(metrics))
         .route("/api/v1/nodes", get(list_nodes))
+        .route("/api/v1/enrollments", post(create_enrollment))
+        .route("/api/v1/enrollments/{enrollment_id}", get(get_enrollment))
         .route(
             "/api/v1/nodes/{node_id}/containers",
             get(list_node_containers),
@@ -208,6 +241,14 @@ impl ApiError {
         }
     }
 
+    fn conflict(code: &'static str, message: &'static str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code,
+            message,
+        }
+    }
+
     fn not_found(resource: &'static str) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -264,6 +305,89 @@ async fn list_nodes(State(state): State<ApiState>) -> Json<ApiEnvelope<Vec<NodeD
         .map(NodeDto::from)
         .collect();
     Json(envelope(nodes))
+}
+
+async fn create_enrollment(
+    State(state): State<ApiState>,
+    JsonBody(request): JsonBody<CreateEnrollmentRequest>,
+) -> Result<(StatusCode, Json<ApiEnvelope<EnrollmentDto>>), ApiError> {
+    let container_id = ContainerId::new(request.container_id);
+    if request.container_id == 0 {
+        return Err(ApiError::bad_request(
+            "invalid_container_id",
+            "container id must be greater than zero",
+        ));
+    }
+
+    let mut store = state.store.write().await;
+    if !store
+        .containers
+        .iter()
+        .any(|container| container.id == container_id)
+    {
+        return Err(ApiError::not_found("container not found"));
+    }
+
+    if let Some(existing_id) = store.enrollment_keys.get(&request.idempotency_key).copied() {
+        let existing = store
+            .enrollments
+            .iter()
+            .find(|enrollment| enrollment.id == existing_id)
+            .expect("enrollment idempotency index must point to an enrollment");
+        if existing.container_id != container_id {
+            return Err(ApiError::conflict(
+                "idempotency_key_reused",
+                "idempotency key is already used for another container",
+            ));
+        }
+        return Ok((
+            StatusCode::OK,
+            Json(envelope(EnrollmentDto::from(existing))),
+        ));
+    }
+
+    if store
+        .enrollments
+        .iter()
+        .any(|enrollment| enrollment.container_id == container_id && enrollment.state.is_active())
+    {
+        return Err(ApiError::conflict(
+            "enrollment_in_progress",
+            "an enrollment is already in progress for this container",
+        ));
+    }
+
+    let enrollment =
+        Enrollment::new(container_id, request.idempotency_key.clone()).map_err(|_| {
+            ApiError::bad_request("invalid_idempotency_key", "idempotency key is invalid")
+        })?;
+    let dto = EnrollmentDto::from(&enrollment);
+    store
+        .enrollment_keys
+        .insert(request.idempotency_key, enrollment.id);
+    store.enrollments.push(enrollment);
+    drop(store);
+
+    state.publish(ApiEvent::status(
+        "enrollment",
+        dto.id.as_uuid().to_string(),
+        "requested",
+    ));
+    Ok((StatusCode::ACCEPTED, Json(envelope(dto))))
+}
+
+async fn get_enrollment(
+    State(state): State<ApiState>,
+    Path(enrollment_id): Path<String>,
+) -> Result<Json<ApiEnvelope<EnrollmentDto>>, ApiError> {
+    let enrollment_id = EnrollmentId::from_uuid(parse_uuid(&enrollment_id, "enrollment id")?);
+    let store = state.store.read().await;
+    let enrollment = store
+        .enrollments
+        .iter()
+        .find(|enrollment| enrollment.id == enrollment_id)
+        .ok_or_else(|| ApiError::not_found("enrollment not found"))?;
+    Ok(Json(envelope(EnrollmentDto::from(enrollment))))
 }
 
 async fn list_node_containers(
@@ -1109,6 +1233,8 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/health/ready": {"get": {}},
     "/metrics": {"get": {}},
     "/api/v1/nodes": {"get": {"responses": {"200": {"description": "Nodes"}}}},
+    "/api/v1/enrollments": {"post": {"responses": {"202": {"description": "Enrollment accepted"}}}},
+    "/api/v1/enrollments/{enrollment_id}": {"get": {"responses": {"200": {"description": "Enrollment status"}}}},
     "/api/v1/containers": {"get": {"responses": {"200": {"description": "Containers"}}}},
     "/api/v1/containers/{container_id}/scans": {"get": {}, "post": {}},
     "/api/v1/scans/{scan_id}/run": {"post": {}},
@@ -1393,6 +1519,121 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn enrollment_endpoint_is_idempotent_and_queryable() {
+        let state = ApiState::new();
+        let container = Container::new(
+            ContainerId::new(101),
+            NodeId::new(),
+            "test-lxc",
+            lxcup_core::OperatingSystem::Debian,
+            lxcup_core::ContainerStatus::Running,
+        )
+        .unwrap();
+        state.replace_containers(vec![container]).await;
+
+        let create_request = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/enrollments")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "container_id": 101,
+                        "idempotency_key": "request-1"
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        let first = router(state.clone())
+            .oneshot(create_request())
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+        let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+        let enrollment_id = first_json["data"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(first_json["data"]["state"], "requested");
+
+        let second = router(state.clone())
+            .oneshot(create_request())
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+        assert_eq!(second_json["data"]["id"], enrollment_id);
+
+        let get = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/enrollments/{enrollment_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn enrollment_rejects_key_reuse_and_unknown_containers() {
+        let state = ApiState::new();
+        let containers = [101, 102]
+            .into_iter()
+            .map(|id| {
+                Container::new(
+                    ContainerId::new(id),
+                    NodeId::new(),
+                    format!("test-lxc-{id}"),
+                    lxcup_core::OperatingSystem::Debian,
+                    lxcup_core::ContainerStatus::Running,
+                )
+                .unwrap()
+            })
+            .collect();
+        state.replace_containers(containers).await;
+
+        let request = |container_id, key| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/enrollments")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "container_id": container_id,
+                        "idempotency_key": key
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        let first = router(state.clone())
+            .oneshot(request(101, "request-1"))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+
+        let reused = router(state.clone())
+            .oneshot(request(102, "request-1"))
+            .await
+            .unwrap();
+        assert_eq!(reused.status(), StatusCode::CONFLICT);
+
+        let unknown = router(state)
+            .oneshot(request(999, "request-2"))
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
