@@ -4,7 +4,7 @@
 //! Secret-Referenzen. Freie Playbook-Pfade, Shell-Kommandos und Secret-Werte
 //! sind absichtlich nicht Teil dieses öffentlichen Modells.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use lxcup_core::{
@@ -63,6 +63,7 @@ impl AnsibleJobStatus {
                     Self::Succeeded | Self::Failed | Self::ReconcileRequired
                 )
                 | (Self::ReconcileRequired, Self::Succeeded | Self::Failed)
+                | (Self::Failed, Self::Queued)
         )
     }
 }
@@ -221,6 +222,7 @@ pub struct AnsibleJob {
     pub mode: ExecutionMode,
     pub parameters: AnsibleParameters,
     pub secret_refs: Vec<SecretId>,
+    pub idempotency_key: String,
     pub parameter_hash: String,
     pub status: AnsibleJobStatus,
     pub created_at: DateTime<Utc>,
@@ -287,6 +289,7 @@ impl AnsibleJob {
             mode: request.mode,
             parameters: request.parameters,
             secret_refs: request.secret_refs,
+            idempotency_key: request.idempotency_key,
             parameter_hash,
             status: AnsibleJobStatus::Queued,
             created_at: now,
@@ -301,6 +304,181 @@ impl AnsibleJob {
         self.status = next;
         self.updated_at = Utc::now();
         Ok(())
+    }
+}
+
+/// Audit-safe events persisted for an Ansible job.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum JobEventKind {
+    Queued,
+    StatusChanged { status: AnsibleJobStatus },
+    TaskStarted { task: String },
+    TaskFinished { task: String, changed: bool },
+    Failed { code: JobFailureCode },
+    ReconcileRequired,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobFailureCode {
+    InvalidCredentials,
+    Unreachable,
+    Timeout,
+    PlaybookFailed,
+    WorkerRestarted,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct JobEvent {
+    pub sequence: u64,
+    pub job_id: AnsibleJobId,
+    pub event: JobEventKind,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum JobSubmission {
+    Created(AnsibleJob),
+    Duplicate(AnsibleJob),
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum CoordinatorError {
+    #[error("target already has an active ansible job")]
+    TargetBusy,
+    #[error("ansible job was not found")]
+    NotFound,
+    #[error("ansible job cannot be retried safely")]
+    RetryNotAllowed,
+    #[error("ansible job cannot transition to the requested state")]
+    InvalidTransition,
+    #[error("ansible job cannot accept another event")]
+    Terminal,
+    #[error(transparent)]
+    Contract(#[from] AnsibleContractError),
+}
+
+/// In-process orchestration contract. Persistence adapters can mirror these
+/// mutations to PostgreSQL without changing API or worker semantics.
+#[derive(Default)]
+pub struct AnsibleJobCoordinator {
+    jobs: HashMap<AnsibleJobId, AnsibleJob>,
+    idempotency: HashMap<(ResourceTarget, String), AnsibleJobId>,
+    active_targets: HashMap<ResourceTarget, AnsibleJobId>,
+    events: HashMap<AnsibleJobId, Vec<JobEvent>>,
+}
+
+impl AnsibleJobCoordinator {
+    pub fn submit(
+        &mut self,
+        request: AnsibleJobRequest,
+    ) -> Result<JobSubmission, CoordinatorError> {
+        let key = (request.target, request.idempotency_key.clone());
+        if let Some(existing_id) = self.idempotency.get(&key).copied() {
+            let existing = self
+                .jobs
+                .get(&existing_id)
+                .ok_or(CoordinatorError::NotFound)?;
+            return Ok(JobSubmission::Duplicate(existing.clone()));
+        }
+        if self.active_targets.contains_key(&request.target) {
+            return Err(CoordinatorError::TargetBusy);
+        }
+        let job = AnsibleJob::from_request(request)?;
+        self.idempotency.insert(key, job.id);
+        self.active_targets.insert(job.target, job.id);
+        self.record_internal(job.id, JobEventKind::Queued);
+        self.jobs.insert(job.id, job.clone());
+        Ok(JobSubmission::Created(job))
+    }
+
+    pub fn job(&self, id: AnsibleJobId) -> Result<AnsibleJob, CoordinatorError> {
+        self.jobs
+            .get(&id)
+            .cloned()
+            .ok_or(CoordinatorError::NotFound)
+    }
+
+    pub fn events(&self, id: AnsibleJobId) -> Result<Vec<JobEvent>, CoordinatorError> {
+        if !self.jobs.contains_key(&id) {
+            return Err(CoordinatorError::NotFound);
+        }
+        Ok(self.events.get(&id).cloned().unwrap_or_default())
+    }
+
+    pub fn transition(
+        &mut self,
+        id: AnsibleJobId,
+        next: AnsibleJobStatus,
+    ) -> Result<AnsibleJob, CoordinatorError> {
+        let job = self.jobs.get_mut(&id).ok_or(CoordinatorError::NotFound)?;
+        job.transition_to(next)
+            .map_err(|_| CoordinatorError::InvalidTransition)?;
+        let target = job.target;
+        let job_snapshot = job.clone();
+        if matches!(
+            next,
+            AnsibleJobStatus::Succeeded | AnsibleJobStatus::Failed | AnsibleJobStatus::Aborted
+        ) {
+            self.active_targets.remove(&target);
+        }
+        self.record_internal(id, JobEventKind::StatusChanged { status: next });
+        if next == AnsibleJobStatus::ReconcileRequired {
+            self.record_internal(id, JobEventKind::ReconcileRequired);
+        }
+        Ok(job_snapshot)
+    }
+
+    pub fn record_event(
+        &mut self,
+        id: AnsibleJobId,
+        event: JobEventKind,
+    ) -> Result<(), CoordinatorError> {
+        let job = self.jobs.get(&id).ok_or(CoordinatorError::NotFound)?;
+        if matches!(
+            job.status,
+            AnsibleJobStatus::Succeeded | AnsibleJobStatus::Failed | AnsibleJobStatus::Aborted
+        ) {
+            return Err(CoordinatorError::Terminal);
+        }
+        self.record_internal(id, event);
+        Ok(())
+    }
+
+    pub fn retry(&mut self, id: AnsibleJobId) -> Result<AnsibleJob, CoordinatorError> {
+        let job = self.jobs.get(&id).ok_or(CoordinatorError::NotFound)?;
+        if job.status != AnsibleJobStatus::Failed
+            || (job.operation == AnsibleOperation::UpdatePackages
+                && job.mode == ExecutionMode::Apply)
+        {
+            return Err(CoordinatorError::RetryNotAllowed);
+        }
+        let target = job.target;
+        let job_snapshot = {
+            let job = self.jobs.get_mut(&id).ok_or(CoordinatorError::NotFound)?;
+            job.transition_to(AnsibleJobStatus::Queued)
+                .map_err(|_| CoordinatorError::InvalidTransition)?;
+            job.clone()
+        };
+        self.active_targets.insert(target, id);
+        self.record_internal(
+            id,
+            JobEventKind::StatusChanged {
+                status: AnsibleJobStatus::Queued,
+            },
+        );
+        Ok(job_snapshot)
+    }
+
+    fn record_internal(&mut self, id: AnsibleJobId, event: JobEventKind) {
+        let events = self.events.entry(id).or_default();
+        events.push(JobEvent {
+            sequence: events.len() as u64 + 1,
+            job_id: id,
+            event,
+            created_at: Utc::now(),
+        });
     }
 }
 
@@ -420,5 +598,125 @@ mod tests {
             job.transition_to(AnsibleJobStatus::Applying),
             Err(AnsibleContractError::InvalidTransition)
         );
+    }
+
+    #[test]
+    fn coordinator_deduplicates_and_serializes_target_runs() {
+        let mut coordinator = AnsibleJobCoordinator::default();
+        let first = match coordinator
+            .submit(request(
+                AnsibleOperation::RepairAgent,
+                AnsibleParameters::RepairAgent,
+            ))
+            .unwrap()
+        {
+            JobSubmission::Created(job) => job,
+            JobSubmission::Duplicate(_) => panic!("first submission must create a job"),
+        };
+
+        let duplicate = coordinator
+            .submit(request(
+                AnsibleOperation::RepairAgent,
+                AnsibleParameters::RepairAgent,
+            ))
+            .unwrap();
+        assert_eq!(duplicate, JobSubmission::Duplicate(first.clone()));
+
+        let mut conflicting_request = request(
+            AnsibleOperation::HealthCheck,
+            AnsibleParameters::HealthCheck,
+        );
+        conflicting_request.idempotency_key = "different".to_owned();
+        assert_eq!(
+            coordinator.submit(conflicting_request),
+            Err(CoordinatorError::TargetBusy)
+        );
+    }
+
+    #[test]
+    fn coordinator_retries_safe_jobs_but_not_package_apply() {
+        let mut coordinator = AnsibleJobCoordinator::default();
+        let repair = match coordinator
+            .submit(request(
+                AnsibleOperation::RepairAgent,
+                AnsibleParameters::RepairAgent,
+            ))
+            .unwrap()
+        {
+            JobSubmission::Created(job) => job,
+            JobSubmission::Duplicate(_) => unreachable!(),
+        };
+        coordinator
+            .transition(repair.id, AnsibleJobStatus::Checking)
+            .unwrap();
+        coordinator
+            .transition(repair.id, AnsibleJobStatus::Planned)
+            .unwrap();
+        coordinator
+            .transition(repair.id, AnsibleJobStatus::Applying)
+            .unwrap();
+        coordinator
+            .transition(repair.id, AnsibleJobStatus::Failed)
+            .unwrap();
+        assert_eq!(
+            coordinator.retry(repair.id).unwrap().status,
+            AnsibleJobStatus::Queued
+        );
+
+        let mut package_request = request(
+            AnsibleOperation::UpdatePackages,
+            AnsibleParameters::UpdatePackages {
+                packages: vec!["nginx".to_owned()],
+            },
+        );
+        package_request.idempotency_key = "package-1".to_owned();
+        package_request.target = ResourceTarget::Container(lxcup_core::ContainerId::new(102));
+        let package = match coordinator.submit(package_request).unwrap() {
+            JobSubmission::Created(job) => job,
+            JobSubmission::Duplicate(_) => unreachable!(),
+        };
+        coordinator
+            .transition(package.id, AnsibleJobStatus::Checking)
+            .unwrap();
+        coordinator
+            .transition(package.id, AnsibleJobStatus::Planned)
+            .unwrap();
+        coordinator
+            .transition(package.id, AnsibleJobStatus::Applying)
+            .unwrap();
+        coordinator
+            .transition(package.id, AnsibleJobStatus::Failed)
+            .unwrap();
+        assert_eq!(
+            coordinator.retry(package.id),
+            Err(CoordinatorError::RetryNotAllowed)
+        );
+    }
+
+    #[test]
+    fn coordinator_events_are_ordered_and_audit_safe() {
+        let mut coordinator = AnsibleJobCoordinator::default();
+        let job = match coordinator
+            .submit(request(
+                AnsibleOperation::HealthCheck,
+                AnsibleParameters::HealthCheck,
+            ))
+            .unwrap()
+        {
+            JobSubmission::Created(job) => job,
+            JobSubmission::Duplicate(_) => unreachable!(),
+        };
+        coordinator
+            .record_event(
+                job.id,
+                JobEventKind::TaskStarted {
+                    task: "health_check".to_owned(),
+                },
+            )
+            .unwrap();
+        let events = coordinator.events(job.id).unwrap();
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(events[1].sequence, 2);
+        assert!(!serde_json::to_string(&events).unwrap().contains("stdout"));
     }
 }

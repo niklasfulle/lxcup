@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{ContainerId, DomainError, NodeId, error::DomainResult};
 
 /// Stable target type used by API DTOs, audit events and Ansible jobs.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceTarget {
     Node(NodeId),
