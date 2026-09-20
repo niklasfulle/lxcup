@@ -76,6 +76,14 @@ pub enum DomainError {
     /// Eine angeforderte Zustandsänderung ist nicht erlaubt.
     #[error("invalid domain state transition: {0}")]
     InvalidStateTransition(&'static str),
+
+    /// Die Rolle darf die angeforderte Operation nicht ausführen.
+    #[error("permission denied")]
+    PermissionDenied,
+
+    /// Eine verändernde oder destruktive Aktion benötigt eine Bestätigung.
+    #[error("explicit confirmation is required")]
+    ConfirmationRequired,
 }
 
 /// Einheitlicher Result-Typ für Domainoperationen.

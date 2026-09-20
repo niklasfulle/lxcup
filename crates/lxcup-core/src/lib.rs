@@ -10,6 +10,7 @@ pub mod execution;
 pub mod ids;
 pub mod node;
 pub mod plan;
+pub mod resource;
 pub mod scan;
 pub mod secret;
 pub mod update;
@@ -23,6 +24,9 @@ pub use execution::{Execution, ExecutionStatus};
 pub use ids::{ContainerId, EnrollmentId, ExecutionId, NodeId, ScanId, SecretId, UpdatePlanId};
 pub use node::{Node, NodeStatus};
 pub use plan::{PackageChangeKind, PlanStatus, ResolvedPackageChange, UpdatePlan};
+pub use resource::{
+    ActorRole, Permission, ResourceAction, ResourceLifecycle, ResourceTarget, validate_action,
+};
 pub use scan::{Scan, ScanStatus};
 pub use secret::{SecretKind, SecretMetadata, SecretScope, SecretValue};
 pub use update::{AvailableUpdate, PackageName, PackageVersion, UpdateClassification};
