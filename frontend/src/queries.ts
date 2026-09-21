@@ -1,13 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
-import { apiClient, getEnrollment, type ContainerDto, type EnrollmentDto, type ExecutionSafetyDto, type NodeDto } from "./api";
+import { apiClient, getEnrollment, listTargets, type ContainerDto, type EnrollmentDto, type ExecutionSafetyDto, type NodeDto, type TargetDto } from "./api";
 
 export const queryKeys = {
+  targets: ["targets"] as const,
   nodes: ["nodes"] as const,
   containers: ["containers"] as const,
   nodeContainers: (nodeId: string) => ["nodes", nodeId, "containers"] as const,
   executionSafety: (executionId: string) => ["executions", executionId, "safety"] as const,
   ansibleJobs: ["ansible-jobs"] as const,
 };
+
+export function useTargets() {
+  return useQuery<TargetDto[]>({ queryKey: queryKeys.targets, queryFn: ({ signal }) => listTargets(signal), staleTime: 15_000 });
+}
 
 export function useNodes() {
   return useQuery<NodeDto[]>({

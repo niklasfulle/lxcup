@@ -22,17 +22,20 @@ use axum::{
     routing::{get, post},
 };
 use lxcup_agent::{
-    AgentAction, AgentClient, AgentClientConfig, AgentCommandRequest, AgentHealth, AgentMetrics,
+    AgentAction, AgentClient, AgentClientConfig, AgentCommandRequest, AgentHealth, AgentHeartbeat,
+    AgentMetrics,
 };
 use lxcup_ansible::{
     AnsibleJob, AnsibleJobCoordinator, AnsibleJobRequest, AnsibleJobStatus, AnsibleOperation,
     AnsibleParameters, ExecutionMode, JobSubmission,
 };
 use lxcup_core::{
-    ActorRole, AgentRegistration, Container, ContainerAction, ContainerId, ContainerManagementState, Enrollment,
-    EnrollmentId, EnrollmentState, EnvironmentId, EnvironmentStatus, Execution, ExecutionId, Node,
-    NodeId, Permission, PlanStatus, ProxmoxEnvironment, ResourceLifecycle, ResourceTarget, Scan,
-    ScanId, SecretId, SecretKind, SecretScope, SecretValue, UpdatePlan, UpdatePlanId,
+    ActorRole, AgentRegistration, Container, ContainerAction, ContainerId,
+    ContainerManagementState, Enrollment, EnrollmentId, EnrollmentState, EnvironmentId,
+    EnvironmentStatus, Execution, ExecutionId, Node, NodeId, Permission, PlanStatus,
+    ProxmoxEnvironment, ResourceLifecycle, ResourceTarget, Scan, ScanId, SecretId, SecretKind,
+    SecretScope, SecretValue, Target, TargetId, TargetKind, TargetState, TargetTransport,
+    UpdatePlan, UpdatePlanId,
 };
 use lxcup_execution::{ExecutionCoordinator, ExecutionRequest, ExecutionStart};
 use lxcup_persistence::Repositories;
@@ -98,6 +101,19 @@ impl ApiState {
         self.store.write().await.containers = containers;
     }
 
+    /// Restores the platform-neutral target inventory after a server restart.
+    pub async fn restore_targets(&self) -> usize {
+        let Some(repositories) = self.repositories.as_ref() else {
+            return 0;
+        };
+        let Ok(targets) = repositories.targets.list().await else {
+            return 0;
+        };
+        let restored = targets.len();
+        self.store.write().await.targets = targets;
+        restored
+    }
+
     /// Rebuilds active agent clients from persisted registrations after a
     /// restart. Secret values are resolved only for client construction and
     /// are never returned or published.
@@ -113,11 +129,14 @@ impl ApiState {
             let Ok(secret) = self.secrets.read(registration.secret_ref) else {
                 continue;
             };
-            let Ok(config) = AgentClientConfig::new(registration.endpoint.clone(), secret.expose()) else {
+            let Ok(config) = AgentClientConfig::new(registration.endpoint.clone(), secret.expose())
+            else {
                 continue;
             };
             let config = if let Some(ca_secret_ref) = registration.ca_secret_ref {
-                let Ok(ca) = self.secrets.read(ca_secret_ref) else { continue };
+                let Ok(ca) = self.secrets.read(ca_secret_ref) else {
+                    continue;
+                };
                 config.with_root_certificate_pem(ca.expose().as_bytes())
             } else {
                 config
@@ -137,11 +156,22 @@ impl ApiState {
     /// Drops in-memory clients when their credential is rotated or revoked so
     /// the previous credential cannot be used through the lxcup API anymore.
     pub async fn invalidate_agents_for_secret(&self, secret_id: SecretId) {
-        let Some(repositories) = self.repositories.as_ref() else { return };
-        let Ok(registrations) = repositories.agent_registrations.list().await else { return };
-        for registration in registrations.into_iter().filter(|item| item.secret_ref == secret_id) {
+        let Some(repositories) = self.repositories.as_ref() else {
+            return;
+        };
+        let Ok(registrations) = repositories.agent_registrations.list().await else {
+            return;
+        };
+        for registration in registrations
+            .into_iter()
+            .filter(|item| item.secret_ref == secret_id)
+        {
             self.agents.write().await.remove(&registration.container_id);
-            self.publish(ApiEvent::status("agent", registration.container_id.value().to_string(), "credential_invalidated"));
+            self.publish(ApiEvent::status(
+                "agent",
+                registration.container_id.value().to_string(),
+                "credential_invalidated",
+            ));
         }
     }
 
@@ -170,6 +200,8 @@ impl Default for ApiState {
 
 #[derive(Default)]
 struct ApiStore {
+    targets: Vec<Target>,
+    agent_reports: HashMap<TargetId, AgentHeartbeat>,
     environments: Vec<ProxmoxEnvironment>,
     nodes: Vec<Node>,
     containers: Vec<Container>,
@@ -224,6 +256,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/health/live", get(live_health))
         .route("/health/ready", get(ready_health))
         .route("/metrics", get(metrics))
+        .route("/api/v1/targets", get(list_targets).post(create_target))
+        .route("/api/v1/targets/{target_id}", get(get_target))
+        .route("/api/v1/agents/heartbeat", post(receive_agent_heartbeat))
         .route("/api/v1/nodes", get(list_nodes))
         .route(
             "/api/v1/environments",
@@ -426,6 +461,150 @@ async fn list_nodes(State(state): State<ApiState>) -> Json<ApiEnvelope<Vec<NodeD
         .map(NodeDto::from)
         .collect();
     Json(envelope(nodes))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateTargetRequest {
+    pub name: String,
+    pub kind: TargetKind,
+    pub address: String,
+    pub transport: TargetTransport,
+    pub credential_secret_ref: SecretId,
+    pub agent_secret_ref: SecretId,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TargetDto {
+    pub id: TargetId,
+    pub name: String,
+    pub kind: TargetKind,
+    pub address: String,
+    pub transport: TargetTransport,
+    pub credential_secret_ref: SecretId,
+    pub agent_secret_ref: SecretId,
+    pub state: TargetState,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<&Target> for TargetDto {
+    fn from(target: &Target) -> Self {
+        Self {
+            id: target.id,
+            name: target.name.clone(),
+            kind: target.kind,
+            address: target.address.clone(),
+            transport: target.transport,
+            credential_secret_ref: target.credential_secret_ref,
+            agent_secret_ref: target.agent_secret_ref,
+            state: target.state,
+            created_at: target.created_at,
+            updated_at: target.updated_at,
+        }
+    }
+}
+
+async fn list_targets(State(state): State<ApiState>) -> Json<ApiEnvelope<Vec<TargetDto>>> {
+    let targets = state
+        .store
+        .read()
+        .await
+        .targets
+        .iter()
+        .map(TargetDto::from)
+        .collect();
+    Json(envelope(targets))
+}
+
+async fn create_target(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    JsonBody(request): JsonBody<CreateTargetRequest>,
+) -> Result<(StatusCode, Json<ApiEnvelope<TargetDto>>), ApiError> {
+    require_permission(actor_role, Permission::Configure)?;
+    let target = Target::new(
+        request.name,
+        request.kind,
+        request.address,
+        request.transport,
+        request.credential_secret_ref,
+        request.agent_secret_ref,
+    )
+    .map_err(|_| {
+        ApiError::bad_request("invalid_target", "target fields or transport are invalid")
+    })?;
+    let dto = TargetDto::from(&target);
+    if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .targets
+            .save(&target)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    state.store.write().await.targets.push(target);
+    state.publish(ApiEvent::status(
+        "target",
+        dto.id.as_uuid().to_string(),
+        "pending",
+    ));
+    Ok((StatusCode::CREATED, Json(envelope(dto))))
+}
+
+async fn get_target(
+    State(state): State<ApiState>,
+    Path(target_id): Path<String>,
+) -> Result<Json<ApiEnvelope<TargetDto>>, ApiError> {
+    let target_id = TargetId::from_uuid(parse_uuid(&target_id, "target id")?);
+    let store = state.store.read().await;
+    let target = store
+        .targets
+        .iter()
+        .find(|target| target.id == target_id)
+        .ok_or_else(|| ApiError::not_found("target not found"))?;
+    Ok(Json(envelope(TargetDto::from(target))))
+}
+
+async fn receive_agent_heartbeat(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    JsonBody(heartbeat): JsonBody<AgentHeartbeat>,
+) -> Result<StatusCode, ApiError> {
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(ApiError::unauthorized)?;
+    let mut store = state.store.write().await;
+    let target = store
+        .targets
+        .iter_mut()
+        .find(|target| target.id.as_uuid() == heartbeat.target_id)
+        .ok_or_else(|| ApiError::not_found("target not found"))?;
+    let expected = state
+        .secrets
+        .read(target.agent_secret_ref)
+        .map_err(map_secret_error)?;
+    if expected.expose() != token {
+        return Err(ApiError::unauthorized());
+    }
+    target.mark_managed();
+    let target_to_persist = target.clone();
+    let target_id = target.id;
+    store.agent_reports.insert(target_id, heartbeat);
+    drop(store);
+    if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .targets
+            .update(&target_to_persist)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    state.publish(ApiEvent::status(
+        "target",
+        target_id.as_uuid().to_string(),
+        "agent_connected",
+    ));
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -986,7 +1165,9 @@ async fn create_enrollment(
             target: ResourceTarget::Container(container_id),
             lifecycle,
             mode: ExecutionMode::Apply,
-            parameters: AnsibleParameters::DeployAgent { agent_version: "0.1.0".to_owned() },
+            parameters: AnsibleParameters::DeployAgent {
+                agent_version: "0.1.0".to_owned(),
+            },
             secret_refs: configured_ansible_secret_refs()?,
             idempotency_key: format!("enrollment-{}", dto.id.as_uuid()),
             confirmed: true,
@@ -994,13 +1175,28 @@ async fn create_enrollment(
         };
         if let Ok(JobSubmission::Created(job)) = state.ansible.write().await.submit(job_request) {
             if let Some(repositories) = state.repositories.clone() {
-                repositories.ansible_jobs.save(&job).await.map_err(|_| ApiError::storage())?;
+                repositories
+                    .ansible_jobs
+                    .save(&job)
+                    .await
+                    .map_err(|_| ApiError::storage())?;
             }
             let mut store = state.store.write().await;
             if let Some(enrollment) = store.enrollments.iter_mut().find(|item| item.id == dto.id) {
-                enrollment.transition_to(EnrollmentState::Discovering).map_err(|_| ApiError::conflict("enrollment_invalid_state", "enrollment cannot start discovery"))?;
+                enrollment
+                    .transition_to(EnrollmentState::Discovering)
+                    .map_err(|_| {
+                        ApiError::conflict(
+                            "enrollment_invalid_state",
+                            "enrollment cannot start discovery",
+                        )
+                    })?;
             }
-            state.publish(ApiEvent::status("ansible_job", job.id.as_uuid().to_string(), "queued"));
+            state.publish(ApiEvent::status(
+                "ansible_job",
+                job.id.as_uuid().to_string(),
+                "queued",
+            ));
         }
     }
 
@@ -1029,6 +1225,9 @@ async fn get_enrollment(
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreateAnsibleJobRequest {
     pub operation: AnsibleOperation,
+    #[serde(default)]
+    pub target_id: Option<TargetId>,
+    #[serde(default)]
     pub container_id: u64,
     pub mode: ExecutionMode,
     pub parameters: AnsibleParameters,
@@ -1072,37 +1271,60 @@ async fn create_ansible_job(
     Extension(actor_role): Extension<ActorRole>,
     JsonBody(request): JsonBody<CreateAnsibleJobRequest>,
 ) -> Result<(StatusCode, Json<ApiEnvelope<AnsibleJobDto>>), ApiError> {
-    if request.container_id == 0 {
-        return Err(ApiError::bad_request(
-            "invalid_container_id",
-            "container id must be greater than zero",
-        ));
-    }
-    let container_id = ContainerId::new(request.container_id);
-    let lifecycle = state
-        .store
-        .read()
-        .await
-        .containers
-        .iter()
-        .find(|container| container.id == container_id)
-        .map(|container| match container.management_state {
-            ContainerManagementState::Discovered => ResourceLifecycle::Discovered,
-            ContainerManagementState::Managed => ResourceLifecycle::Managed,
-            ContainerManagementState::Ignored | ContainerManagementState::Disabled => {
-                ResourceLifecycle::Disabled
-            }
-        })
-        .ok_or_else(|| ApiError::not_found("container not found"))?;
+    let (target, lifecycle, target_secret_ref) = if let Some(target_id) = request.target_id {
+        let target = state
+            .store
+            .read()
+            .await
+            .targets
+            .iter()
+            .find(|target| target.id == target_id)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found("target not found"))?;
+        let lifecycle = match target.state {
+            TargetState::Pending => ResourceLifecycle::Pending,
+            TargetState::Managed => ResourceLifecycle::Managed,
+            TargetState::Disabled => ResourceLifecycle::Disabled,
+        };
+        (
+            ResourceTarget::Target(target_id),
+            lifecycle,
+            Some(target.credential_secret_ref),
+        )
+    } else {
+        if request.container_id == 0 {
+            return Err(ApiError::bad_request(
+                "target_required",
+                "target id must be provided",
+            ));
+        }
+        let container_id = ContainerId::new(request.container_id);
+        let lifecycle = state
+            .store
+            .read()
+            .await
+            .containers
+            .iter()
+            .find(|container| container.id == container_id)
+            .map(|container| match container.management_state {
+                ContainerManagementState::Discovered => ResourceLifecycle::Discovered,
+                ContainerManagementState::Managed => ResourceLifecycle::Managed,
+                ContainerManagementState::Ignored | ContainerManagementState::Disabled => {
+                    ResourceLifecycle::Disabled
+                }
+            })
+            .ok_or_else(|| ApiError::not_found("container not found"))?;
+        (ResourceTarget::Container(container_id), lifecycle, None)
+    };
 
     let secret_refs = if request.operation == AnsibleOperation::HealthCheck {
         Vec::new()
     } else {
-        configured_ansible_secret_refs()?
+        target_secret_ref.map_or_else(configured_ansible_secret_refs, |secret| Ok(vec![secret]))?
     };
     let job_request = AnsibleJobRequest {
         operation: request.operation,
-        target: ResourceTarget::Container(container_id),
+        target,
         lifecycle,
         mode: request.mode,
         parameters: request.parameters,
@@ -2070,7 +2292,10 @@ async fn register_agent(
         ApiError::bad_request("invalid_agent_config", "agent endpoint or token is invalid")
     })?;
     let config = if let Some(ca_secret_ref) = request.ca_secret_ref {
-        let ca = state.secrets.read(ca_secret_ref).map_err(map_secret_error)?;
+        let ca = state
+            .secrets
+            .read(ca_secret_ref)
+            .map_err(map_secret_error)?;
         config.with_root_certificate_pem(ca.expose().as_bytes())
     } else {
         config
@@ -2103,13 +2328,23 @@ async fn register_agent(
             request.ca_secret_ref,
             chrono::Utc::now(),
         )
-        .map_err(|_| ApiError::bad_request("invalid_agent_registration", "agent registration is invalid"))?;
+        .map_err(|_| {
+            ApiError::bad_request(
+                "invalid_agent_registration",
+                "agent registration is invalid",
+            )
+        })?;
         if let Some(repositories) = state.repositories.as_ref() {
             repositories
                 .agent_registrations
                 .save(&registration)
                 .await
-                .map_err(|_| ApiError::dependency("persistence_unavailable", "agent registration could not be persisted"))?;
+                .map_err(|_| {
+                    ApiError::dependency(
+                        "persistence_unavailable",
+                        "agent registration could not be persisted",
+                    )
+                })?;
         }
     }
     state.publish(ApiEvent::status(
@@ -2346,7 +2581,11 @@ async fn get_agent_health(
         Ok(health) => health,
         Err(_) => {
             if let Some(repositories) = state.repositories.as_ref() {
-                if let Ok(Some(mut registration)) = repositories.agent_registrations.find_by_container(container_id).await {
+                if let Ok(Some(mut registration)) = repositories
+                    .agent_registrations
+                    .find_by_container(container_id)
+                    .await
+                {
                     registration.record_unreachable(chrono::Utc::now(), "agent healthcheck failed");
                     let _ = repositories.agent_registrations.save(&registration).await;
                 }
@@ -2356,11 +2595,18 @@ async fn get_agent_health(
                 container_id.value().to_string(),
                 "unreachable",
             ));
-            return Err(ApiError::dependency("agent_unavailable", "the agent healthcheck failed"));
+            return Err(ApiError::dependency(
+                "agent_unavailable",
+                "the agent healthcheck failed",
+            ));
         }
     };
     if let Some(repositories) = state.repositories.as_ref() {
-        if let Ok(Some(mut registration)) = repositories.agent_registrations.find_by_container(container_id).await {
+        if let Ok(Some(mut registration)) = repositories
+            .agent_registrations
+            .find_by_container(container_id)
+            .await
+        {
             registration.record_health(health.healthy, chrono::Utc::now(), None);
             let _ = repositories.agent_registrations.save(&registration).await;
         }
@@ -2368,7 +2614,11 @@ async fn get_agent_health(
     state.publish(ApiEvent::status(
         "agent",
         container_id.value().to_string(),
-        if health.healthy { "connected" } else { "degraded" },
+        if health.healthy {
+            "connected"
+        } else {
+            "degraded"
+        },
     ));
     Ok(Json(envelope(health)))
 }

@@ -1,6 +1,7 @@
 # lxcup
 
-Webbasierter Update-Manager für Proxmox-LXC-Container.
+Webbasierter Update-Manager für bestehende LXC, Linux-Server und
+Windows-Systeme.
 
 ## Workspace
 
@@ -10,11 +11,10 @@ crates/
 ├── lxcup-apt          APT-Scanner und Parser
 ├── lxcup-agent        Linux-/Windows-Agentvertrag und Agentdienst
 ├── lxcup-cli          optionale CLI-Oberfläche
-├── lxcup-discovery    LXC-Discovery und Reconciliation
 ├── lxcup-execution    bestätigte Update-Ausführung und Audit-Grenze
 ├── lxcup-observability Logging- und Fehler-Infrastruktur
 ├── lxcup-planner      sichere Update-Pläne und Revalidierung
-├── lxcup-proxmox      HTTPS-Transport und Proxmox-API-Adapter
+├── lxcup-ansible      Freigegebene Ansible-Workflows für SSH und WinRM
 ├── lxcup-safety       Snapshots, Healthchecks und Reboot-Erkennung
 ├── lxcup-server       Backend-REST-/SSE-API
 └── lxcup-test-support versionierte Fixtures und Integrationstest-Harness
@@ -34,8 +34,8 @@ ergänzt; der Controller und PostgreSQL bleiben die zentrale Quelle der Wahrheit
 
 ## Aktueller Projektstand
 
-Die MVP-Grundlagen und der erste Ende-zu-Ende-Pfad sind umgesetzt: Discovery
-vorhandener LXC-Container, APT-Scanning, sichere Update-Pläne, REST-/SSE-API,
+Die MVP-Grundlagen und der erste Ende-zu-Ende-Pfad sind umgesetzt:
+plattformneutrales Target-Onboarding, Ansible-Deployment, sichere Update-Pläne, REST-/SSE-API,
 React-Dashboard, authentifizierte Linux-/Windows-Agenten, Execution-Lebenszyklus,
 Snapshot-Task-Polling, Healthchecks, PostgreSQL-Ergebnisablage und lokale
 Test-/Quality-Gates.
@@ -47,10 +47,9 @@ registrierte Agenten auslösen und nach Verbindungsverlust reconciliieren.
 
 Empfohlene Reihenfolge:
 
-1. Einen dedizierten Test-LXC-Agenten registrieren und den APPLY-Pfad testen.
-2. Snapshot-/Healthcheck-Regeln gegen die echte Testumgebung verifizieren.
+1. Ein SSH- oder WinRM-Ziel aufnehmen und den Agenten per Ansible ausrollen.
+2. Healthcheck- und Update-Workflows gegen die echte Testumgebung verifizieren.
 3. PostgreSQL-Backup/Restore und Reverse-Proxy im Management-LXC testen.
-4. SonarQube im lokalen Quality-Gate ergänzen.
 
 ## Lokale Prüfungen
 
@@ -201,18 +200,20 @@ GitHub Actions werden nicht verwendet.
 
 ## Agenten und Betriebsendpunkte
 
-Der Agent läuft im verwalteten LXC beziehungsweise als Windows-Dienst. Er wird
-mit `LXCUP_AGENT_TOKEN` und `LXCUP_AGENT_BIND_ADDRESS` konfiguriert. Der Server
-registriert ihn über `POST /api/v1/containers/{container_id}/agent`; danach
-stehen folgende Endpunkte zur Verfügung:
+Der Agent läuft auf einem verwalteten LXC, Linux-Server oder als Windows-Dienst.
+Er wird mit `LXCUP_AGENT_TOKEN`, `LXCUP_TARGET_ID` und
+`LXCUP_CONTROLLER_URL` konfiguriert und meldet sich selbst beim Controller.
+Der lokale Bind-Port ist nur für Diagnosezwecke erforderlich. Relevante
+Controller-Endpunkte:
 
 ```text
 POST /api/v1/scans/{scan_id}/run
 POST /api/v1/executions/{execution_id}/run
 POST /api/v1/executions/{execution_id}/reconcile
 GET  /api/v1/executions/{execution_id}/result
-GET  /api/v1/containers/{container_id}/agent/health
-GET  /api/v1/containers/{container_id}/agent/metrics
+GET  /api/v1/targets
+POST /api/v1/targets
+POST /api/v1/agents/heartbeat
 GET  /health/live
 GET  /health/ready
 GET  /metrics
@@ -222,58 +223,8 @@ Für eine produktive Bereitstellung siehe [`deploy/README.md`](deploy/README.md)
 Die Authentifizierung verwendet Bearer-Tokens mit Viewer-, Operator- und
 Admin-Token; ohne gesetzte Authentifizierung bleibt die lokale Entwicklung
 kompatibel.
-Für den dedizierten Test-LXC stehen Verteilung und Server-Agent-Smoke-Test in
-[`docs/TEST-LXC-SETUP.md`](docs/TEST-LXC-SETUP.md) und
-`scripts/run-agent-server-integration.ps1` bereit.
-
-Ein opt-in Integrationstest gegen einen ausdrücklich dedizierten Test-LXC wird
-so gestartet:
-
-Die vollständige Schritt-für-Schritt-Anleitung für Compose, `.env`, Proxmox-
-Token/ACL, SSH-Bootstrap, TLS/CA und die nächsten Agententests steht in
-[`docs/TEST-LXC-SETUP.md`](docs/TEST-LXC-SETUP.md).
-
-```powershell
-$env:DATABASE_TEST_URL = "postgres://lxcup_test:<password>@localhost:5434/lxcup_test"
-$env:PROXMOX_TEST_BASE_URL = "https://pve-test:8006"
-$env:PROXMOX_TEST_TOKEN_ID = "<test-token-id>"
-$env:PROXMOX_TEST_TOKEN_SECRET = "<test-token-secret>"
-$env:PROXMOX_TEST_CA_CERT = "C:\\secrets\\pve-root-ca.pem"
-$env:LXCUP_INTEGRATION_NODE = "pve-test"
-$env:LXCUP_INTEGRATION_VMID = "101"
-.\scripts\run-integration-tests.ps1 -ProxmoxIp "<PROXMOX-IP>"
-```
-
-Der Test wird nicht automatisch ausgeführt und verwendet keine produktiven
-Credentials oder produktiven Zielcontainer. `PROXMOX_TEST_CA_CERT` verweist auf
-die PEM-Datei der privaten Proxmox-CA; dadurch bleibt die TLS-Prüfung aktiv,
-statt Zertifikate pauschal zu akzeptieren.
-
-Alternativ kann der Proxmox-Test über SSH vorbereitet und mit nur der
-Proxmox-IP gestartet werden. Der dedizierte LXC muss dafür `lxcup-test` heißen:
-
-```powershell
-.\scripts\bootstrap-test-lxc.ps1 -ProxmoxIp "192.168.1.150"
-```
-
-Das Skript findet Node und VMID, kopiert die Proxmox-CA nach `%LOCALAPPDATA%\lxcup`
-und lädt die übrigen Testwerte aus `.env`. Es verändert keine produktiven
-Container und erstellt keine neuen Proxmox-Berechtigungen. Für die Verbindung
-verwendet es den Windows-OpenSSH-Client; vorhandene SSH-Schlüssel werden
-genutzt, alternativ kann OpenSSH interaktiv nach dem Passwort fragen.
-Die angegebene IP wird für die TCP-Verbindung verwendet, während der
-Proxmox-Node-Name für TLS/SNI und die Zertifikatsprüfung genutzt wird. Dadurch
-funktioniert der Test auch, wenn die IP nicht im Proxmox-Zertifikat enthalten
-ist.
-
-Standardmäßig wird `root` verwendet. Falls der direkte Root-Login deaktiviert
-ist, kann ein anderer SSH-Benutzer angegeben werden:
-
-```powershell
-.\scripts\bootstrap-test-lxc.ps1 -ProxmoxIp "192.168.1.150" -SshUser "admin"
-```
-
-Der Benutzer muss `pvesh` ausführen und `/etc/pve/pve-root-ca.pem` lesen dürfen.
+Die Ansible-Playbooks stellen Agenten auf bestehenden SSH- und WinRM-Zielen
+bereit. LXC-Erstellung und Proxmox-Zugriff sind nicht Bestandteil des Produkts.
 
 ## Entwicklungsprinzip
 

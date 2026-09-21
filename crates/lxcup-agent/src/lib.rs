@@ -79,6 +79,17 @@ pub struct AgentHealth {
     pub metrics: AgentMetrics,
 }
 
+/// Outbound status message sent by agents to the controller. The agent owns
+/// the connection direction so private LXC and Windows networks need no
+/// controller-to-agent ingress rule.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentHeartbeat {
+    pub target_id: uuid::Uuid,
+    pub info: AgentInfo,
+    pub metrics: AgentMetrics,
+    pub sent_at: DateTime<Utc>,
+}
+
 #[derive(Clone)]
 pub struct AgentClientConfig {
     pub base_url: String,
@@ -171,13 +182,11 @@ impl AgentClient {
     pub fn new(config: AgentClientConfig) -> Result<Self, AgentError> {
         let mut builder = Client::builder().timeout(config.timeout);
         if let Some(certificate_pem) = config.root_certificate_pem.as_deref() {
-            let certificate = reqwest::Certificate::from_pem(certificate_pem)
-                .map_err(AgentError::ClientBuild)?;
+            let certificate =
+                reqwest::Certificate::from_pem(certificate_pem).map_err(AgentError::ClientBuild)?;
             builder = builder.add_root_certificate(certificate);
         }
-        let http = builder
-            .build()
-            .map_err(AgentError::ClientBuild)?;
+        let http = builder.build().map_err(AgentError::ClientBuild)?;
         Ok(Self { http, config })
     }
 
@@ -331,6 +340,10 @@ impl LocalAgentState {
             })),
             results: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    pub async fn metrics_snapshot(&self) -> AgentMetrics {
+        self.metrics.lock().await.clone()
     }
 }
 
@@ -539,11 +552,13 @@ mod tests {
         assert!(AgentClientConfig::new("http://agent.example", "token").is_err());
         let config = AgentClientConfig::new("https://agent.example", "secret").unwrap();
         assert!(!format!("{config:?}").contains("secret"));
-        assert!(AgentClientConfig::new("https://agent.example", "secret")
-            .unwrap()
-            .with_root_certificate_pem(b"private-ca")
-            .root_certificate_pem
-            .is_some());
+        assert!(
+            AgentClientConfig::new("https://agent.example", "secret")
+                .unwrap()
+                .with_root_certificate_pem(b"private-ca")
+                .root_certificate_pem
+                .is_some()
+        );
     }
 
     #[test]

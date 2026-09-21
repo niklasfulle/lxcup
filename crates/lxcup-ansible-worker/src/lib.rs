@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use lxcup_ansible::{AnsibleJob, AnsibleJobStatus, PlaybookRegistry};
-use lxcup_core::{Container, Node, ResourceTarget, SecretId};
+use lxcup_core::{Container, Node, ResourceTarget, SecretId, Target, TargetTransport};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -33,7 +33,11 @@ impl WorkerSecretRefs {
             self.winrm_password,
         ];
         let mut unique = HashSet::new();
-        if refs.into_iter().flatten().any(|secret| !unique.insert(secret)) {
+        if refs
+            .into_iter()
+            .flatten()
+            .any(|secret| !unique.insert(secret))
+        {
             return Err(WorkerConfigError::DuplicateSecretReference);
         }
         Ok(())
@@ -54,7 +58,9 @@ impl WorkerConnectionConfig {
         secret_refs: WorkerSecretRefs,
     ) -> Result<Self, WorkerConfigError> {
         let proxmox_endpoint = proxmox_endpoint.into().trim_end_matches('/').to_owned();
-        let host = proxmox_endpoint.strip_prefix("https://").unwrap_or_default();
+        let host = proxmox_endpoint
+            .strip_prefix("https://")
+            .unwrap_or_default();
         if host.is_empty() || host.chars().any(char::is_whitespace) {
             return Err(WorkerConfigError::InvalidProxmoxEndpoint);
         }
@@ -97,6 +103,7 @@ pub struct InventoryHost {
     pub node_id: lxcup_core::NodeId,
     pub address: String,
     pub name: String,
+    pub transport: Option<TargetTransport>,
     pub secret_refs: Vec<SecretId>,
 }
 
@@ -114,6 +121,25 @@ pub enum WorkerConfigError {
 }
 
 impl DynamicInventory {
+    /// Creates the worker inventory from a controller-owned target. No caller
+    /// can inject arbitrary hosts or choose a transport outside the target.
+    pub fn for_target(target: &Target) -> Result<Self, WorkerContractError> {
+        if target.address.trim().is_empty() {
+            return Err(WorkerContractError::InvalidInventory);
+        }
+        Ok(Self {
+            hosts: vec![InventoryHost {
+                key: format!("target-{}", target.id.as_uuid()),
+                target: ResourceTarget::Target(target.id),
+                node_id: lxcup_core::NodeId::new(),
+                address: target.address.clone(),
+                name: target.name.clone(),
+                transport: Some(target.transport),
+                secret_refs: vec![target.credential_secret_ref],
+            }],
+        })
+    }
+
     pub fn for_container(
         node: &Node,
         container: &Container,
@@ -132,6 +158,7 @@ impl DynamicInventory {
                 node_id: node.id,
                 address: node.address.clone(),
                 name: container.name.clone(),
+                transport: None,
                 secret_refs,
             }],
         })
@@ -315,11 +342,10 @@ mod tests {
         let serialized = serde_json::to_string(&config).unwrap();
         assert!(serialized.contains(&api.as_uuid().to_string()));
         assert!(!serialized.contains("top-secret"));
-        assert!(WorkerConnectionConfig::new(
-            "http://pve.example.test",
-            config.secret_refs.clone()
-        )
-        .is_err());
+        assert!(
+            WorkerConnectionConfig::new("http://pve.example.test", config.secret_refs.clone())
+                .is_err()
+        );
     }
 
     #[test]
@@ -370,6 +396,25 @@ mod tests {
         );
         assert_eq!(inventory.hosts[0].secret_refs, vec![secret]);
         assert!(DynamicInventory::for_container(&node, &container, vec![secret, secret]).is_err());
+    }
+
+    #[test]
+    fn target_inventory_uses_the_controller_owned_address_and_transport() {
+        let target = lxcup_core::Target::new(
+            "windows-01",
+            lxcup_core::TargetKind::WindowsServer,
+            "windows-01.example.test",
+            lxcup_core::TargetTransport::Winrm,
+            SecretId::new(),
+            SecretId::new(),
+        )
+        .unwrap();
+
+        let inventory = DynamicInventory::for_target(&target).unwrap();
+
+        assert_eq!(inventory.hosts[0].target, ResourceTarget::Target(target.id));
+        assert_eq!(inventory.hosts[0].transport, Some(TargetTransport::Winrm));
+        assert_eq!(inventory.hosts[0].address, "windows-01.example.test");
     }
 
     #[test]

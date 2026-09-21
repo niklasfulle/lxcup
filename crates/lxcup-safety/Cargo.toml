@@ -8,7 +8,6 @@ repository.workspace = true
 
 [dependencies]
 chrono.workspace = true
-lxcup-proxmox = { path = "../lxcup-proxmox" }
 reqwest.workspace = true
 serde.workspace = true
 thiserror.workspace = true

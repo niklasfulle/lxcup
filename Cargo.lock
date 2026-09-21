@@ -1178,18 +1178,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lxcup-discovery"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "lxcup-core",
- "lxcup-persistence",
- "lxcup-proxmox",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "lxcup-execution"
 version = "0.1.0"
 dependencies = [
@@ -1234,24 +1222,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "lxcup-proxmox"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "lxcup-safety"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "lxcup-proxmox",
  "reqwest",
  "serde",
  "thiserror",
@@ -1303,9 +1277,7 @@ dependencies = [
  "chrono",
  "lxcup-agent",
  "lxcup-core",
- "lxcup-proxmox",
  "tokio",
- "url",
  "uuid",
 ]
 

@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ContainerId, DomainError, NodeId, error::DomainResult};
+use crate::{ContainerId, DomainError, NodeId, TargetId, error::DomainResult};
 
 /// Stable target type used by API DTOs, audit events and Ansible jobs.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceTarget {
+    Target(TargetId),
     Node(NodeId),
     Container(ContainerId),
 }
@@ -108,6 +109,7 @@ impl ResourceAction {
 
     pub const fn supports(self, target: ResourceTarget) -> bool {
         match target {
+            ResourceTarget::Target(_) => true,
             ResourceTarget::Node(_) => matches!(
                 self,
                 Self::Discover
