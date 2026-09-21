@@ -1,6 +1,7 @@
 # lxcup
 
-Webbasierter Update-Manager für Proxmox-LXC-Container.
+Webbasierter Update-Manager für bestehende LXC, Linux-Server und
+Windows-Systeme.
 
 ## Workspace
 
@@ -14,7 +15,7 @@ crates/
 ├── lxcup-execution    bestätigte Update-Ausführung und Audit-Grenze
 ├── lxcup-observability Logging- und Fehler-Infrastruktur
 ├── lxcup-planner      sichere Update-Pläne und Revalidierung
-├── lxcup-proxmox      HTTPS-Transport und Proxmox-API-Adapter
+├── lxcup-ansible      Freigegebene Ansible-Workflows für SSH und WinRM
 ├── lxcup-safety       Snapshots, Healthchecks und Reboot-Erkennung
 ├── lxcup-server       Backend-REST-/SSE-API
 └── lxcup-test-support versionierte Fixtures und Integrationstest-Harness
@@ -35,7 +36,7 @@ ergänzt; der Controller und PostgreSQL bleiben die zentrale Quelle der Wahrheit
 ## Aktueller Projektstand
 
 Die MVP-Grundlagen und der erste Ende-zu-Ende-Pfad sind umgesetzt: Discovery
-vorhandener LXC-Container, APT-Scanning, sichere Update-Pläne, REST-/SSE-API,
+vorhandener Ziele, Ansible-Deployment, sichere Update-Pläne, REST-/SSE-API,
 React-Dashboard, authentifizierte Linux-/Windows-Agenten, Execution-Lebenszyklus,
 Snapshot-Task-Polling, Healthchecks, PostgreSQL-Ergebnisablage und lokale
 Test-/Quality-Gates.

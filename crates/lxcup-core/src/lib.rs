@@ -3,9 +3,9 @@
 //! Dieses Crate bleibt unabhängig von HTTP, PostgreSQL und konkreten
 //! Proxmox- oder Betriebssystem-Adaptern.
 
+pub mod agent;
 pub mod container;
 pub mod enrollment;
-pub mod agent;
 pub mod environment;
 pub mod error;
 pub mod execution;
@@ -15,21 +15,22 @@ pub mod plan;
 pub mod resource;
 pub mod scan;
 pub mod secret;
+pub mod target;
 pub mod update;
 
+pub use agent::{AgentConnectionState, AgentRegistration};
 pub use container::{
     Container, ContainerAction, ContainerManagementState, ContainerStatus, OperatingSystem,
 };
 pub use enrollment::{Enrollment, EnrollmentState};
-pub use agent::{AgentConnectionState, AgentRegistration};
 pub use environment::{EnvironmentStatus, ProxmoxEnvironment};
 pub use error::{
     DomainError, ErrorCode, InfrastructureError, LxcupError, LxcupResult, RetryPolicy,
 };
 pub use execution::{Execution, ExecutionStatus};
 pub use ids::{
-    AgentRegistrationId, AnsibleJobId, ContainerId, EnrollmentId, EnvironmentId, ExecutionId, NodeId, ScanId, SecretId,
-    UpdatePlanId,
+    AgentRegistrationId, AnsibleJobId, ContainerId, EnrollmentId, EnvironmentId, ExecutionId,
+    NodeId, ScanId, SecretId, TargetId, UpdatePlanId,
 };
 pub use node::{Node, NodeStatus};
 pub use plan::{PackageChangeKind, PlanStatus, ResolvedPackageChange, UpdatePlan};
@@ -38,6 +39,7 @@ pub use resource::{
 };
 pub use scan::{Scan, ScanStatus};
 pub use secret::{SecretKind, SecretMetadata, SecretScope, SecretValue};
+pub use target::{Target, TargetKind, TargetState, TargetTransport};
 pub use update::{AvailableUpdate, PackageName, PackageVersion, UpdateClassification};
 
 /// Version des Core-Crates.

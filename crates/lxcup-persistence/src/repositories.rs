@@ -3,11 +3,11 @@
 use chrono::{DateTime, Utc};
 use lxcup_ansible::{AnsibleJob, AnsibleJobStatus, JobEvent};
 use lxcup_core::{
-    AgentRegistration, AvailableUpdate, Container, ContainerId, ContainerManagementState, ContainerStatus,
-    EnvironmentStatus, Execution, ExecutionId, ExecutionStatus, Node, NodeId, NodeStatus,
-    OperatingSystem, PackageChangeKind, PackageName, PackageVersion, PlanStatus,
-    ProxmoxEnvironment, ResolvedPackageChange, Scan, ScanId, ScanStatus, SecretId,
-    UpdateClassification, UpdatePlan, UpdatePlanId,
+    AgentRegistration, AvailableUpdate, Container, ContainerId, ContainerManagementState,
+    ContainerStatus, EnvironmentStatus, Execution, ExecutionId, ExecutionStatus, Node, NodeId,
+    NodeStatus, OperatingSystem, PackageChangeKind, PackageName, PackageVersion, PlanStatus,
+    ProxmoxEnvironment, ResolvedPackageChange, Scan, ScanId, ScanStatus, SecretId, Target,
+    TargetId, UpdateClassification, UpdatePlan, UpdatePlanId,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
@@ -130,9 +130,75 @@ pub struct AgentRegistrationRepository {
     pool: PgPool,
 }
 
+/// Persistiert plattformneutrale verwaltete Ziele.
+#[derive(Clone)]
+pub struct TargetRepository {
+    pool: PgPool,
+}
+
+impl TargetRepository {
+    pub(crate) fn new(database: &Database) -> Self {
+        Self {
+            pool: database.pool().clone(),
+        }
+    }
+
+    pub async fn save(&self, target: &Target) -> Result<(), RepositoryError> {
+        let payload = serde_json::to_value(target).map_err(RepositoryError::Serialization)?;
+        sqlx::query(
+            "INSERT INTO targets (id, name, kind, address, transport, state, payload, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(target.id.as_uuid())
+        .bind(&target.name)
+        .bind(format!("{:?}", target.kind).to_lowercase())
+        .bind(&target.address)
+        .bind(format!("{:?}", target.transport).to_lowercase())
+        .bind(format!("{:?}", target.state).to_lowercase())
+        .bind(payload)
+        .bind(target.created_at)
+        .bind(target.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update(&self, target: &Target) -> Result<(), RepositoryError> {
+        let payload = serde_json::to_value(target).map_err(RepositoryError::Serialization)?;
+        sqlx::query("UPDATE targets SET name = $1, kind = $2, address = $3, transport = $4, state = $5, payload = $6, updated_at = $7 WHERE id = $8")
+            .bind(&target.name)
+            .bind(format!("{:?}", target.kind).to_lowercase())
+            .bind(&target.address)
+            .bind(format!("{:?}", target.transport).to_lowercase())
+            .bind(format!("{:?}", target.state).to_lowercase())
+            .bind(payload)
+            .bind(target.updated_at)
+            .bind(target.id.as_uuid())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn find_by_id(&self, id: TargetId) -> Result<Option<Target>, RepositoryError> {
+        let row = sqlx::query("SELECT payload FROM targets WHERE id = $1")
+            .bind(id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(target_from_row).transpose()
+    }
+
+    pub async fn list(&self) -> Result<Vec<Target>, RepositoryError> {
+        let rows = sqlx::query("SELECT payload FROM targets ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(target_from_row).collect()
+    }
+}
+
 impl AgentRegistrationRepository {
     pub(crate) fn new(database: &Database) -> Self {
-        Self { pool: database.pool().clone() }
+        Self {
+            pool: database.pool().clone(),
+        }
     }
 
     pub async fn save(&self, registration: &AgentRegistration) -> Result<(), RepositoryError> {
@@ -157,19 +223,37 @@ impl AgentRegistrationRepository {
         Ok(())
     }
 
-    pub async fn find_by_container(&self, container_id: ContainerId) -> Result<Option<AgentRegistration>, RepositoryError> {
+    pub async fn find_by_container(
+        &self,
+        container_id: ContainerId,
+    ) -> Result<Option<AgentRegistration>, RepositoryError> {
         let row = sqlx::query("SELECT payload FROM agent_registrations WHERE container_id = $1")
             .bind(container_id.value() as i64)
             .fetch_optional(&self.pool)
             .await?;
-        row.map(|row| serde_json::from_value(row.try_get("payload")?).map_err(|_| RepositoryError::InvalidValue { field: "agent registration payload" })).transpose()
+        row.map(|row| {
+            serde_json::from_value(row.try_get("payload")?).map_err(|_| {
+                RepositoryError::InvalidValue {
+                    field: "agent registration payload",
+                }
+            })
+        })
+        .transpose()
     }
 
     pub async fn list(&self) -> Result<Vec<AgentRegistration>, RepositoryError> {
         let rows = sqlx::query("SELECT payload FROM agent_registrations ORDER BY container_id")
             .fetch_all(&self.pool)
             .await?;
-        rows.into_iter().map(|row| serde_json::from_value(row.try_get("payload")?).map_err(|_| RepositoryError::InvalidValue { field: "agent registration payload" })).collect()
+        rows.into_iter()
+            .map(|row| {
+                serde_json::from_value(row.try_get("payload")?).map_err(|_| {
+                    RepositoryError::InvalidValue {
+                        field: "agent registration payload",
+                    }
+                })
+            })
+            .collect()
     }
 }
 
@@ -853,6 +937,7 @@ impl AuditEventRepository {
 /// Erstellt alle MVP-Repositories über denselben Pool.
 #[derive(Clone)]
 pub struct Repositories {
+    pub targets: TargetRepository,
     pub agent_registrations: AgentRegistrationRepository,
     pub ansible_jobs: AnsibleJobRepository,
     pub environments: EnvironmentRepository,
@@ -867,6 +952,7 @@ pub struct Repositories {
 impl Repositories {
     pub fn new(database: &Database) -> Self {
         Self {
+            targets: TargetRepository::new(database),
             agent_registrations: AgentRegistrationRepository::new(database),
             ansible_jobs: AnsibleJobRepository::new(database),
             environments: EnvironmentRepository::new(database),
@@ -878,6 +964,12 @@ impl Repositories {
             audit_events: AuditEventRepository::new(database),
         }
     }
+}
+
+fn target_from_row(row: PgRow) -> Result<Target, RepositoryError> {
+    serde_json::from_value(row.try_get("payload")?).map_err(|_| RepositoryError::InvalidValue {
+        field: "target payload",
+    })
 }
 
 fn agent_state_to_db(value: lxcup_core::AgentConnectionState) -> &'static str {

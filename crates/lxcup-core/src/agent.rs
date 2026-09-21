@@ -40,7 +40,10 @@ impl AgentRegistration {
         if agent_id.is_empty() || agent_id.len() > 200 {
             return Err(DomainError::EmptyValue { field: "agent id" });
         }
-        if !(endpoint.starts_with("https://") || endpoint.starts_with("http://127.0.0.1") || endpoint.starts_with("http://localhost")) {
+        if !(endpoint.starts_with("https://")
+            || endpoint.starts_with("http://127.0.0.1")
+            || endpoint.starts_with("http://localhost"))
+        {
             return Err(DomainError::InvalidEnvironmentEndpoint);
         }
         Ok(Self {
@@ -59,7 +62,11 @@ impl AgentRegistration {
     }
 
     pub fn record_health(&mut self, healthy: bool, now: DateTime<Utc>, error: Option<String>) {
-        self.state = if healthy { AgentConnectionState::Connected } else { AgentConnectionState::Degraded };
+        self.state = if healthy {
+            AgentConnectionState::Connected
+        } else {
+            AgentConnectionState::Degraded
+        };
         self.last_checked_at = Some(now);
         self.last_error = error;
         self.updated_at = now;
@@ -75,21 +82,59 @@ impl AgentRegistration {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
     use crate::{AgentConnectionState, AgentRegistration, ContainerId, SecretId};
+    use chrono::Utc;
 
     #[test]
     fn registration_accepts_https_and_local_development_endpoints_only() {
         let now = Utc::now();
-        assert!(AgentRegistration::new(ContainerId::new(101), "agent-1", "https://agent", SecretId::new(), None, now).is_ok());
-        assert!(AgentRegistration::new(ContainerId::new(101), "agent-1", "http://agent", SecretId::new(), None, now).is_err());
-        assert!(AgentRegistration::new(ContainerId::new(101), "agent-1", "http://127.0.0.1:8090", SecretId::new(), None, now).is_ok());
+        assert!(
+            AgentRegistration::new(
+                ContainerId::new(101),
+                "agent-1",
+                "https://agent",
+                SecretId::new(),
+                None,
+                now
+            )
+            .is_ok()
+        );
+        assert!(
+            AgentRegistration::new(
+                ContainerId::new(101),
+                "agent-1",
+                "http://agent",
+                SecretId::new(),
+                None,
+                now
+            )
+            .is_err()
+        );
+        assert!(
+            AgentRegistration::new(
+                ContainerId::new(101),
+                "agent-1",
+                "http://127.0.0.1:8090",
+                SecretId::new(),
+                None,
+                now
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn health_reconciliation_distinguishes_degraded_and_unreachable() {
         let now = Utc::now();
-        let mut registration = AgentRegistration::new(ContainerId::new(101), "agent-1", "https://agent", SecretId::new(), None, now).unwrap();
+        let mut registration = AgentRegistration::new(
+            ContainerId::new(101),
+            "agent-1",
+            "https://agent",
+            SecretId::new(),
+            None,
+            now,
+        )
+        .unwrap();
         registration.record_health(false, now, Some("agent reported unhealthy".to_owned()));
         assert_eq!(registration.state, AgentConnectionState::Degraded);
         registration.record_unreachable(now, "timeout");

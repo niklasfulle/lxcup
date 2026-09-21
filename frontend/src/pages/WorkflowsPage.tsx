@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createAnsibleJob, type AnsibleExecutionMode, type AnsibleOperation, type CreateAnsibleJobRequest } from "../api";
-import { queryKeys, useContainers } from "../queries";
+import { queryKeys, useTargets } from "../queries";
 
 const operations: Array<{ value: AnsibleOperation; label: string; risk: string }> = [
   { value: "deploy_agent", label: "Agent installieren", risk: "Ändernd" },
@@ -19,7 +19,7 @@ const modes: Array<{ value: AnsibleExecutionMode; label: string }> = [
 ];
 
 export function buildWorkflowRequest(
-  containerId: number,
+  targetId: string,
   operation: AnsibleOperation,
   mode: AnsibleExecutionMode,
   packages: string,
@@ -35,7 +35,7 @@ export function buildWorkflowRequest(
 
   return {
     operation,
-    container_id: containerId,
+    target_id: targetId,
     mode,
     parameters,
     idempotency_key: crypto.randomUUID(),
@@ -44,9 +44,9 @@ export function buildWorkflowRequest(
 }
 
 export function WorkflowsPage() {
-  const containers = useContainers();
+  const targets = useTargets();
   const queryClient = useQueryClient();
-  const [containerId, setContainerId] = useState<number | undefined>();
+  const [targetId, setTargetId] = useState<string>();
   const [operation, setOperation] = useState<AnsibleOperation>("health_check");
   const [mode, setMode] = useState<AnsibleExecutionMode>("check");
   const [packages, setPackages] = useState("");
@@ -59,12 +59,12 @@ export function WorkflowsPage() {
   });
   const selectedOperation = useMemo(() => operations.find((item) => item.value === operation), [operation]);
   const isMutating = operation !== "health_check";
-  const canSubmit = Boolean(containerId) && (!isMutating || confirmed) && (operation !== "update_packages" || packages.trim().length > 0);
+  const canSubmit = Boolean(targetId) && (!isMutating || confirmed) && (operation !== "update_packages" || packages.trim().length > 0);
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!containerId || !canSubmit) return;
-    mutation.mutate(buildWorkflowRequest(containerId, operation, mode, packages, confirmed));
+    if (!targetId || !canSubmit) return;
+    mutation.mutate(buildWorkflowRequest(targetId, operation, mode, packages, confirmed));
   }
 
   return (
@@ -73,10 +73,10 @@ export function WorkflowsPage() {
       <section className="panel workflow-panel">
         <form onSubmit={submit}>
           <div className="workflow-grid">
-            <label> Zielcontainer
-              <select value={containerId ?? ""} onChange={(event) => setContainerId(event.target.value ? Number(event.target.value) : undefined)}>
-                <option value="">Container auswählen</option>
-                {(containers.data ?? []).map((container) => <option key={container.id} value={container.id}>{container.name} · {container.id}</option>)}
+            <label> Ziel
+              <select value={targetId ?? ""} onChange={(event) => setTargetId(event.target.value || undefined)}>
+                <option value="">Ziel auswählen</option>
+                {(targets.data ?? []).map((target) => <option key={target.id} value={target.id}>{target.name} · {target.kind} · {target.address}</option>)}
               </select>
             </label>
             <label> Operation

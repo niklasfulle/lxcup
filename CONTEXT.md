@@ -1,93 +1,65 @@
 # lxcup Domain Context
 
-Dieses Vokabular beschreibt die fachlichen Begriffe der kontrollierten Update-
-Verwaltung für Proxmox-LXC-Container. Die Begriffe gelten für Weboberfläche,
-Backend, Agenten und spätere Windows-Ziele.
+Dieses Vokabular beschreibt die plattformneutrale Verwaltung von LXC,
+Linux-Servern und Windows-Systemen. Es gilt für Weboberfläche, Controller,
+Ansible und Agenten.
 
 ## Infrastruktur
 
-**Node**:
-Ein Proxmox-Host, der LXC-Container bereitstellt und von lxcup über die
-Proxmox-API verwaltet wird. Nicht `Host` verwenden, wenn der Proxmox-Kontext
-gemeint ist.
+**Target (Ziel)**: Eine einzeln verwaltete Maschine: bestehender LXC,
+Linux-Server oder Windows-System. lxcup erstellt derzeit keine LXCs; Ziele
+werden bewusst durch einen Operator aufgenommen.
 
-**Container**:
-Ein Proxmox-LXC, der von lxcup entdeckt oder verwaltet wird. Nicht `VM`
-verwenden, da lxcup im MVP nur LXC-Container behandelt.
+**Target Kind**: Die Plattform eines Ziels: `Lxc`, `LinuxServer` oder
+`WindowsServer`.
 
-**Management-LXC**:
-Der spezielle LXC, in dem die lxcup-Webanwendung und ihr Backend laufen.
+**Transport**: Der Ansible-Verbindungsweg eines Ziels: SSH für LXC und Linux,
+WinRM für Windows. Zugangsdaten werden ausschließlich über eine
+Secret-Referenz aufgelöst.
+
+**Controller**: Die lxcup-Hauptanwendung mit PostgreSQL als Quelle der
+Wahrheit.
 
 ## Verwaltung
 
-**Discovery**:
-Das Erkennen und Synchronisieren vorhandener Nodes und LXC-Container, ohne
-dabei verändernde Update-Aktionen auszuführen.
+**Target Onboarding**: Das bewusste Anlegen eines Ziels, einschließlich
+Transport- und Secret-Referenzen. Es ersetzt die automatische
+Proxmox-Discovery.
 
-**Managed**:
-Ein Container, den lxcup aktiv für Scans, Pläne und bestätigte Ausführungen
-berücksichtigt.
+**Pending**: Ein angelegtes Ziel, dessen Agent sich noch nicht erfolgreich
+beim Controller gemeldet hat.
 
-**Ignored**:
-Ein entdeckter Container, der bewusst nicht von lxcup verwaltet wird.
+**Managed**: Ein Ziel mit bestätigter Agentenverbindung. Es darf kontrollierte
+Workflows ausführen.
+
+**Disabled**: Ein bewusst deaktiviertes Ziel. Nur lesende Healthchecks sind
+erlaubt.
+
+**Agent Heartbeat**: Eine vom Agenten initiierte, authentisierte Meldung an den
+Controller mit Identität, Metriken und Zeitstempel. Der Controller pollt
+Agenten nicht als Grundlage für ihren Verbindungsstatus.
+
+**Ansible Job**: Eine bestätigte, auditierbare Ausführung eines fest
+registrierten Playbooks gegen ein Ziel. Freiform-Shell und freies Inventory
+sind nicht zulässig.
 
 ## Updates
 
-**Scan**:
-Eine beobachtende Abfrage nach verfügbaren Updates innerhalb eines Containers.
-Ein Scan verändert den Zielcontainer nicht.
+**Scan**: Eine beobachtende Abfrage nach verfügbaren Updates innerhalb eines
+Ziels.
 
-**Available Update**:
-Ein beim Scan erkanntes Paketupdate mit installierter Version,
-Kandidatenversion und Klassifizierung.
+**Available Update**: Ein beim Scan erkanntes Paketupdate mit installierter
+Version, Kandidatenversion und Klassifizierung.
 
-**Update Plan**:
-Die aufgelöste Beschreibung dessen, was eine konkrete Update-Anfrage tatsächlich
-ändern würde. Ein Plan muss vor der Ausführung erneut validiert werden.
+**Update Plan**: Die aufgelöste Beschreibung dessen, was eine konkrete
+Update-Anfrage ändern würde. Ein Plan wird vor der Ausführung erneut validiert.
 
-**Execution**:
-Die protokollierte Ausführung eines bestätigten Update Plans. Nicht `Update`
-verwenden, wenn der gesamte Lauf mit Status und Audit-Historie gemeint ist.
-
-**Security Update**:
-Ein Update, das vom Paketmanager oder der Distribution als sicherheitsrelevant
-klassifiziert wurde. Wenn die Klassifizierung nicht zuverlässig möglich ist,
-wird `Unknown` verwendet.
-
-## Schutz und Betrieb
-
-**Snapshot**:
-Ein ausdrücklich angeforderter Proxmox-Zustand vor einer verändernden Aktion.
-Ein Snapshot ist keine automatische Rollback-Entscheidung.
-
-**Healthcheck**:
-Eine konfigurierte Nachkontrolle nach einer Ausführung, zum Beispiel HTTP,
-TCP oder systemd.
-
-**Agent**:
-Ein lokaler lxcup-Prozess, der später kontrollierte Operationen für einen
-Proxmox-Node oder ein Windows-System ausführt. Ein Agent ist nicht die zentrale
-Quelle der Wahrheit; diese bleibt beim Controller und seiner PostgreSQL-Datenbank.
+**Execution**: Die protokollierte Ausführung eines bestätigten Update Plans.
 
 ## Lebenszyklen
 
-**Container-Verwaltung**:
-Ein entdeckter Container startet als `Discovered` und wird explizit zu
-`Managed`, `Ignored` oder `Disabled`. Nur ein deaktivierter Container kann
-wieder als `Managed` aktiviert werden; ein deaktivierter Container wird nicht
-direkt als `Ignored` behandelt.
+**Target**: `Pending` → `Managed` nach einem gültigen Agent Heartbeat;
+`Disabled` ist ein expliziter Betriebszustand.
 
-**Scan**:
-Ein Scan durchläuft `Pending` → `Running` → `Succeeded` oder `Failed`.
-Ein abgeschlossener Scan wird nicht nachträglich in einen laufenden Scan
-zurückversetzt.
-
-**Update Plan**:
-Ein Plan durchläuft `Draft` → `Ready` → `Confirmed` oder wird bei einer
-Sicherheitsverletzung `Blocked`. Ein bestätigter oder veralteter Plan kann
-nicht erneut ausgeführt werden; eine Planänderung führt zu `Invalidated`.
-
-**Execution**:
-Eine Ausführung startet als `Queued`, läuft als `Running` und endet in
-`Succeeded`, `Failed`, `Aborted` oder bei unklarer Verbindungslage zunächst in
-`Unknown`. Terminalzustände werden nicht wieder geöffnet.
+**Ansible Job**: `Queued` → `Checking`/`Planned`/`Applying` und schließlich
+`Succeeded`, `Failed`, `Aborted` oder `ReconcileRequired`.

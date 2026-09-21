@@ -29,11 +29,11 @@ describe("ApiClient", () => {
   });
 
   it("builds only allowlisted workflow fields without playbook or shell input", () => {
-    const request = buildWorkflowRequest(101, "update_packages", "plan", "nginx, curl", false);
+    const request = buildWorkflowRequest("target-101", "update_packages", "plan", "nginx, curl", false);
 
     expect(request).toMatchObject({
       operation: "update_packages",
-      container_id: 101,
+      target_id: "target-101",
       mode: "plan",
       parameters: { operation: "update_packages", packages: ["nginx", "curl"] },
     });

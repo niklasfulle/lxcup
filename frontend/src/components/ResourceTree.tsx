@@ -1,20 +1,13 @@
 import { Link } from "react-router-dom";
-import { useContainers, useNodes } from "../queries";
+import { useTargets } from "../queries";
 
 export function ResourceTree() {
-  const nodes = useNodes();
-  const containers = useContainers();
-  const items = containers.data ?? [];
+  const targets = useTargets();
+  const items = targets.data ?? [];
   return <section className="resource-tree" aria-label="Ressourcenbaum">
     <div className="tree-heading"><span>Ressourcen</span><span className="muted">{items.length}</span></div>
-    <Link className="tree-root" to="/nodes">Proxmox Nodes</Link>
-    {nodes.data?.map((node) => <details className="tree-node" key={node.id} open>
-      <summary><span className="status-dot ok" />{node.name}<span className="muted">{items.filter((item) => item.node_id === node.id).length}</span></summary>
-      <div className="tree-children">
-        {items.filter((item) => item.node_id === node.id).map((container) => <Link key={container.id} to={`/containers?node=${encodeURIComponent(node.id)}`}>↳ {container.name} <span className="muted">{container.id}</span></Link>)}
-        {!items.some((item) => item.node_id === node.id) ? <span className="muted">Keine LXCs</span> : null}
-      </div>
-    </details>)}
-    {!nodes.data?.length && !nodes.isLoading ? <span className="muted tree-empty">Keine Nodes verbunden</span> : null}
+    <Link className="tree-root" to="/targets">Verwaltete Ziele</Link>
+    {items.map((target) => <Link className="tree-root" key={target.id} to="/targets"><span className={`status-dot ${target.state === "managed" ? "ok" : "warn"}`} />{target.name}<span className="muted">{target.kind}</span></Link>)}
+    {!items.length && !targets.isLoading ? <span className="muted tree-empty">Keine Ziele angelegt</span> : null}
   </section>;
 }

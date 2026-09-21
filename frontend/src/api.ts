@@ -19,6 +19,11 @@ export type ContainerDto = {
   management_state: string;
   discovered_at: string;
 };
+export type TargetKind = "lxc" | "linux_server" | "windows_server";
+export type TargetTransport = "ssh" | "winrm";
+export type TargetState = "pending" | "managed" | "disabled";
+export type TargetDto = { id: string; name: string; kind: TargetKind; address: string; transport: TargetTransport; credential_secret_ref: string; agent_secret_ref: string; state: TargetState; created_at: string; updated_at: string };
+export type CreateTargetRequest = { name: string; kind: TargetKind; address: string; transport: TargetTransport; credential_secret_ref: string; agent_secret_ref: string };
 export type EnrollmentState = "requested" | "discovering" | "installing_agent" | "registering_agent" | "connected" | "failed" | "disabled";
 export type EnrollmentDto = { id: string; container_id: number; state: EnrollmentState; failure_reason: string | null; created_at: string; updated_at: string };
 
@@ -86,7 +91,9 @@ export type AnsibleJobDto = {
 
 export type CreateAnsibleJobRequest = {
   operation: AnsibleOperation;
-  container_id: number;
+  target_id?: string;
+  /** Legacy field for pre-target APIs; new callers use target_id. */
+  container_id?: number;
   mode: AnsibleExecutionMode;
   parameters: Record<string, unknown>;
   idempotency_key: string;
@@ -214,6 +221,9 @@ function delay(attempt: number): Promise<void> {
 }
 
 export const apiClient = new ApiClient();
+
+export function listTargets(signal?: AbortSignal) { return apiClient.get<TargetDto[]>("/api/v1/targets", signal); }
+export function createTarget(request: CreateTargetRequest, signal?: AbortSignal) { return apiClient.post<TargetDto>("/api/v1/targets", request, signal); }
 
 export function createAnsibleJob(request: CreateAnsibleJobRequest, signal?: AbortSignal) {
   return apiClient.post<AnsibleJobDto>("/api/v1/ansible/jobs", request, signal);
