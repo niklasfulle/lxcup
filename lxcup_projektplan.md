@@ -565,7 +565,7 @@ lxcup/
 └── crates/
     │
     ├── lxcup-core/
-    ├── lxcup-proxmox/
+    ├── lxcup-ansible/
     ├── lxcup-apt/
     ├── lxcup-docker/
     ├── lxcup-cli/
@@ -579,7 +579,7 @@ Für eine frühe Version kann intern zunächst zusätzlich modularisiert werden:
 src/
 ├── cli/
 ├── core/
-├── proxmox/
+├── target_inventory/
 ├── package_manager/
 ├── docker/
 ├── health/

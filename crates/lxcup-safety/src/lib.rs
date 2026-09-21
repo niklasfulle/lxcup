@@ -2,11 +2,6 @@
 
 use std::time::Duration;
 
-use lxcup_proxmox::{
-    ProxmoxClient, ProxmoxClientError,
-    models::LxcSnapshotRequest,
-    polling::{TaskOutcome, TaskPoller, TaskPollingError},
-};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{net::TcpStream, time::timeout};
@@ -36,71 +31,6 @@ pub fn snapshot_allows_execution(state: &SnapshotState) -> bool {
         state,
         SnapshotState::NotRequested | SnapshotState::Succeeded { .. }
     )
-}
-
-/// Verbindet Snapshot-Erzeugung mit dem vorhandenen Proxmox-Task-Poller.
-/// Ein angeforderter, aber nicht erfolgreich abgeschlossener Snapshot sperrt
-/// die Ausführung weiterhin fail-closed.
-pub struct SnapshotWorkflow {
-    poller: TaskPoller,
-}
-
-impl SnapshotWorkflow {
-    pub fn new(poller: TaskPoller) -> Self {
-        Self { poller }
-    }
-
-    pub async fn create_and_wait(
-        &self,
-        client: &ProxmoxClient,
-        node_name: &str,
-        vmid: u64,
-        snapshot_name: &str,
-    ) -> Result<(SnapshotState, lxcup_proxmox::polling::TaskPollResult), SnapshotWorkflowError>
-    {
-        let task = client
-            .create_lxc_snapshot(
-                node_name,
-                vmid,
-                &LxcSnapshotRequest {
-                    snapname: snapshot_name.to_owned(),
-                    description: Some("lxcup pre-update snapshot".to_owned()),
-                },
-            )
-            .await?;
-        let result = self.poller.poll_task(client, node_name, &task.upid).await?;
-        let state = match &result.outcome {
-            TaskOutcome::Succeeded => SnapshotState::Succeeded { task_id: task.upid },
-            TaskOutcome::Failed { exit_status } => SnapshotState::Failed {
-                reason: exit_status
-                    .clone()
-                    .unwrap_or_else(|| "snapshot task failed".to_owned()),
-            },
-            TaskOutcome::TimedOut => SnapshotState::Failed {
-                reason: "snapshot task timed out".to_owned(),
-            },
-        };
-        Ok((state, result))
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum SnapshotWorkflowError {
-    #[error("snapshot request failed")]
-    Proxmox(#[source] ProxmoxClientError),
-    #[error("snapshot task polling failed")]
-    Polling(#[source] TaskPollingError),
-}
-
-impl From<ProxmoxClientError> for SnapshotWorkflowError {
-    fn from(error: ProxmoxClientError) -> Self {
-        Self::Proxmox(error)
-    }
-}
-impl From<TaskPollingError> for SnapshotWorkflowError {
-    fn from(error: TaskPollingError) -> Self {
-        Self::Polling(error)
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
