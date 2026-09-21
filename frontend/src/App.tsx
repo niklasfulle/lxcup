@@ -48,26 +48,31 @@ export default function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <Link className="brand" to="/">lxcup</Link>
-        <p className="brand-caption">LXC Update Control</p>
+        <Link className="brand" to="/" aria-label="lxcup Übersicht">
+          <span className="brand-mark" aria-hidden="true">LX</span>
+          <span><strong>lxcup</strong><small>CONTROL PLANE</small></span>
+        </Link>
+        <p className="brand-caption">LXC / Proxmox Operations</p>
         <nav aria-label="Hauptnavigation">
-          <NavLink className="nav-link" to="/">Übersicht</NavLink>
-          <NavLink className="nav-link" to="/nodes">Nodes</NavLink>
-          <NavLink className="nav-link" to="/containers">Container</NavLink>
-          <NavLink className="nav-link" to="/enrollments/new">LXC hinzufügen</NavLink>
-          <NavLink className="nav-link" to="/workflows">Automatisierung</NavLink>
-          <NavLink className="nav-link" to="/secrets">Secrets</NavLink>
+          <span className="nav-heading">Operate</span>
+          <NavLink className="nav-link" to="/"><span aria-hidden="true">▣</span> Übersicht</NavLink>
+          <NavLink className="nav-link" to="/nodes"><span aria-hidden="true">⬡</span> Nodes</NavLink>
+          <NavLink className="nav-link" to="/containers"><span aria-hidden="true">▤</span> Container</NavLink>
+          <span className="nav-heading">Deploy</span>
+          <NavLink className="nav-link" to="/enrollments/new"><span aria-hidden="true">＋</span> LXC hinzufügen</NavLink>
+          <NavLink className="nav-link" to="/workflows"><span aria-hidden="true">↗</span> Automatisierung</NavLink>
+          <NavLink className="nav-link" to="/secrets"><span aria-hidden="true">⌘</span> Secrets</NavLink>
         </nav>
         <ResourceTree />
         <div className="connection-indicator" aria-live="polite">
           <span className={connectionState === "verbunden" ? "status-dot ok" : "status-dot warn"} />
-          SSE: {connectionState}
+          <span><strong>LIVE BUS</strong><small>SSE: {connectionState}</small></span>
         </div>
       </aside>
       <main className="main-content">
         <header className="topbar">
-          <span className="topbar-context"><strong>Lokale Entwicklung</strong><span className="muted">· lxcup-control</span></span>
-          <div className="topbar-actions"><span className="user-pill">Admin</span><button className="theme-button" type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="Theme wechseln">{theme === "dark" ? "☼ Hell" : "☾ Dunkel"}</button></div>
+          <span className="topbar-context"><span className="environment-label">ENV</span><strong>Lokale Entwicklung</strong><span className="muted">/ lxcup-control</span></span>
+          <div className="topbar-actions"><Link className="new-lxc-button" to="/enrollments/new">＋ LXC hinzufügen</Link><span className="user-pill">Admin</span><button className="theme-button" type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="Theme wechseln">{theme === "dark" ? "☼" : "☾"}</button></div>
         </header>
         {streamError ? <div className="api-alert" role="alert">{streamError}</div> : null}
         <TaskMonitor events={events} />
