@@ -4,10 +4,10 @@ use chrono::{DateTime, Utc};
 use lxcup_ansible::{AnsibleJob, AnsibleJobStatus, JobEvent};
 use lxcup_core::{
     AgentRegistration, AvailableUpdate, Container, ContainerId, ContainerManagementState,
-    ContainerStatus, EnvironmentStatus, Execution, ExecutionId, ExecutionStatus, Node, NodeId,
-    NodeStatus, OperatingSystem, PackageChangeKind, PackageName, PackageVersion, PlanStatus,
-    ProxmoxEnvironment, ResolvedPackageChange, Scan, ScanId, ScanStatus, SecretId, Target,
-    TargetId, UpdateClassification, UpdatePlan, UpdatePlanId,
+    ContainerStatus, DockerWorkload, DockerWorkloadManagementState, EnvironmentStatus, Execution,
+    ExecutionId, ExecutionStatus, Node, NodeId, NodeStatus, OperatingSystem, PackageChangeKind,
+    PackageName, PackageVersion, PlanStatus, ProxmoxEnvironment, ResolvedPackageChange, Scan,
+    ScanId, ScanStatus, SecretId, Target, TargetId, UpdateClassification, UpdatePlan, UpdatePlanId,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
@@ -134,6 +134,41 @@ pub struct AgentRegistrationRepository {
 #[derive(Clone)]
 pub struct TargetRepository {
     pool: PgPool,
+}
+
+#[derive(Clone)]
+pub struct DockerWorkloadRepository {
+    pool: PgPool,
+}
+
+impl DockerWorkloadRepository {
+    pub(crate) fn new(database: &Database) -> Self {
+        Self {
+            pool: database.pool().clone(),
+        }
+    }
+    pub async fn upsert_discovered(&self, item: &DockerWorkload) -> Result<(), RepositoryError> {
+        sqlx::query("INSERT INTO docker_workloads (host_container_id, docker_id, name, image, state, status, management_state, discovered_at) VALUES ($1,$2,$3,$4,$5,$6,'discovered',$7) ON CONFLICT (host_container_id, docker_id) DO UPDATE SET name=EXCLUDED.name,image=EXCLUDED.image,state=EXCLUDED.state,status=EXCLUDED.status,discovered_at=EXCLUDED.discovered_at").bind(item.host_container_id.value() as i64).bind(&item.id).bind(&item.name).bind(&item.image).bind(&item.state).bind(&item.status).bind(item.discovered_at).execute(&self.pool).await?;
+        Ok(())
+    }
+    pub async fn list(&self, host: ContainerId) -> Result<Vec<DockerWorkload>, RepositoryError> {
+        let rows = sqlx::query("SELECT host_container_id, docker_id, name, image, state, status, management_state, discovered_at FROM docker_workloads WHERE host_container_id=$1 ORDER BY name").bind(host.value() as i64).fetch_all(&self.pool).await?;
+        rows.into_iter().map(docker_workload_from_row).collect()
+    }
+    pub async fn adopt(&self, host: ContainerId, id: &str) -> Result<bool, RepositoryError> {
+        Ok(sqlx::query("UPDATE docker_workloads SET management_state='managed' WHERE host_container_id=$1 AND docker_id=$2").bind(host.value() as i64).bind(id).execute(&self.pool).await?.rows_affected() == 1)
+    }
+    pub async fn remove(&self, host: ContainerId, id: &str) -> Result<bool, RepositoryError> {
+        Ok(
+            sqlx::query("DELETE FROM docker_workloads WHERE host_container_id=$1 AND docker_id=$2")
+                .bind(host.value() as i64)
+                .bind(id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                == 1,
+        )
+    }
 }
 
 impl TargetRepository {
@@ -314,6 +349,89 @@ impl AnsibleJobRepository {
         .transpose()
     }
 
+    /// Claims exactly one queued job. `SKIP LOCKED` lets several worker
+    /// processes poll concurrently without ever executing the same job.
+    pub async fn claim_next_queued(&self) -> Result<Option<AnsibleJob>, RepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload FROM ansible_jobs WHERE status = 'queued' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let mut job: AnsibleJob =
+            serde_json::from_value(row.try_get("payload")?).map_err(|_| {
+                RepositoryError::InvalidValue {
+                    field: "ansible job payload",
+                }
+            })?;
+        job.transition_to(AnsibleJobStatus::Checking).map_err(|_| {
+            RepositoryError::InvalidValue {
+                field: "ansible job status",
+            }
+        })?;
+        let payload = serde_json::to_value(&job).map_err(RepositoryError::Serialization)?;
+        let update = sqlx::query("UPDATE ansible_jobs SET status = 'checking', payload = $1, updated_at = $2 WHERE id = $3")
+            .bind(payload)
+            .bind(job.updated_at)
+            .bind(job.id.as_uuid())
+            .execute(&mut *transaction)
+            .await;
+        if let Err(error) = update {
+            if error
+                .as_database_error()
+                .and_then(|database| database.code())
+                .as_deref()
+                == Some("23505")
+            {
+                transaction.rollback().await?;
+                return Ok(None);
+            }
+            return Err(error.into());
+        }
+        let sequence: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM ansible_job_events WHERE job_id = $1",
+        )
+        .bind(job.id.as_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let event = JobEvent {
+            sequence: sequence as u64,
+            job_id: job.id,
+            event: lxcup_ansible::JobEventKind::StatusChanged {
+                status: AnsibleJobStatus::Checking,
+            },
+            created_at: Utc::now(),
+        };
+        sqlx::query("INSERT INTO ansible_job_events (job_id, sequence, payload, created_at) VALUES ($1, $2, $3, $4)")
+            .bind(event.job_id.as_uuid())
+            .bind(sequence)
+            .bind(serde_json::to_value(event).map_err(RepositoryError::Serialization)?)
+            .bind(Utc::now())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(Some(job))
+    }
+
+    pub async fn list(&self) -> Result<Vec<AnsibleJob>, RepositoryError> {
+        let rows = sqlx::query("SELECT payload FROM ansible_jobs ORDER BY created_at DESC")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                serde_json::from_value(row.try_get("payload")?).map_err(|_| {
+                    RepositoryError::InvalidValue {
+                        field: "ansible job payload",
+                    }
+                })
+            })
+            .collect()
+    }
+
     pub async fn find_by_idempotency_key(
         &self,
         target: lxcup_core::ResourceTarget,
@@ -342,11 +460,14 @@ impl AnsibleJobRepository {
         target: lxcup_core::ResourceTarget,
     ) -> Result<bool, RepositoryError> {
         let target = serde_json::to_value(target).map_err(RepositoryError::Serialization)?;
-        let row = sqlx::query("SELECT 1 FROM ansible_jobs WHERE target = $1 AND status NOT IN ('succeeded', 'failed', 'aborted') LIMIT 1")
+        let rows = sqlx::query("SELECT status FROM ansible_jobs WHERE target = $1")
             .bind(target)
-            .fetch_optional(&self.pool)
+            .fetch_all(&self.pool)
             .await?;
-        Ok(row.is_some())
+        Ok(rows.into_iter().any(|row| {
+            row.try_get::<String, _>("status")
+                .is_ok_and(|status| is_active_ansible_job_status(&status))
+        }))
     }
 
     pub async fn append_event(&self, event: &JobEvent) -> Result<(), RepositoryError> {
@@ -937,6 +1058,7 @@ impl AuditEventRepository {
 /// Erstellt alle MVP-Repositories über denselben Pool.
 #[derive(Clone)]
 pub struct Repositories {
+    pub docker_workloads: DockerWorkloadRepository,
     pub targets: TargetRepository,
     pub agent_registrations: AgentRegistrationRepository,
     pub ansible_jobs: AnsibleJobRepository,
@@ -952,6 +1074,7 @@ pub struct Repositories {
 impl Repositories {
     pub fn new(database: &Database) -> Self {
         Self {
+            docker_workloads: DockerWorkloadRepository::new(database),
             targets: TargetRepository::new(database),
             agent_registrations: AgentRegistrationRepository::new(database),
             ansible_jobs: AnsibleJobRepository::new(database),
@@ -964,6 +1087,46 @@ impl Repositories {
             audit_events: AuditEventRepository::new(database),
         }
     }
+}
+
+fn is_active_ansible_job_status(status: &str) -> bool {
+    matches!(
+        status,
+        "checking" | "planned" | "applying" | "reconcile_required"
+    )
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::is_active_ansible_job_status;
+
+    #[test]
+    fn queued_jobs_do_not_block_a_new_worker_run() {
+        assert!(!is_active_ansible_job_status("queued"));
+        assert!(!is_active_ansible_job_status("succeeded"));
+        assert!(is_active_ansible_job_status("applying"));
+    }
+}
+
+fn docker_workload_from_row(row: PgRow) -> Result<DockerWorkload, RepositoryError> {
+    Ok(DockerWorkload {
+        host_container_id: ContainerId::new(row.try_get::<i64, _>("host_container_id")? as u64),
+        id: row.try_get("docker_id")?,
+        name: row.try_get("name")?,
+        image: row.try_get("image")?,
+        state: row.try_get("state")?,
+        status: row.try_get("status")?,
+        management_state: match row.try_get::<String, _>("management_state")?.as_str() {
+            "discovered" => DockerWorkloadManagementState::Discovered,
+            "managed" => DockerWorkloadManagementState::Managed,
+            _ => {
+                return Err(RepositoryError::InvalidValue {
+                    field: "docker workload management state",
+                });
+            }
+        },
+        discovered_at: row.try_get("discovered_at")?,
+    })
 }
 
 fn target_from_row(row: PgRow) -> Result<Target, RepositoryError> {

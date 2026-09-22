@@ -9,6 +9,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 lxcup
 COPY --from=build /src/target/release/lxcup-server /usr/local/bin/lxcup-server
-USER lxcup
+COPY --chmod=755 deploy/server-entrypoint.sh /usr/local/bin/server-entrypoint.sh
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/lxcup-server"]
+ENTRYPOINT ["/usr/local/bin/server-entrypoint.sh"]

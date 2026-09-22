@@ -6,8 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+lxcup-observability = { path = "../lxcup-observability" }
+lxcup-persistence = { path = "../lxcup-persistence" }
 lxcup-ansible = { path = "../lxcup-ansible" }
 lxcup-core = { path = "../lxcup-core" }
+lxcup-secrets = { path = "../lxcup-secrets" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+uuid.workspace = true

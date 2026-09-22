@@ -10,7 +10,7 @@ pub mod seeds;
 
 pub use repositories::{
     AgentRegistrationRepository, AnsibleJobRepository, AuditEvent, AuditEventRepository,
-    ContainerRepository, EnvironmentRepository, ExecutionEvent, ExecutionRepository,
+    ContainerRepository, DockerWorkloadRepository, EnvironmentRepository, ExecutionEvent, ExecutionRepository,
     ExecutionResultRecord, NodeRepository, Repositories, RepositoryError, ScanRepository,
     TargetRepository, UpdatePlanRepository,
 };

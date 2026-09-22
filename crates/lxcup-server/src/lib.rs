@@ -23,7 +23,7 @@ use axum::{
 };
 use lxcup_agent::{
     AgentAction, AgentClient, AgentClientConfig, AgentCommandRequest, AgentHealth, AgentHeartbeat,
-    AgentMetrics,
+    AgentMetrics, DockerContainerInfo,
 };
 use lxcup_ansible::{
     AnsibleJob, AnsibleJobCoordinator, AnsibleJobRequest, AnsibleJobStatus, AnsibleOperation,
@@ -31,7 +31,7 @@ use lxcup_ansible::{
 };
 use lxcup_core::{
     ActorRole, AgentRegistration, Container, ContainerAction, ContainerId,
-    ContainerManagementState, Enrollment, EnrollmentId, EnrollmentState, EnvironmentId,
+    ContainerManagementState, DockerWorkload, DockerWorkloadManagementState, Enrollment, EnrollmentId, EnrollmentState, EnvironmentId,
     EnvironmentStatus, Execution, ExecutionId, Node, NodeId, Permission, PlanStatus,
     ProxmoxEnvironment, ResourceLifecycle, ResourceTarget, Scan, ScanId, SecretId, SecretKind,
     SecretScope, SecretValue, Target, TargetId, TargetKind, TargetState, TargetTransport,
@@ -215,6 +215,7 @@ struct ApiStore {
     container_actions: Vec<ContainerActionTask>,
     container_action_keys: HashMap<(ContainerId, String), Uuid>,
     secret_audit: Vec<SecretAuditEvent>,
+    docker_workloads: HashMap<(ContainerId, String), DockerWorkloadDto>,
 }
 
 #[derive(Clone)]
@@ -226,6 +227,12 @@ struct RegisteredAgent {
 pub struct CreateEnrollmentRequest {
     pub container_id: u64,
     pub idempotency_key: String,
+    #[serde(default = "default_true")]
+    pub start_onboarding: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -288,7 +295,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/secrets/{secret_id}/revoke", post(revoke_secret))
         .route("/api/v1/enrollments", post(create_enrollment))
         .route("/api/v1/enrollments/{enrollment_id}", get(get_enrollment))
-        .route("/api/v1/ansible/jobs", post(create_ansible_job))
+        .route("/api/v1/ansible/jobs", get(list_ansible_jobs).post(create_ansible_job))
         .route("/api/v1/ansible/jobs/{job_id}", get(get_ansible_job))
         .route(
             "/api/v1/ansible/jobs/{job_id}/events",
@@ -344,6 +351,22 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/v1/containers/{container_id}/agent/metrics",
             get(get_agent_metrics),
+        )
+        .route(
+            "/api/v1/containers/{container_id}/docker/containers",
+            get(list_docker_containers),
+        )
+        .route(
+            "/api/v1/containers/{container_id}/docker/discover",
+            post(discover_docker_containers),
+        )
+        .route(
+            "/api/v1/containers/{container_id}/docker/containers/{docker_id}/adopt",
+            post(adopt_docker_container),
+        )
+        .route(
+            "/api/v1/containers/{container_id}/docker/containers/{docker_id}",
+            axum::routing::delete(remove_docker_container),
         )
         .route(
             "/api/v1/containers/{container_id}/agent/revoke",
@@ -1144,7 +1167,7 @@ async fn create_enrollment(
     // creates the allowlisted deployment job. Development instances without
     // worker configuration still expose the lifecycle request for contract
     // testing; no shell or free-form playbook path is ever accepted here.
-    if configured_ansible_secret_refs().is_ok() {
+    if request.start_onboarding && configured_ansible_secret_refs().is_ok() {
         let lifecycle = state
             .store
             .read()
@@ -1264,6 +1287,21 @@ impl From<&AnsibleJob> for AnsibleJobDto {
             updated_at: job.updated_at,
         }
     }
+}
+
+async fn list_ansible_jobs(
+    State(state): State<ApiState>,
+) -> Result<Json<ApiEnvelope<Vec<AnsibleJobDto>>>, ApiError> {
+    let jobs = if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .ansible_jobs
+            .list()
+            .await
+            .map_err(|_| ApiError::storage())?
+    } else {
+        state.ansible.read().await.jobs()
+    };
+    Ok(Json(envelope(jobs.iter().map(AnsibleJobDto::from).collect())))
 }
 
 async fn create_ansible_job(
@@ -2639,6 +2677,108 @@ async fn get_agent_metrics(
         ApiError::dependency("agent_unavailable", "the agent metrics endpoint failed")
     })?;
     Ok(Json(envelope(metrics)))
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DockerWorkloadDto {
+    pub host_container_id: ContainerId,
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    pub state: String,
+    pub status: String,
+    pub management_state: String,
+    pub discovered_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl DockerWorkloadDto {
+    fn discovered(host_container_id: ContainerId, container: DockerContainerInfo) -> Self {
+        Self { host_container_id, id: container.id, name: container.name, image: container.image, state: container.state, status: container.status, management_state: "discovered".to_owned(), discovered_at: chrono::Utc::now() }
+    }
+}
+
+impl From<DockerWorkload> for DockerWorkloadDto {
+    fn from(item: DockerWorkload) -> Self { Self { host_container_id: item.host_container_id, id: item.id, name: item.name, image: item.image, state: item.state, status: item.status, management_state: match item.management_state { DockerWorkloadManagementState::Discovered => "discovered".to_owned(), DockerWorkloadManagementState::Managed => "managed".to_owned() }, discovered_at: item.discovered_at } }
+}
+
+async fn list_docker_containers(
+    State(state): State<ApiState>,
+    Path(container_id): Path<String>,
+) -> Result<Json<ApiEnvelope<Vec<DockerWorkloadDto>>>, ApiError> {
+    let container_id = parse_container_id(&container_id)?;
+    if let Some(repositories) = state.repositories.as_ref() {
+        let workloads = repositories.docker_workloads.list(container_id).await.map_err(|_| ApiError::dependency("docker_inventory_unavailable", "Docker-Inventar konnte nicht gelesen werden"))?.into_iter().map(DockerWorkloadDto::from).collect();
+        return Ok(Json(envelope(workloads)));
+    }
+    let workloads = state.store.read().await.docker_workloads.values()
+        .filter(|item| item.host_container_id == container_id).cloned().collect();
+    Ok(Json(envelope(workloads)))
+}
+
+async fn discover_docker_containers(
+    State(state): State<ApiState>,
+    Path(container_id): Path<String>,
+) -> Result<Json<ApiEnvelope<Vec<DockerWorkloadDto>>>, ApiError> {
+    let container_id = parse_container_id(&container_id)?;
+    let agent = state.agents.read().await.get(&container_id).cloned().ok_or_else(|| ApiError::not_found("agent not registered"))?;
+    let discovered = agent.client.docker_containers().await.map_err(|_| ApiError::dependency("docker_discovery_failed", "Docker-Inventar konnte vom Agenten nicht gelesen werden"))?;
+    if let Some(repositories) = state.repositories.as_ref() {
+        for container in &discovered {
+            let workload = DockerWorkload { host_container_id: container_id, id: container.id.clone(), name: container.name.clone(), image: container.image.clone(), state: container.state.clone(), status: container.status.clone(), management_state: DockerWorkloadManagementState::Discovered, discovered_at: chrono::Utc::now() };
+            repositories.docker_workloads.upsert_discovered(&workload).await.map_err(|_| ApiError::dependency("docker_inventory_unavailable", "Docker-Inventar konnte nicht gespeichert werden"))?;
+        }
+        let workloads = repositories.docker_workloads.list(container_id).await.map_err(|_| ApiError::dependency("docker_inventory_unavailable", "Docker-Inventar konnte nicht gelesen werden"))?.into_iter().map(DockerWorkloadDto::from).collect();
+        state.publish(ApiEvent::status("docker", container_id.value().to_string(), "discovered"));
+        return Ok(Json(envelope(workloads)));
+    }
+    let mut store = state.store.write().await;
+    for container in discovered {
+        let key = (container_id, container.id.clone());
+        let management_state = store.docker_workloads.get(&key).map(|item| item.management_state.clone()).unwrap_or_else(|| "discovered".to_owned());
+        let mut workload = DockerWorkloadDto::discovered(container_id, container);
+        workload.management_state = management_state;
+        store.docker_workloads.insert(key, workload);
+    }
+    let workloads = store.docker_workloads.values().filter(|item| item.host_container_id == container_id).cloned().collect();
+    drop(store);
+    state.publish(ApiEvent::status("docker", container_id.value().to_string(), "discovered"));
+    Ok(Json(envelope(workloads)))
+}
+
+async fn adopt_docker_container(
+    State(state): State<ApiState>,
+    Path((container_id, docker_id)): Path<(String, String)>,
+) -> Result<Json<ApiEnvelope<DockerWorkloadDto>>, ApiError> {
+    let container_id = parse_container_id(&container_id)?;
+    if let Some(repositories) = state.repositories.as_ref() {
+        if !repositories.docker_workloads.adopt(container_id, &docker_id).await.map_err(|_| ApiError::dependency("docker_inventory_unavailable", "Docker-Inventar konnte nicht aktualisiert werden"))? { return Err(ApiError::not_found("Docker-Container zuerst entdecken")); }
+        let item = repositories.docker_workloads.list(container_id).await.map_err(|_| ApiError::dependency("docker_inventory_unavailable", "Docker-Inventar konnte nicht gelesen werden"))?.into_iter().find(|item| item.id == docker_id).ok_or_else(|| ApiError::not_found("Docker-Container nicht im Inventar"))?;
+        return Ok(Json(envelope(DockerWorkloadDto::from(item))));
+    }
+    let mut store = state.store.write().await;
+    let workload = store.docker_workloads.get_mut(&(container_id, docker_id)).ok_or_else(|| ApiError::not_found("Docker-Container zuerst entdecken"))?;
+    workload.management_state = "managed".to_owned();
+    Ok(Json(envelope(workload.clone())))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RemoveDockerWorkloadRequest { confirmed: bool }
+
+async fn remove_docker_container(
+    State(state): State<ApiState>,
+    Path((container_id, docker_id)): Path<(String, String)>,
+    JsonBody(request): JsonBody<RemoveDockerWorkloadRequest>,
+) -> Result<StatusCode, ApiError> {
+    if !request.confirmed { return Err(ApiError::bad_request("confirmation_required", "Entfernen muss ausdrücklich bestätigt werden")); }
+    let container_id = parse_container_id(&container_id)?;
+    if let Some(repositories) = state.repositories.as_ref() {
+        if !repositories.docker_workloads.remove(container_id, &docker_id).await.map_err(|_| ApiError::dependency("docker_inventory_unavailable", "Docker-Inventar konnte nicht aktualisiert werden"))? { return Err(ApiError::not_found("Docker-Container nicht im Inventar")); }
+        state.publish(ApiEvent::status("docker", container_id.value().to_string(), "removed"));
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    if state.store.write().await.docker_workloads.remove(&(container_id, docker_id)).is_none() { return Err(ApiError::not_found("Docker-Container nicht im Inventar")); }
+    state.publish(ApiEvent::status("docker", container_id.value().to_string(), "removed"));
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_execution(

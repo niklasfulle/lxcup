@@ -8,11 +8,13 @@ import { Dashboard } from "./pages/Dashboard";
 import { NodesPage } from "./pages/NodesPage";
 import { ContainersPage } from "./pages/ContainersPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
+import { WorkflowDetailPage } from "./pages/WorkflowDetailPage";
 import { SecretsPage } from "./pages/SecretsPage";
 import { ResourceTree } from "./components/ResourceTree";
 import { ContainerDetailPage } from "./pages/ContainerDetailPage";
 import { EnrollmentPage } from "./pages/EnrollmentPage";
 import { TargetsPage } from "./pages/TargetsPage";
+import { DockerPage } from "./pages/DockerPage";
 import { TaskMonitor, type GlobalEvent } from "./components/TaskMonitor";
 
 export default function App() {
@@ -21,13 +23,13 @@ export default function App() {
   const [streamError, setStreamError] = useState<string | null>(null);
   const [events, setEvents] = useState<GlobalEvent[]>([]);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
-    const stored = globalThis.localStorage?.getItem("lxcup-theme");
-    return stored === "light" ? "light" : "dark";
+    const stored = globalThis.localStorage?.getItem("lxcup-theme-v2");
+    return stored === "dark" ? "dark" : "light";
   });
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    globalThis.localStorage?.setItem("lxcup-theme", theme);
+    globalThis.localStorage?.setItem("lxcup-theme-v2", theme);
   }, [theme]);
 
   useEffect(() => {
@@ -53,14 +55,18 @@ export default function App() {
           <span className="brand-mark" aria-hidden="true">LX</span>
           <span><strong>lxcup</strong><small>CONTROL PLANE</small></span>
         </Link>
-        <p className="brand-caption">LXC / Proxmox Operations</p>
+        <p className="brand-caption">Datacenter Management</p>
         <nav aria-label="Hauptnavigation">
-          <span className="nav-heading">Operate</span>
+          <span className="nav-heading">Datacenter</span>
           <NavLink className="nav-link" to="/"><span aria-hidden="true">▣</span> Übersicht</NavLink>
+          <NavLink className="nav-link" to="/nodes"><span aria-hidden="true">◈</span> Nodes</NavLink>
+          <NavLink className="nav-link" to="/containers"><span aria-hidden="true">▤</span> LXC-Container</NavLink>
+          <NavLink className="nav-link" to="/docker"><span aria-hidden="true">◫</span> Docker-Container</NavLink>
           <NavLink className="nav-link" to="/targets"><span aria-hidden="true">⬡</span> Ziele</NavLink>
-          <span className="nav-heading">Deploy</span>
-          <NavLink className="nav-link" to="/targets"><span aria-hidden="true">＋</span> Ziel hinzufügen</NavLink>
-          <NavLink className="nav-link" to="/workflows"><span aria-hidden="true">↗</span> Automatisierung</NavLink>
+          <span className="nav-heading">Aufgaben</span>
+          <NavLink className="nav-link" to="/enrollments/new"><span aria-hidden="true">＋</span> LXC einbinden</NavLink>
+          <NavLink className="nav-link" to="/workflows"><span aria-hidden="true">↗</span> Tasks & Workflows</NavLink>
+          <span className="nav-heading">System</span>
           <NavLink className="nav-link" to="/secrets"><span aria-hidden="true">⌘</span> Secrets</NavLink>
         </nav>
         <ResourceTree />
@@ -71,22 +77,26 @@ export default function App() {
       </aside>
       <main className="main-content">
         <header className="topbar">
-          <span className="topbar-context"><span className="environment-label">ENV</span><strong>Lokale Entwicklung</strong><span className="muted">/ lxcup-control</span></span>
-          <div className="topbar-actions"><Link className="new-lxc-button" to="/targets">＋ Ziel hinzufügen</Link><span className="user-pill">Admin</span><button className="theme-button" type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="Theme wechseln">{theme === "dark" ? "☼" : "☾"}</button></div>
+          <div className="topbar-context"><span className="environment-label">Datacenter</span><strong>lxcup-control</strong><span className="muted">/ Übersicht</span></div>
+          <div className="topbar-actions"><Link className="new-lxc-button" to="/enrollments/new">＋ LXC einbinden</Link><span className="user-pill">Admin</span><button className="theme-button" type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="Theme wechseln">{theme === "dark" ? "☼" : "☾"}</button></div>
         </header>
-        {streamError ? <div className="api-alert" role="alert">{streamError}</div> : null}
-        <TaskMonitor events={events} />
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/nodes" element={<NodesPage />} />
-          <Route path="/targets" element={<TargetsPage />} />
-          <Route path="/containers" element={<ContainersPage />} />
-          <Route path="/containers/:containerId" element={<ContainerDetailPage />} />
-          <Route path="/enrollments/new" element={<EnrollmentPage />} />
-          <Route path="/workflows" element={<WorkflowsPage />} />
-          <Route path="/secrets" element={<SecretsPage />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
+        <div className="content-area">
+          {streamError ? <div className="api-alert" role="alert">{streamError}</div> : null}
+          <TaskMonitor events={events} onClear={() => setEvents([])} />
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/nodes" element={<NodesPage />} />
+            <Route path="/targets" element={<TargetsPage />} />
+            <Route path="/containers" element={<ContainersPage />} />
+            <Route path="/containers/:containerId" element={<ContainerDetailPage />} />
+            <Route path="/docker" element={<DockerPage />} />
+            <Route path="/enrollments/new" element={<EnrollmentPage />} />
+            <Route path="/workflows" element={<WorkflowsPage />} />
+            <Route path="/workflows/:jobId" element={<WorkflowDetailPage />} />
+            <Route path="/secrets" element={<SecretsPage />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </div>
       </main>
     </div>
   );

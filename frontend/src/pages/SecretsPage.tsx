@@ -7,6 +7,7 @@ import {
   listSecrets,
   revokeSecret,
   rotateSecret,
+  ApiError,
   type SecretKind,
 } from "../api";
 
@@ -58,7 +59,7 @@ export function SecretsPage() {
           <label>Wert<input type="password" value={value} onChange={(event) => setValue(event.target.value)} autoComplete="new-password" required /></label>
           <button className="primary-button" type="submit" disabled={create.isPending}>{create.isPending ? "Speichert…" : "Secret speichern"}</button>
         </form>
-        {create.error ? <p className="error-state" role="alert">{create.error.message}</p> : null}
+        {create.error ? <p className="error-state" role="alert">{formatSecretError(create.error)}</p> : null}
       </section>
       <section className="panel">
         <div className="section-heading"><h2>Verwendbare Secrets</h2><span className="muted">Werte sind nicht abrufbar</span></div>
@@ -85,4 +86,10 @@ export function SecretsPage() {
       </section>
     </>
   );
+}
+
+function formatSecretError(error: unknown): string {
+  if (!(error instanceof ApiError)) return error instanceof Error ? error.message : "Das Secret konnte nicht gespeichert werden.";
+  const details = [error.code, error.requestId ? `Request-ID ${error.requestId}` : undefined].filter(Boolean).join(" · ");
+  return details ? `${error.message} (${details})` : error.message;
 }

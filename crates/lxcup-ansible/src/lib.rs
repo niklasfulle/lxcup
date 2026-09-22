@@ -57,7 +57,7 @@ impl AnsibleJobStatus {
             (self, next),
             (Self::Queued, Self::Checking | Self::Planned | Self::Aborted)
                 | (Self::Checking, Self::Planned | Self::Failed | Self::Aborted)
-                | (Self::Planned, Self::Applying | Self::Aborted)
+                | (Self::Planned, Self::Applying | Self::Failed | Self::Aborted)
                 | (
                     Self::Applying,
                     Self::Succeeded | Self::Failed | Self::ReconcileRequired
@@ -322,6 +322,7 @@ pub enum JobEventKind {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobFailureCode {
+    WorkerUnavailable,
     InvalidCredentials,
     Unreachable,
     Timeout,
@@ -382,12 +383,8 @@ impl AnsibleJobCoordinator {
                 .ok_or(CoordinatorError::NotFound)?;
             return Ok(JobSubmission::Duplicate(existing.clone()));
         }
-        if self.active_targets.contains_key(&request.target) {
-            return Err(CoordinatorError::TargetBusy);
-        }
         let job = AnsibleJob::from_request(request)?;
         self.idempotency.insert(key, job.id);
-        self.active_targets.insert(job.target, job.id);
         self.record_internal(job.id, JobEventKind::Queued);
         self.jobs.insert(job.id, job.clone());
         Ok(JobSubmission::Created(job))
@@ -398,6 +395,12 @@ impl AnsibleJobCoordinator {
             .get(&id)
             .cloned()
             .ok_or(CoordinatorError::NotFound)
+    }
+
+    pub fn jobs(&self) -> Vec<AnsibleJob> {
+        let mut jobs = self.jobs.values().cloned().collect::<Vec<_>>();
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.created_at));
+        jobs
     }
 
     pub fn events(&self, id: AnsibleJobId) -> Result<Vec<JobEvent>, CoordinatorError> {
@@ -412,11 +415,22 @@ impl AnsibleJobCoordinator {
         id: AnsibleJobId,
         next: AnsibleJobStatus,
     ) -> Result<AnsibleJob, CoordinatorError> {
+        let target = self.jobs.get(&id).ok_or(CoordinatorError::NotFound)?.target;
+        if next == AnsibleJobStatus::Checking
+            && self
+                .active_targets
+                .get(&target)
+                .is_some_and(|active| *active != id)
+        {
+            return Err(CoordinatorError::TargetBusy);
+        }
         let job = self.jobs.get_mut(&id).ok_or(CoordinatorError::NotFound)?;
         job.transition_to(next)
             .map_err(|_| CoordinatorError::InvalidTransition)?;
-        let target = job.target;
         let job_snapshot = job.clone();
+        if next == AnsibleJobStatus::Checking {
+            self.active_targets.insert(target, id);
+        }
         if matches!(
             next,
             AnsibleJobStatus::Succeeded | AnsibleJobStatus::Failed | AnsibleJobStatus::Aborted
@@ -454,14 +468,12 @@ impl AnsibleJobCoordinator {
         {
             return Err(CoordinatorError::RetryNotAllowed);
         }
-        let target = job.target;
         let job_snapshot = {
             let job = self.jobs.get_mut(&id).ok_or(CoordinatorError::NotFound)?;
             job.transition_to(AnsibleJobStatus::Queued)
                 .map_err(|_| CoordinatorError::InvalidTransition)?;
             job.clone()
         };
-        self.active_targets.insert(target, id);
         self.record_internal(
             id,
             JobEventKind::StatusChanged {
@@ -601,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn coordinator_deduplicates_and_serializes_target_runs() {
+    fn coordinator_allows_queued_jobs_but_serializes_execution() {
         let mut coordinator = AnsibleJobCoordinator::default();
         let first = match coordinator
             .submit(request(
@@ -627,8 +639,15 @@ mod tests {
             AnsibleParameters::HealthCheck,
         );
         conflicting_request.idempotency_key = "different".to_owned();
+        let second = match coordinator.submit(conflicting_request).unwrap() {
+            JobSubmission::Created(job) => job,
+            JobSubmission::Duplicate(_) => panic!("different key must create a queued job"),
+        };
+        coordinator
+            .transition(first.id, AnsibleJobStatus::Checking)
+            .unwrap();
         assert_eq!(
-            coordinator.submit(conflicting_request),
+            coordinator.transition(second.id, AnsibleJobStatus::Checking),
             Err(CoordinatorError::TargetBusy)
         );
     }

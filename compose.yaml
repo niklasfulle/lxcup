@@ -26,11 +26,15 @@ services:
       DATABASE_URL: postgres://${LXCUP_POSTGRES_USER}:${LXCUP_POSTGRES_PASSWORD}@postgres:5432/${LXCUP_POSTGRES_DB}
       LXCUP_BIND_ADDRESS: 0.0.0.0:8080
       LXCUP_DEV_SEED: ${LXCUP_DEV_SEED:-true}
+      LXCUP_SECRET_STORE_DIR: /var/lib/lxcup/secrets
+      LXCUP_SECRET_MASTER_KEY: ${LXCUP_SECRET_MASTER_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "8080:8080"
+    volumes:
+      - lxcup-secrets:/var/lib/lxcup/secrets
     healthcheck:
       test: ["CMD-SHELL", "wget --spider --quiet http://127.0.0.1:8080/health/ready"]
       interval: 10s
@@ -51,6 +55,38 @@ services:
     volumes:
       - ./frontend:/app
       - lxcup-frontend-node-modules:/app/node_modules
+
+  artifacts:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./artifacts:/usr/share/nginx/html:ro
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+    security_opt:
+      - no-new-privileges:true
+
+  lxcup-worker:
+    build:
+      context: .
+      dockerfile: deploy/worker.Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://${LXCUP_POSTGRES_USER}:${LXCUP_POSTGRES_PASSWORD}@postgres:5432/${LXCUP_POSTGRES_DB}
+      LXCUP_SECRET_STORE_DIR: /var/lib/lxcup/secrets
+      LXCUP_SECRET_MASTER_KEY: ${LXCUP_SECRET_MASTER_KEY:-}
+      LXCUP_ARTIFACT_BASE_URL: ${LXCUP_ARTIFACT_BASE_URL:-http://artifacts}
+      LXCUP_WORKER_SSH_USER: ${LXCUP_WORKER_SSH_USER:-lxcup}
+    volumes:
+      - lxcup-secrets:/var/lib/lxcup/secrets:ro
+      - ./ansible:/opt/lxcup/ansible:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      artifacts:
+        condition: service_started
 
   postgres-test:
     image: postgres:17-alpine
@@ -74,3 +110,4 @@ volumes:
     name: lxcup-postgres-dev-v2
   lxcup-postgres-test:
   lxcup-frontend-node-modules:
+  lxcup-secrets:

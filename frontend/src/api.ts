@@ -81,12 +81,36 @@ export type AnsibleJobDto = {
   operation: AnsibleOperation;
   playbook: string;
   playbook_version: string;
-  target: { container: number } | { node: string };
+  target: { container: number } | { node: string } | { target: string };
   mode: AnsibleExecutionMode;
   status: string;
   parameter_hash: string;
   created_at: string;
   updated_at: string;
+};
+
+export type AnsibleJobEvent = {
+  sequence: number;
+  job_id: string;
+  event: {
+    kind: "queued" | "status_changed" | "task_started" | "task_finished" | "failed" | "reconcile_required";
+    status?: string;
+    task?: string;
+    changed?: boolean;
+    code?: string;
+  };
+  created_at: string;
+};
+
+export type DockerWorkloadDto = {
+  host_container_id: number;
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+  management_state: "discovered" | "managed";
+  discovered_at: string;
 };
 
 export type CreateAnsibleJobRequest = {
@@ -229,8 +253,12 @@ export function createAnsibleJob(request: CreateAnsibleJobRequest, signal?: Abor
   return apiClient.post<AnsibleJobDto>("/api/v1/ansible/jobs", request, signal);
 }
 
-export function createEnrollment(containerId: number, idempotencyKey = crypto.randomUUID(), signal?: AbortSignal) {
-  return apiClient.post<EnrollmentDto>("/api/v1/enrollments", { container_id: containerId, idempotency_key: idempotencyKey }, signal);
+export function listAnsibleJobs(signal?: AbortSignal) { return apiClient.get<AnsibleJobDto[]>("/api/v1/ansible/jobs", signal); }
+export function getAnsibleJob(id: string, signal?: AbortSignal) { return apiClient.get<AnsibleJobDto>(`/api/v1/ansible/jobs/${id}`, signal); }
+export function getAnsibleJobEvents(id: string, signal?: AbortSignal) { return apiClient.get<AnsibleJobEvent[]>(`/api/v1/ansible/jobs/${id}/events`, signal); }
+
+export function createEnrollment(containerId: number, startOnboarding = true, idempotencyKey = crypto.randomUUID(), signal?: AbortSignal) {
+  return apiClient.post<EnrollmentDto>("/api/v1/enrollments", { container_id: containerId, idempotency_key: idempotencyKey, start_onboarding: startOnboarding }, signal);
 }
 
 export function getEnrollment(id: string, signal?: AbortSignal) {
@@ -271,4 +299,20 @@ export function getAgentHealth(containerId: number, signal?: AbortSignal) {
 
 export function getAgentMetrics(containerId: number, signal?: AbortSignal) {
   return apiClient.get<AgentHealthDto["metrics"]>(`/api/v1/containers/${containerId}/agent/metrics`, signal);
+}
+
+export function listDockerWorkloads(containerId: number, signal?: AbortSignal) {
+  return apiClient.get<DockerWorkloadDto[]>(`/api/v1/containers/${containerId}/docker/containers`, signal);
+}
+
+export function discoverDockerWorkloads(containerId: number, signal?: AbortSignal) {
+  return apiClient.post<DockerWorkloadDto[]>(`/api/v1/containers/${containerId}/docker/discover`, undefined, signal);
+}
+
+export function adoptDockerWorkload(containerId: number, dockerId: string, signal?: AbortSignal) {
+  return apiClient.post<DockerWorkloadDto>(`/api/v1/containers/${containerId}/docker/containers/${encodeURIComponent(dockerId)}/adopt`, undefined, signal);
+}
+
+export function removeDockerWorkload(containerId: number, dockerId: string, signal?: AbortSignal) {
+  return apiClient.delete<void>(`/api/v1/containers/${containerId}/docker/containers/${encodeURIComponent(dockerId)}`, { confirmed: true }, signal);
 }

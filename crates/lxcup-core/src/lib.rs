@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod container;
+pub mod docker;
 pub mod enrollment;
 pub mod environment;
 pub mod error;
@@ -22,6 +23,7 @@ pub use agent::{AgentConnectionState, AgentRegistration};
 pub use container::{
     Container, ContainerAction, ContainerManagementState, ContainerStatus, OperatingSystem,
 };
+pub use docker::{DockerWorkload, DockerWorkloadManagementState};
 pub use enrollment::{Enrollment, EnrollmentState};
 pub use environment::{EnvironmentStatus, ProxmoxEnvironment};
 pub use error::{

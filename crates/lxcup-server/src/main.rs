@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use lxcup_secrets::{EncryptedFileSecretStore, SecretMasterKey};
+
 #[tokio::main]
 async fn main() {
     lxcup_observability::init("lxcup-server");
@@ -10,6 +14,17 @@ async fn main() {
         .await
         .expect("server bind address must be available");
     let mut state = lxcup_server::ApiState::new();
+    if let (Ok(secret_root), Ok(master_key)) = (
+        std::env::var("LXCUP_SECRET_STORE_DIR"),
+        SecretMasterKey::from_env("LXCUP_SECRET_MASTER_KEY"),
+    ) {
+        let secret_store = EncryptedFileSecretStore::new(secret_root, master_key, [])
+            .expect("configured encrypted secret store must be available");
+        state = state.with_secret_store(Arc::new(secret_store));
+        tracing::info!("Encrypted shared secret store enabled");
+    } else {
+        tracing::warn!("Encrypted secret store is not configured; worker execution remains disabled");
+    }
     if std::env::var_os("DATABASE_URL").is_some() {
         let database = lxcup_persistence::Database::connect_from_env()
             .await

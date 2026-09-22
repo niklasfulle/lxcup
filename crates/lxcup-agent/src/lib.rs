@@ -72,6 +72,16 @@ pub struct AgentMetrics {
     pub last_command_at: Option<DateTime<Utc>>,
 }
 
+/// Nicht-sensitive Docker-Inventardaten, die ein Linux-Agent melden darf.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DockerContainerInfo {
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    pub state: String,
+    pub status: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentHealth {
     pub healthy: bool,
@@ -195,6 +205,10 @@ impl AgentClient {
     }
     pub async fn metrics(&self) -> Result<AgentMetrics, AgentError> {
         self.get("/metrics").await
+    }
+
+    pub async fn docker_containers(&self) -> Result<Vec<DockerContainerInfo>, AgentError> {
+        self.get("/docker/containers").await
     }
 
     pub async fn command(
@@ -351,8 +365,41 @@ pub fn agent_router(state: LocalAgentState) -> Router {
     Router::new()
         .route("/health", get(agent_health))
         .route("/metrics", get(agent_metrics))
+        .route("/docker/containers", get(agent_docker_containers))
         .route("/command", post(agent_command))
         .with_state(state)
+}
+
+async fn agent_docker_containers(
+    State(state): State<LocalAgentState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"unauthorized"}))).into_response();
+    }
+    if state.info.platform == AgentPlatform::Windows {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"docker discovery is only supported on Linux agents"}))).into_response();
+    }
+    let output = match Command::new("docker")
+        .args(["ps", "--all", "--no-trunc", "--format", "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.State}}\\t{{.Status}}"])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => output.stdout,
+        _ => return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"docker is unavailable on this agent"}))).into_response(),
+    };
+    let containers = parse_docker_containers(&String::from_utf8_lossy(&output));
+    Json(containers).into_response()
+}
+
+fn parse_docker_containers(output: &str) -> Vec<DockerContainerInfo> {
+    output.lines().filter_map(|line| {
+        let mut fields = line.splitn(5, '\t');
+        Some(DockerContainerInfo {
+            id: fields.next()?.to_owned(), name: fields.next()?.to_owned(), image: fields.next()?.to_owned(),
+            state: fields.next()?.to_owned(), status: fields.next()?.to_owned(),
+        })
+    }).collect()
 }
 
 async fn agent_health(
@@ -576,6 +623,13 @@ mod tests {
         assert!(output.contains("Package: openssl"));
         assert!(output.contains("Security: yes"));
         assert!(output.contains("Installed: 3.0"));
+    }
+
+    #[test]
+    fn docker_inventory_parser_keeps_only_complete_rows() {
+        let containers = parse_docker_containers("a1\tapi\tghcr.io/acme/api:1\trunning\tUp 2 hours\ninvalid");
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].name, "api");
     }
 
     #[tokio::test]

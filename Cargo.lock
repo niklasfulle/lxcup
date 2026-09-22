@@ -1140,11 +1140,20 @@ dependencies = [
 name = "lxcup-ansible-worker"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "lxcup-ansible",
  "lxcup-core",
+ "lxcup-observability",
+ "lxcup-persistence",
+ "lxcup-secrets",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
