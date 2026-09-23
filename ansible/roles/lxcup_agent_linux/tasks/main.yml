@@ -125,10 +125,20 @@
   no_log: true
   check_mode: false
 
+- name: Collect agent service status after health failure
+  ansible.builtin.command: >-
+    systemctl show lxcup-agent.service
+    --property=ActiveState,SubState,ExecMainCode,ExecMainStatus
+  register: lxcup_agent_service_status
+  changed_when: false
+  failed_when: false
+  when: lxcup_agent_health.status | default(0) != 200
+
 - name: Report sanitized agent health failure
   ansible.builtin.fail:
     msg: >-
       Agent healthcheck failed after 5 attempts
       (status={{ lxcup_agent_health.status | default('unreachable') }},
-      message={{ lxcup_agent_health.msg | default('no response') }}).
+      message={{ lxcup_agent_health.msg | default('no response') }},
+      service={{ lxcup_agent_service_status.stdout | default('status unavailable') }}).
   when: lxcup_agent_health.status | default(0) != 200
