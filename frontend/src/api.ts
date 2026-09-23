@@ -22,8 +22,8 @@ export type ContainerDto = {
 export type TargetKind = "lxc" | "linux_server" | "windows_server";
 export type TargetTransport = "ssh" | "winrm";
 export type TargetState = "pending" | "managed" | "disabled";
-export type TargetDto = { id: string; name: string; kind: TargetKind; address: string; transport: TargetTransport; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string; state: TargetState; created_at: string; updated_at: string };
-export type CreateTargetRequest = { name: string; kind: TargetKind; address: string; transport: TargetTransport; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string };
+export type TargetDto = { id: string; name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string; state: TargetState; created_at: string; updated_at: string };
+export type CreateTargetRequest = { name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string };
 export type EnrollmentState = "requested" | "discovering" | "installing_agent" | "registering_agent" | "connected" | "failed" | "disabled";
 export type EnrollmentDto = { id: string; container_id: number; state: EnrollmentState; failure_reason: string | null; created_at: string; updated_at: string };
 

@@ -44,6 +44,8 @@ pub struct Target {
     pub kind: TargetKind,
     pub address: String,
     pub transport: TargetTransport,
+    #[serde(default)]
+    pub ssh_user: Option<String>,
     pub credential_secret_ref: SecretId,
     #[serde(default)]
     pub ssh_known_hosts_secret_ref: Option<SecretId>,
@@ -86,6 +88,7 @@ impl Target {
             kind,
             address,
             transport,
+            ssh_user: None,
             credential_secret_ref,
             ssh_known_hosts_secret_ref: None,
             agent_secret_ref,

@@ -492,6 +492,8 @@ pub struct CreateTargetRequest {
     pub kind: TargetKind,
     pub address: String,
     pub transport: TargetTransport,
+    #[serde(default)]
+    pub ssh_user: Option<String>,
     pub credential_secret_ref: SecretId,
     #[serde(default)]
     pub ssh_known_hosts_secret_ref: Option<SecretId>,
@@ -505,6 +507,7 @@ pub struct TargetDto {
     pub kind: TargetKind,
     pub address: String,
     pub transport: TargetTransport,
+    pub ssh_user: Option<String>,
     pub credential_secret_ref: SecretId,
     pub ssh_known_hosts_secret_ref: Option<SecretId>,
     pub agent_secret_ref: SecretId,
@@ -521,6 +524,7 @@ impl From<&Target> for TargetDto {
             kind: target.kind,
             address: target.address.clone(),
             transport: target.transport,
+            ssh_user: target.ssh_user.clone(),
             credential_secret_ref: target.credential_secret_ref,
             ssh_known_hosts_secret_ref: target.ssh_known_hosts_secret_ref,
             agent_secret_ref: target.agent_secret_ref,
@@ -560,6 +564,7 @@ async fn create_target(
     .map_err(|_| {
         ApiError::bad_request("invalid_target", "target fields or transport are invalid")
     })?;
+    target.ssh_user = request.ssh_user.filter(|value| !value.trim().is_empty());
     target.ssh_known_hosts_secret_ref = request.ssh_known_hosts_secret_ref;
     let dto = TargetDto::from(&target);
     if let Some(repositories) = state.repositories.clone() {

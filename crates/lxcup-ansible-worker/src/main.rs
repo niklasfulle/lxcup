@@ -198,9 +198,10 @@ async fn invoke(
     // The managed SSH account may intentionally have no writable home directory.
     // Keep Ansible's remote staging area in /tmp instead of relying on
     // /home/<user>/.ansible/tmp being present and writable.
+    let ssh_user = target.ssh_user.as_deref().unwrap_or(&r.user);
     let mut host = serde_json::json!({
         "ansible_host": target.address,
-        "ansible_user": r.user,
+        "ansible_user": ssh_user,
         "ansible_remote_tmp": "/tmp/.ansible/tmp"
     });
     let key = dir.join("credential");

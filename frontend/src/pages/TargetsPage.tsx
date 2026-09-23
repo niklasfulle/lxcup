@@ -17,6 +17,7 @@ export function TargetsPage() {
   const secrets = useQuery({ queryKey: ["secrets"], queryFn: ({ signal }) => listSecrets(signal) });
   const [name, setName] = useState("");
   const [address, setAddress] = useState("");
+  const [sshUser, setSshUser] = useState("lxcup");
   const [kind, setKind] = useState<TargetKind>("lxc");
   const [credentialSecret, setCredentialSecret] = useState("");
   const [agentSecret, setAgentSecret] = useState("");
@@ -61,6 +62,7 @@ export function TargetsPage() {
       address,
       kind,
       transport: selectedKind.transport,
+      ssh_user: selectedKind.transport === "ssh" ? sshUser.trim() || null : null,
       credential_secret_ref: credentialSecret,
       ssh_known_hosts_secret_ref: selectedKind.transport === "ssh" ? knownHostsSecret || null : null,
       agent_secret_ref: agentSecret,
@@ -109,6 +111,7 @@ export function TargetsPage() {
             <label><span className="field-label" title="Anzeigename des verwalteten Ziels.">Name</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label>
             <label><span className="field-label" title="Plattform des Ziels. Sie bestimmt unter anderem das verwendete Ansible-Playbook.">Typ</span><select value={kind} onChange={(event) => setKind(event.target.value as TargetKind)}>{kinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
             <label><span className="field-label" title="IP-Adresse oder DNS-Name, unter dem der Worker das Ziel erreicht.">Adresse</span><input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="IP oder DNS-Name" required /></label>
+            {selectedKind.transport === "ssh" ? <label><span className="field-label" title="Benutzername für die SSH-Verbindung zu diesem Ziel.">SSH-Benutzer</span><input value={sshUser} onChange={(event) => setSshUser(event.target.value)} placeholder="z. B. root oder lxcup" required /></label> : null}
             <label><span className="field-label" title="Zugangsdaten für die Verbindung zum Ziel, zum Beispiel ein SSH-Passwort oder ein SSH-Private-Key.">Deployment-Secret</span><div className="inline-field"><select value={credentialSecret} onChange={(event) => setCredentialSecret(event.target.value)} required><option value="">Secret auswählen</option>{activeSecrets.map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select><button className="secondary-button" type="button" onClick={() => { setNewSecretFor("credential"); setNewSecretKind(selectedKind.transport === "ssh" ? "ssh_password" : "generic"); }}>＋ Neu</button></div></label>
             {selectedKind.transport === "ssh" ? <label><span className="field-label" title="Bekannter SSH-Host-Fingerprint als known_hosts-Datei. Er schützt Passwort- und Schlüsselverbindungen vor Man-in-the-Middle-Angriffen.">SSH-Host-Fingerprint</span><div className="inline-field"><select value={knownHostsSecret} onChange={(event) => setKnownHostsSecret(event.target.value)} required><option value="">Known-Hosts-Secret auswählen</option>{activeSecrets.filter((item) => item.metadata.metadata.kind === "ssh_known_hosts").map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select><button className="secondary-button" type="button" onClick={() => { setNewSecretFor("known_hosts"); setNewSecretKind("ssh_known_hosts"); }}>＋ Neu</button></div></label> : null}
             <label><span className="field-label" title="Geheimer Token, mit dem sich der installierte lxcup-Agent beim Controller authentifiziert. Er ist nicht das SSH-Passwort.">Agent-Token</span><div className="inline-field"><select value={agentSecret} onChange={(event) => setAgentSecret(event.target.value)} required><option value="">Secret auswählen</option>{activeSecrets.map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select><button className="secondary-button" type="button" onClick={() => { setNewSecretFor("agent"); setNewSecretKind("agent_token"); }}>＋ Neu</button></div></label>
