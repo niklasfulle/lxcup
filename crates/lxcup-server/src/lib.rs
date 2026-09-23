@@ -50,6 +50,8 @@ pub(crate) use workflows::{
     create_ansible_job, create_enrollment, get_ansible_job, get_ansible_job_events, get_enrollment,
     list_ansible_jobs,
 };
+mod worker;
+pub(crate) use worker::get_worker_availability;
 mod inventory;
 pub(crate) use inventory::{
     ApiMetrics, AuthConfig, abort_execution, confirm_plan, create_plan, get_execution_result,
@@ -298,6 +300,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/v1/ansible/jobs/{job_id}/events",
             get(get_ansible_job_events),
+        )
+        .route(
+            "/api/v1/ansible/worker-availability",
+            get(get_worker_availability),
         )
         .route("/api/v1/containers", get(list_containers))
         .route(

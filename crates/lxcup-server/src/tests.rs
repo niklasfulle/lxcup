@@ -16,7 +16,7 @@ async fn removed_nodes_endpoint_is_not_available() {
     let response = router(state)
         .oneshot(
             Request::builder()
-                .uri("/api/v1/targets")
+                .uri("/api/v1/nodes")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -830,6 +830,25 @@ async fn configured_auth_protects_api_but_not_health() {
 }
 
 #[tokio::test]
+async fn worker_availability_reports_unavailable_without_a_recent_heartbeat() {
+    let response = router(ApiState::new().with_auth_config(AuthConfig::disabled()))
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/ansible/worker-availability")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["available"], false);
+}
+
+#[tokio::test]
 async fn agent_registration_exposes_health_and_metrics() {
     let agent_token = "test-agent-token";
     let agent_info = lxcup_agent::AgentInfo {
@@ -998,6 +1017,21 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
     assert_eq!(store.targets[0].state, TargetState::Managed);
     assert!(store.agent_reports.contains_key(&target_id));
     drop(store);
+    let targets = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/targets")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(targets.status(), StatusCode::OK);
+    let targets_body = axum::body::to_bytes(targets.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let targets_json: serde_json::Value = serde_json::from_slice(&targets_body).unwrap();
+    assert_eq!(targets_json["data"][0]["agent_version"], "0.1.0");
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), events.recv())
             .await

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink, Route, Routes } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiClient, type ApiEvent } from "./api";
-import { queryKeys, useAnsibleJobs, useTargets } from "./queries";
+import { queryKeys, useAnsibleJobs, useTargets, useWorkerAvailability } from "./queries";
 import { Dashboard } from "./pages/Dashboard";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { WorkflowDetailPage } from "./pages/WorkflowDetailPage";
@@ -77,6 +77,7 @@ export default function App() {
         </header>
         <div className="content-area">
           {streamError ? <div className="api-alert" role="alert">{streamError}</div> : null}
+          <WorkerAvailabilityBanner />
           <TaskMonitor events={events} onClear={() => setEvents([])} />
           <Routes>
             <Route path="/" element={<Dashboard />} />
@@ -98,14 +99,25 @@ export default function App() {
   );
 }
 
+function WorkerAvailabilityBanner() {
+  const availability = useWorkerAvailability();
+  if (availability.data?.available !== false) return null;
+  return <div className="worker-unavailable-banner" role="alert"><strong>Ansible-Worker nicht verfügbar</strong><span>Neue Workflows bleiben eingereiht, bis ein Worker wieder aktiv ist.</span></div>;
+}
+
 function NotificationCenter() {
   const jobs = useAnsibleJobs();
   const failed = (jobs.data ?? []).filter((job) => job.status === "failed" || job.status === "reconcile_required");
   const [open, setOpen] = useState(false);
   const [read, setRead] = useState<string[]>(() => JSON.parse(globalThis.localStorage?.getItem("lxcup-read-notifications") ?? "[]") as string[]);
   const unread = failed.filter((job) => read.includes(job.id) === false);
-  const markRead = (id: string) => setRead((current) => { const next = current.includes(id) ? current : [...current, id]; globalThis.localStorage?.setItem("lxcup-read-notifications", JSON.stringify(next)); return next; });
-  return <div className="notification-center"><button className="theme-button notification-button" type="button" aria-label="Benachrichtigungen" onClick={() => setOpen((value) => value === false)}>🔔{unread.length ? <span className="notification-count">{unread.length}</span> : null}</button>{open ? <div className="notification-popover"><strong>Benachrichtigungen</strong>{notificationBody(failed, markRead)}</div> : null}</div>;
+  const saveRead = (next: string[]) => {
+    globalThis.localStorage?.setItem("lxcup-read-notifications", JSON.stringify(next));
+    setRead(next);
+  };
+  const markRead = (id: string) => saveRead(read.includes(id) ? read : [...read, id]);
+  const markAllRead = () => saveRead([...new Set([...read, ...failed.map((job) => job.id)])]);
+  return <div className="notification-center"><button className="topbar-icon-button notification-button" type="button" aria-label="Benachrichtigungen" aria-expanded={open} onClick={() => setOpen((value) => !value)}>🔔{unread.length ? <span className="notification-count">{unread.length}</span> : null}</button>{open ? <div className="notification-popover"><div className="notification-heading"><strong>Benachrichtigungen</strong><button className="text-link" type="button" disabled={unread.length === 0} onClick={markAllRead}>Alle als gelesen markieren</button></div>{notificationBody(failed, markRead)}</div> : null}</div>;
 }
 
 function eventQueryKey(resource: string) {

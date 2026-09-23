@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   events: { data: [], isLoading: false, error: null as Error | null },
   enrollment: { data: undefined as any, isLoading: false, error: null as Error | null },
   workloads: { data: [] as DockerWorkloadDto[], isLoading: false, error: null as Error | null },
+  workerAvailability: { data: { available: true, last_seen_at: "2026-01-01T00:00:00Z" }, isLoading: false, error: null as Error | null },
   listSecrets: vi.fn(async () => [] as SecretMetadata[]),
   listSecretAudit: vi.fn(async () => []),
   createSecret: vi.fn(async (request: any) => ({ metadata: { metadata: { id: "secret-new", name: request.name, kind: request.kind, scope: request.scope, created_at: "2026-01-01", updated_at: "2026-01-01" }, status: "active" } })),
@@ -46,6 +47,7 @@ vi.mock("./queries", () => ({
   useAnsibleJobEvents: () => mocks.events,
   useEnrollment: () => mocks.enrollment,
   useDockerWorkloads: () => mocks.workloads,
+  useWorkerAvailability: () => mocks.workerAvailability,
 }));
 
 vi.mock("./api", async () => {
@@ -91,6 +93,7 @@ beforeEach(() => {
   mocks.enrollment.isLoading = false;
   mocks.enrollment.error = null;
   mocks.workloads.data = [];
+  mocks.workerAvailability.data = { available: true, last_seen_at: "2026-01-01T00:00:00Z" };
   mocks.workloads.isLoading = false;
   mocks.workloads.error = null;
   mocks.listSecrets.mockResolvedValue([secret("cred", "ssh-password"), secret("known", "known-hosts", "ssh_known_hosts"), secret("agent", "agent-token", "agent_token")] as any);
@@ -233,6 +236,12 @@ describe("onboarding and secret pages", () => {
     await waitFor(() => expect(mocks.createTarget).toHaveBeenCalled());
   });
 
+  it("shows the version reported by a connected target agent", () => {
+    mocks.targets.data = [{ ...target, agent_version: "0.1.0" }];
+    renderPage(<TargetsPage />);
+    expect(screen.getByText("v0.1.0")).toBeInTheDocument();
+  });
+
   it("starts enrollment and displays a failed state", async () => {
     mocks.containers.data = [container];
     mocks.targets.data = [target];
@@ -364,6 +373,7 @@ describe("application shell", () => {
       return () => undefined;
     }) as any);
     mocks.targets.data = [target];
+    mocks.workerAvailability.data = { available: false, last_seen_at: null };
     mocks.jobs.data = [{ id: "job-alert", operation: "deploy_agent", playbook: "agent/deploy.yml", playbook_version: "1", target: { target: "target-1" }, mode: "apply", status: "failed", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" }, { id: "job-reconcile", operation: "health_check", playbook: "health.yml", playbook_version: "1", target: { target: "target-1" }, mode: "check", status: "reconcile_required", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" }] as any;
     renderPage(<App />);
     expect(screen.getByRole("link", { name: "lxcup Übersicht" })).toBeInTheDocument();
@@ -373,12 +383,15 @@ describe("application shell", () => {
     expect(screen.getByRole("link", { name: "Windows" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Tasks & Workflows" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Secrets" })).toBeInTheDocument();
+    expect(screen.getByText("Ansible-Worker nicht verfügbar")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Zugänge & Agenten" })).not.toBeInTheDocument();
     expect(screen.getAllByText("＋ LXC einbinden").length).toBeGreaterThan(0);
     expect(mocks.subscribe).toHaveBeenCalled();
-    expect(await screen.findByRole("alert")).toHaveTextContent("Echtzeitverbindung");
+    expect(await screen.findByText(/Echtzeitverbindung unterbrochen/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Benachrichtigungen" }));
     expect(screen.getByText("Fehlgeschlagen")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Alle als gelesen markieren" }));
+    expect(screen.queryByText("2")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("link", { name: /deploy agent/ }));
     await userEvent.click(screen.getByRole("button", { name: "Theme wechseln" }));
     cleanup();

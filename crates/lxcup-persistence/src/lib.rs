@@ -13,6 +13,7 @@ pub use repositories::{
     ContainerRepository, DockerWorkloadRepository, EnvironmentRepository, ExecutionEvent,
     ExecutionRepository, ExecutionResultRecord, NodeRepository, Repositories, RepositoryError,
     ScanRepository, TargetRepository, UpdatePlanRepository,
+    WorkerHeartbeatRepository,
 };
 
 /// Konfiguration für eine PostgreSQL-Verbindung.

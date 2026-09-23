@@ -12,7 +12,7 @@ export type ContainerDto = {
 export type TargetKind = "lxc" | "linux_server" | "windows_server";
 export type TargetTransport = "ssh" | "winrm";
 export type TargetState = "pending" | "managed" | "disabled";
-export type TargetDto = { id: string; name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string; state: TargetState; created_at: string; updated_at: string };
+export type TargetDto = { id: string; name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string; state: TargetState; agent_version?: string | null; created_at: string; updated_at: string };
 export type CreateTargetRequest = { name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string };
 export type EnrollmentState = "requested" | "discovering" | "installing_agent" | "registering_agent" | "connected" | "failed" | "disabled";
 export type EnrollmentDto = { id: string; container_id: number; state: EnrollmentState; failure_reason: string | null; created_at: string; updated_at: string };
@@ -29,6 +29,7 @@ export type ContainerActionTaskDto = {
   updated_at: string;
 };
 export type AgentHealthDto = { healthy: boolean; info: { agent_id: string; platform: string; hostname: string; version: string; protocol_version: string }; metrics: { collected_at: string; commands_total: number; commands_failed: number; last_command_at: string | null } };
+export type WorkerAvailabilityDto = { available: boolean; last_seen_at: string | null };
 
 export type ScanDto = {
   id: string;
@@ -264,6 +265,7 @@ export function createAnsibleJob(request: CreateAnsibleJobRequest, signal?: Abor
 }
 
 export function listAnsibleJobs(signal?: AbortSignal) { return apiClient.get<AnsibleJobDto[]>("/api/v1/ansible/jobs", signal); }
+export function getWorkerAvailability(signal?: AbortSignal) { return apiClient.get<WorkerAvailabilityDto>("/api/v1/ansible/worker-availability", signal); }
 export function getAnsibleJob(id: string, signal?: AbortSignal) { return apiClient.get<AnsibleJobDto>(`/api/v1/ansible/jobs/${id}`, signal); }
 export function getAnsibleJobEvents(id: string, signal?: AbortSignal) { return apiClient.get<AnsibleJobEvent[]>(`/api/v1/ansible/jobs/${id}/events`, signal); }
 

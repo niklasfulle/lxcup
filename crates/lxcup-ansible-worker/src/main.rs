@@ -44,10 +44,15 @@ async fn main() {
     let repos = Repositories::new(&db);
     let runtime =
         Runtime::load().unwrap_or_else(|error| panic!("worker configuration invalid: {error}"));
+    let worker_name = std::env::var("LXCUP_WORKER_NAME")
+        .unwrap_or_else(|_| "lxcup-ansible-worker".to_owned());
     recover_interrupted_jobs(&repos)
         .await
         .expect("worker recovery");
     loop {
+        if let Err(error) = repos.worker_heartbeats.record(&worker_name).await {
+            tracing::error!(?error, "worker heartbeat failed");
+        }
         if let Err(e) = process(&repos, &runtime).await {
             tracing::error!(?e, "worker cycle failed");
         }

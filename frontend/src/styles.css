@@ -81,18 +81,21 @@
   .topbar { @apply flex min-h-11 items-center justify-between gap-4 border-b px-4; border-color: var(--line); background: var(--panel); }
   .content-area { @apply px-4 py-3 sm:px-6; }
   .topbar-context, .topbar-actions, .toolbar-actions { @apply flex items-center gap-2; }
-  .topbar-actions { @apply flex-wrap justify-end; }
+  .topbar-actions { @apply flex-wrap justify-end rounded-sm border p-1; border-color: var(--line); background: var(--paper-muted); }
   .environment-label { @apply border px-1.5 py-0.5 text-[10px] text-lxcup-primary; border-color: var(--line); background: var(--primary-soft); }
   .user-pill { @apply border px-2 py-1 text-xs font-medium; color: var(--muted); border-color: var(--line); background: var(--panel); }
-  .theme-button, .secondary-button, .secret-actions button, .inline-form button { @apply inline-flex items-center justify-center border px-2 py-1.5 text-xs font-medium; color: var(--ink); border-color: var(--line); background: var(--panel); }
-  .theme-button:hover, .secondary-button:hover, .secret-actions button:hover, .inline-form button:hover { color: var(--primary); background: var(--primary-soft); }
+  .theme-button, .secondary-button, .secret-actions button, .inline-form button, .topbar-icon-button { @apply inline-flex items-center justify-center border px-2 py-1.5 text-xs font-medium; color: var(--ink); border-color: var(--line); background: var(--panel); }
+  .theme-button:hover, .secondary-button:hover, .secret-actions button:hover, .inline-form button:hover, .topbar-icon-button:hover { color: var(--primary); background: var(--primary-soft); }
   .notification-center { @apply relative; }
   .notification-button { @apply relative; }
   .notification-count { @apply absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] text-white; }
   .notification-popover { @apply absolute right-0 top-9 z-20 grid w-80 gap-2 border p-3 shadow-xl; color: var(--ink); border-color: var(--line); background: var(--panel); }
+  .notification-heading { @apply flex items-center justify-between gap-3; }
+  .notification-heading .text-link { @apply m-0 border-0 bg-transparent p-0; }
+  .notification-heading .text-link:disabled { @apply cursor-not-allowed opacity-50 no-underline; }
   .notification-popover a { @apply grid gap-1 border-b pb-2 text-xs last:border-0 last:pb-0; border-color: var(--line); }
   .notification-popover a small { color: var(--muted); }
-  .new-lxc-button, .primary-button { @apply inline-flex items-center justify-center border border-lxcup-primary bg-lxcup-primary px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700; }
+  .new-lxc-button, .primary-button { @apply inline-flex items-center justify-center border border-lxcup-primary bg-lxcup-primary px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700; justify-self: start; }
   .primary-button:disabled { @apply cursor-not-allowed opacity-50; }
 
   .page-header, .page-toolbar { @apply mb-3 flex items-end justify-between gap-4 border-b pb-3; border-color: var(--line); }
@@ -105,6 +108,8 @@
   .failure-code { @apply inline-block border px-1.5 py-0.5 text-[11px] font-semibold; color: var(--error); border-color: var(--error); }
   .success-state { @apply border px-2 py-1.5 font-medium; color: var(--success); border-color: #b7e7d0; background: var(--success-soft); }
   .api-alert { @apply mb-3 border px-3 py-2 font-medium; color: var(--error); border-color: #edb7c0; background: var(--error-soft); }
+  .worker-unavailable-banner { @apply mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 border px-3 py-2 text-sm; color: var(--warning); border-color: #e7c47f; background: var(--warning-soft); }
+  .worker-unavailable-banner strong { @apply font-semibold; }
 
   .summary-grid { @apply mb-3 grid grid-cols-2 gap-3; }
   .summary-card, .panel, .signal-panel { @apply border; color: var(--ink); border-color: var(--line); background: var(--panel); }
@@ -157,7 +162,7 @@
   .bootstrap-steps { @apply m-0 grid list-none gap-2 border-y py-3 pl-0; border-color: var(--line); }
   .bootstrap-steps li { @apply flex items-center gap-2 text-xs; }
   .bootstrap-steps li > span:first-child { @apply grid h-5 w-5 shrink-0 place-items-center rounded-full bg-lxcup-primary text-[10px] font-bold text-white; }
-  .bootstrap-copy-button { @apply w-full; }
+  .bootstrap-copy-button { @apply self-start; }
   .copy-status { @apply min-h-4 text-xs font-medium; color: var(--success); }
   .bootstrap-note { @apply border-l-2 pl-2 text-[11px] leading-4; border-color: var(--primary); }
   .resource-relationship-map { @apply mb-3 grid items-stretch gap-3 lg:grid-cols-[1fr_auto_1fr_auto_1fr]; }

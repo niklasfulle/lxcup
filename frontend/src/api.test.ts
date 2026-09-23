@@ -30,7 +30,7 @@ import { buildWorkflowRequest } from "./pages/WorkflowsPage";
 describe("ApiClient", () => {
   it("unwraps a versioned API envelope", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [{ name: "pve01" }], request_id: "req-1" }), { status: 200 })));
-    await expect(new ApiClient().get<{ name: string }[]>("/api/v1/targets")).resolves.toEqual([{ name: "server-01" }]);
+    await expect(new ApiClient().get<{ name: string }[]>("/api/v1/targets")).resolves.toEqual([{ name: "pve01" }]);
   });
 
   it("exposes structured API errors without losing the request id", async () => {

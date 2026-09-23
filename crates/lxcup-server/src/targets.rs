@@ -37,6 +37,9 @@ pub struct TargetDto {
     pub ssh_known_hosts_secret_ref: Option<SecretId>,
     pub agent_secret_ref: SecretId,
     pub state: TargetState,
+    /// Version reported by the most recent authenticated agent heartbeat.
+    /// This remains absent until the agent has connected at least once.
+    pub agent_version: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -54,17 +57,31 @@ impl From<&Target> for TargetDto {
             ssh_known_hosts_secret_ref: target.ssh_known_hosts_secret_ref,
             agent_secret_ref: target.agent_secret_ref,
             state: target.state,
+            agent_version: None,
             created_at: target.created_at,
             updated_at: target.updated_at,
         }
     }
 }
 
+impl TargetDto {
+    fn with_agent_report(target: &Target, report: Option<&AgentHeartbeat>) -> Self {
+        let mut dto = Self::from(target);
+        dto.agent_version = report.map(|heartbeat| heartbeat.info.version.clone());
+        dto
+    }
+}
+
 pub(super) async fn list_targets(
     State(state): State<ApiState>,
 ) -> Json<ApiEnvelope<Vec<TargetDto>>> {
+    let store = state.store.read().await;
     Json(envelope(
-        state.store.read().await.targets.iter().map(TargetDto::from).collect(),
+        store
+            .targets
+            .iter()
+            .map(|target| TargetDto::with_agent_report(target, store.agent_reports.get(&target.id)))
+            .collect(),
     ))
 }
 
@@ -91,7 +108,10 @@ pub(super) async fn get_target(State(state): State<ApiState>, Path(target_id): P
     let target_id = TargetId::from_uuid(parse_uuid(&target_id, "target id")?);
     let store = state.store.read().await;
     let target = store.targets.iter().find(|target| target.id == target_id).ok_or_else(|| ApiError::not_found("target not found"))?;
-    Ok(Json(envelope(TargetDto::from(target))))
+    Ok(Json(envelope(TargetDto::with_agent_report(
+        target,
+        store.agent_reports.get(&target.id),
+    ))))
 }
 
 pub(super) async fn receive_agent_heartbeat(State(state): State<ApiState>, headers: HeaderMap, JsonBody(heartbeat): JsonBody<AgentHeartbeat>) -> Result<StatusCode, ApiError> {

@@ -29,7 +29,7 @@ export function TargetLifecycle({ target }: Readonly<{ target: TargetDto }>) {
         <div>
           <p className="eyebrow">Onboarding-Fortschritt</p>
           <h2>{target.name}</h2>
-          <p className="muted">{target.kind.toUpperCase()} · {target.address}</p>
+          <p className="muted">{target.kind.toUpperCase()} · {target.address}{target.agent_version ? ` · Agent v${target.agent_version}` : " · Noch keine Agent-Version gemeldet"}</p>
         </div>
         <span className={`status-badge ${statusClass}`}>{statusLabel}</span>
       </div>
@@ -77,7 +77,7 @@ function stepMarker(status: ReturnType<typeof stepStatus>, index: number) {
 
 function lifecycleCallout(target: TargetDto, isManaged: boolean, isDisabled: boolean) {
   if (isManaged) {
-    return <div className="callout success"><strong>Der LXC ist bereit.</strong><p>Der Agent ist verbunden. Healthchecks und Workflows können jetzt ausgeführt werden.</p><Link className="text-link" to="/workflows">Workflows öffnen →</Link></div>;
+    return <div className="callout success"><strong>Der LXC ist bereit.</strong><p>Der Agent{target.agent_version ? ` v${target.agent_version}` : ""} ist verbunden. Healthchecks und Workflows können jetzt ausgeführt werden.</p><Link className="text-link" to="/workflows">Workflows öffnen →</Link></div>;
   }
   if (isDisabled) {
     return <div className="callout"><strong>Das Ziel ist deaktiviert.</strong><p>Es werden keine Agenten- oder Workflow-Aktionen ausgeführt.</p></div>;

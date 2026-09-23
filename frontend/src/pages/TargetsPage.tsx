@@ -330,10 +330,10 @@ function mutationError(error: unknown) {
   return error instanceof Error ? <p className="error-state">{error.message}</p> : null;
 }
 
-function TargetInventory({ targets, isLoading }: Readonly<{ targets: Array<{ id: string; name: string; kind: TargetKind; address: string; transport: TargetTransport; state: "pending" | "managed" | "disabled" }>; isLoading: boolean }>) {
+function TargetInventory({ targets, isLoading }: Readonly<{ targets: import("../api").TargetDto[]; isLoading: boolean }>) {
   if (isLoading) return <p className="muted">Lade Zugangsprofile…</p>;
   if (targets.length === 0) return <p className="empty-state">Noch keine Zugangsprofile für diese Ressourcenart angelegt.</p>;
-  return <div className="table-wrap"><table><thead><tr><th>Name</th><th>Typ</th><th>Adresse</th><th>Transport</th><th>Status</th></tr></thead><tbody>{targets.map((target) => <tr key={target.id}><td>{target.name}</td><td>{target.kind}</td><td>{target.address}</td><td>{target.transport}</td><td><span className={`status-badge ${targetStateClass(target.state)}`}>{targetStateLabel(target.state)}</span></td></tr>)}</tbody></table></div>;
+  return <div className="table-wrap"><table><thead><tr><th>Name</th><th>Typ</th><th>Adresse</th><th>Transport</th><th>Agent</th><th>Status</th></tr></thead><tbody>{targets.map((target) => <tr key={target.id}><td>{target.name}</td><td>{target.kind}</td><td>{target.address}</td><td>{target.transport}</td><td title="Wird vom letzten authentifizierten Heartbeat des Zielsystems gemeldet.">{target.agent_version ? `v${target.agent_version}` : "Noch keine Meldung"}</td><td><span className={`status-badge ${targetStateClass(target.state)}`}>{targetStateLabel(target.state)}</span></td></tr>)}</tbody></table></div>;
 }
 
 function targetStateClass(state: "pending" | "managed" | "disabled") {

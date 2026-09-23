@@ -18,6 +18,7 @@ use crate::Database;
 
 mod docker;
 mod targets;
+mod worker_heartbeats;
 
 mod environment;
 
@@ -55,6 +56,12 @@ pub struct EnvironmentRepository {
 /// Persistiert Ansible-Jobs und deren audit-sichere Ereignisse.
 #[derive(Clone)]
 pub struct AnsibleJobRepository {
+    pool: PgPool,
+}
+
+/// Tracks the most recent liveness signal emitted by each Ansible worker.
+#[derive(Clone)]
+pub struct WorkerHeartbeatRepository {
     pool: PgPool,
 }
 
@@ -140,6 +147,7 @@ pub struct Repositories {
     pub targets: TargetRepository,
     pub agent_registrations: AgentRegistrationRepository,
     pub ansible_jobs: AnsibleJobRepository,
+    pub worker_heartbeats: WorkerHeartbeatRepository,
     pub environments: EnvironmentRepository,
     pub nodes: NodeRepository,
     pub containers: ContainerRepository,
@@ -156,6 +164,7 @@ impl Repositories {
             targets: TargetRepository::new(database),
             agent_registrations: AgentRegistrationRepository::new(database),
             ansible_jobs: AnsibleJobRepository::new(database),
+            worker_heartbeats: WorkerHeartbeatRepository::new(database),
             environments: EnvironmentRepository::new(database),
             nodes: NodeRepository::new(database),
             containers: ContainerRepository::new(database),

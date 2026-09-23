@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { apiClient, getAnsibleJob, getAnsibleJobEvents, getEnrollment, listAnsibleJobs, listDockerWorkloads, listTargets, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type TargetDto } from "./api";
+import { apiClient, getAnsibleJob, getAnsibleJobEvents, getEnrollment, getWorkerAvailability, listAnsibleJobs, listDockerWorkloads, listTargets, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type TargetDto, type WorkerAvailabilityDto } from "./api";
 
 export const queryKeys = {
   targets: ["targets"] as const,
@@ -8,6 +8,7 @@ export const queryKeys = {
   ansibleJobs: ["ansible-jobs"] as const,
   ansibleJob: (jobId: string) => ["ansible-jobs", jobId] as const,
   ansibleJobEvents: (jobId: string) => ["ansible-jobs", jobId, "events"] as const,
+  workerAvailability: ["ansible-worker-availability"] as const,
   dockerWorkloads: (containerId: number) => ["containers", containerId, "docker-workloads"] as const,
 };
 
@@ -55,6 +56,15 @@ export function useAnsibleJobs() {
     queryKey: queryKeys.ansibleJobs,
     queryFn: ({ signal }) => listAnsibleJobs(signal),
     refetchInterval: (query) => query.state.data?.some((job) => isActiveJob(job.status)) ? 2_000 : false,
+  });
+}
+
+export function useWorkerAvailability() {
+  return useQuery<WorkerAvailabilityDto>({
+    queryKey: queryKeys.workerAvailability,
+    queryFn: ({ signal }) => getWorkerAvailability(signal),
+    staleTime: 2_000,
+    refetchInterval: 5_000,
   });
 }
 
