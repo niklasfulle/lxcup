@@ -9,7 +9,7 @@ export function WorkflowDetailPage() {
   const { jobId } = useParams();
   const job = useAnsibleJob(jobId);
   const active = !terminalStates.has(job.data?.status ?? "queued");
-  const events = useAnsibleJobEvents(jobId, active);
+  const events = useAnsibleJobEvents(jobId, true);
 
   if (job.isLoading) return <section className="panel"><p className="muted">Lade Workflow…</p></section>;
   if (job.error || !job.data) return <section className="panel"><h1>Workflow nicht gefunden</h1><p className="error-state">{job.error?.message ?? "Der Job ist nicht mehr verfügbar."}</p><Link className="text-link" to="/workflows">Zur Workflow-Übersicht</Link></section>;

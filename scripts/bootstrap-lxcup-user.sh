@@ -6,6 +6,20 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
+if ! command -v sudo >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install --yes sudo
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install --assumeyes sudo
+  elif command -v yum >/dev/null 2>&1; then
+    yum install --assumeyes sudo
+  else
+    echo "sudo wurde nicht gefunden und der Paketmanager ist unbekannt." >&2
+    exit 1
+  fi
+fi
+
 username="${1:-lxcup}"
 if [[ ! "${username}" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
   echo "Ungültiger Benutzername: ${username}" >&2
