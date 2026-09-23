@@ -1,0 +1,7 @@
+---
+- name: Verify managed Linux resource connectivity
+  hosts: lxcup_targets
+  gather_facts: false
+  tasks:
+    - name: Verify Ansible connection
+      ansible.builtin.ping:

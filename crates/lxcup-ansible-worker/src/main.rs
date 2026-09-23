@@ -449,6 +449,10 @@ fn playbook(o: AnsibleOperation, k: TargetKind) -> Option<&'static str> {
             Some("playbooks/packages-windows.yml")
         }
         (AnsibleOperation::UpdatePackages, _) => Some("playbooks/packages-linux.yml"),
+        (AnsibleOperation::HealthCheck, TargetKind::WindowsServer) => {
+            Some("playbooks/health-check-windows.yml")
+        }
+        (AnsibleOperation::HealthCheck, _) => Some("playbooks/health-check-linux.yml"),
         _ => None,
     }
 }
@@ -549,7 +553,7 @@ mod tests {
         );
         assert_eq!(
             playbook(AnsibleOperation::HealthCheck, TargetKind::Lxc),
-            None
+            Some("playbooks/health-check-linux.yml")
         );
         assert_eq!(
             playbook(AnsibleOperation::ConfigureTarget, TargetKind::Lxc),

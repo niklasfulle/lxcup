@@ -21,7 +21,7 @@ export function WorkflowDetailPage() {
   return <>
     <header className="page-header"><div><p className="eyebrow">Workflow-Protokoll</p><h1>{currentJob.operation.replaceAll("_", " ")}</h1><p className="muted">Job {currentJob.id}</p></div><Link className="secondary-button" to="/workflows">← Alle Workflows</Link></header>
     <div className="panel-grid"><section className="panel"><h2>Ausführung</h2><dl className="detail-list"><dt>Status</dt><dd><span className={`status-badge ${statusClass(currentJob.status)}`}>{currentJob.status}</span></dd><dt>Modus</dt><dd>{currentJob.mode}</dd><dt>Playbook</dt><dd>{currentJob.playbook} · v{currentJob.playbook_version}</dd></dl></section><section className="panel"><h2>Zeiten</h2><dl className="detail-list"><dt>Erstellt</dt><dd>{new Date(currentJob.created_at).toLocaleString()}</dd><dt>Letzte Änderung</dt><dd>{new Date(currentJob.updated_at).toLocaleString()}</dd><dt>Protokoll</dt><dd>{active ? "wird automatisch aktualisiert" : "abgeschlossen"}</dd></dl></section></div>
-    <output className={`callout ${guidance.level}`} aria-live="polite"><strong>{guidance.title}</strong><p>{guidance.detail}</p></output>
+    <section className={`callout ${guidance.level}`} aria-live="polite"><strong>{guidance.title}</strong><p>{guidance.detail}</p></section>
     <section className="panel"><div className="section-heading"><div><h2>Ausführungsprotokoll</h2><p className="muted">Zeitlich sortierte, audit-sichere Schritte und Fehlerhinweise dieses Jobs.</p></div><span className="muted">{events.data?.length ?? 0} Einträge</span></div>{workflowLogContent(events, rawLog)}</section>
   </>;
 }

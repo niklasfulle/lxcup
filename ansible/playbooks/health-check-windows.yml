@@ -1,0 +1,7 @@
+---
+- name: Verify managed Windows resource connectivity
+  hosts: lxcup_windows_targets
+  gather_facts: false
+  tasks:
+    - name: Verify WinRM connection
+      ansible.windows.win_ping:
