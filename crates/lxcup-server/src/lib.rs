@@ -1442,21 +1442,20 @@ async fn get_ansible_job(
     Path(job_id): Path<String>,
 ) -> Result<Json<ApiEnvelope<AnsibleJobDto>>, ApiError> {
     let id = lxcup_core::AnsibleJobId::from_uuid(parse_uuid(&job_id, "ansible job id")?);
-    let job = match state.ansible.read().await.job(id) {
-        Ok(job) => job,
-        Err(lxcup_ansible::CoordinatorError::NotFound) => {
-            let repositories = state
-                .repositories
-                .clone()
-                .ok_or_else(|| ApiError::not_found("ansible job not found"))?;
-            repositories
-                .ansible_jobs
-                .find_by_id(id)
-                .await
-                .map_err(|_| ApiError::storage())?
-                .ok_or_else(|| ApiError::not_found("ansible job not found"))?
-        }
-        Err(error) => return Err(map_ansible_error(error)),
+    let job = if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .ansible_jobs
+            .find_by_id(id)
+            .await
+            .map_err(|_| ApiError::storage())?
+            .ok_or_else(|| ApiError::not_found("ansible job not found"))?
+    } else {
+        state
+            .ansible
+            .read()
+            .await
+            .job(id)
+            .map_err(map_ansible_error)?
     };
     Ok(Json(envelope(AnsibleJobDto::from(&job))))
 }
@@ -1466,13 +1465,7 @@ async fn get_ansible_job_events(
     Path(job_id): Path<String>,
 ) -> Result<Json<ApiEnvelope<Vec<lxcup_ansible::JobEvent>>>, ApiError> {
     let id = lxcup_core::AnsibleJobId::from_uuid(parse_uuid(&job_id, "ansible job id")?);
-    match state.ansible.read().await.events(id) {
-        Ok(events) => Ok(Json(envelope(events))),
-        Err(lxcup_ansible::CoordinatorError::NotFound) => {
-            let repositories = state
-                .repositories
-                .clone()
-                .ok_or_else(|| ApiError::not_found("ansible job not found"))?;
+    if let Some(repositories) = state.repositories.clone() {
             let mut events = repositories
                 .ansible_jobs
                 .events(id)
@@ -1503,8 +1496,14 @@ async fn get_ansible_job_events(
                 events.push(event);
             }
             Ok(Json(envelope(events)))
-        }
-        Err(error) => Err(map_ansible_error(error)),
+    } else {
+        state
+            .ansible
+            .read()
+            .await
+            .events(id)
+            .map(|events| Json(envelope(events)))
+            .map_err(map_ansible_error)
     }
 }
 
