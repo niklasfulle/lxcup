@@ -31,11 +31,11 @@ use lxcup_ansible::{
 };
 use lxcup_core::{
     ActorRole, AgentRegistration, Container, ContainerAction, ContainerId,
-    ContainerManagementState, DockerWorkload, DockerWorkloadManagementState, Enrollment, EnrollmentId, EnrollmentState, EnvironmentId,
-    EnvironmentStatus, Execution, ExecutionId, Node, NodeId, Permission, PlanStatus,
-    ProxmoxEnvironment, ResourceLifecycle, ResourceTarget, Scan, ScanId, SecretId, SecretKind,
-    SecretScope, SecretValue, Target, TargetId, TargetKind, TargetState, TargetTransport,
-    UpdatePlan, UpdatePlanId,
+    ContainerManagementState, DockerWorkload, DockerWorkloadManagementState, Enrollment,
+    EnrollmentId, EnrollmentState, EnvironmentId, EnvironmentStatus, Execution, ExecutionId, Node,
+    NodeId, Permission, PlanStatus, ProxmoxEnvironment, ResourceLifecycle, ResourceTarget, Scan,
+    ScanId, SecretId, SecretKind, SecretScope, SecretValue, Target, TargetId, TargetKind,
+    TargetState, TargetTransport, UpdatePlan, UpdatePlanId,
 };
 use lxcup_execution::{ExecutionCoordinator, ExecutionRequest, ExecutionStart};
 use lxcup_persistence::Repositories;
@@ -226,6 +226,8 @@ struct RegisteredAgent {
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreateEnrollmentRequest {
     pub container_id: u64,
+    #[serde(default)]
+    pub target_id: Option<TargetId>,
     pub idempotency_key: String,
     #[serde(default = "default_true")]
     pub start_onboarding: bool,
@@ -295,7 +297,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/secrets/{secret_id}/revoke", post(revoke_secret))
         .route("/api/v1/enrollments", post(create_enrollment))
         .route("/api/v1/enrollments/{enrollment_id}", get(get_enrollment))
-        .route("/api/v1/ansible/jobs", get(list_ansible_jobs).post(create_ansible_job))
+        .route(
+            "/api/v1/ansible/jobs",
+            get(list_ansible_jobs).post(create_ansible_job),
+        )
         .route("/api/v1/ansible/jobs/{job_id}", get(get_ansible_job))
         .route(
             "/api/v1/ansible/jobs/{job_id}/events",
@@ -1177,36 +1182,51 @@ async fn create_enrollment(
     // creates the allowlisted deployment job. Development instances without
     // worker configuration still expose the lifecycle request for contract
     // testing; no shell or free-form playbook path is ever accepted here.
-    if request.start_onboarding && configured_ansible_secret_refs().is_ok() {
-        let lifecycle = state
+    if request.start_onboarding && request.target_id.is_some() {
+        let target_id = request.target_id.expect("target id checked above");
+        let target = state
             .store
             .read()
             .await
-            .containers
+            .targets
             .iter()
-            .find(|container| container.id == container_id)
-            .map(|container| match container.management_state {
-                ContainerManagementState::Discovered => ResourceLifecycle::Discovered,
-                ContainerManagementState::Managed => ResourceLifecycle::Managed,
-                ContainerManagementState::Ignored | ContainerManagementState::Disabled => {
-                    ResourceLifecycle::Disabled
-                }
-            })
-            .unwrap_or(ResourceLifecycle::Failed);
+            .find(|target| target.id == target_id)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found("target not found"))?;
+        let lifecycle = match target.state {
+            TargetState::Pending => ResourceLifecycle::Pending,
+            TargetState::Managed => ResourceLifecycle::Managed,
+            TargetState::Disabled => ResourceLifecycle::Disabled,
+        };
         let job_request = AnsibleJobRequest {
             operation: AnsibleOperation::DeployAgent,
-            target: ResourceTarget::Container(container_id),
+            target: ResourceTarget::Target(target_id),
             lifecycle,
             mode: ExecutionMode::Apply,
             parameters: AnsibleParameters::DeployAgent {
                 agent_version: "0.1.0".to_owned(),
             },
-            secret_refs: configured_ansible_secret_refs()?,
+            secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
             idempotency_key: format!("enrollment-{}", dto.id.as_uuid()),
             confirmed: true,
             actor_role: ActorRole::Operator,
         };
-        if let Ok(JobSubmission::Created(job)) = state.ansible.write().await.submit(job_request) {
+        let submission = state
+            .ansible
+            .write()
+            .await
+            .submit(job_request)
+            .map_err(|_| {
+                ApiError::conflict(
+                    "enrollment_job_rejected",
+                    "agent deployment could not be queued",
+                )
+            })?;
+        let is_created = matches!(&submission, JobSubmission::Created(_));
+        let job = match submission {
+            JobSubmission::Created(job) | JobSubmission::Duplicate(job) => job,
+        };
+        if is_created {
             if let Some(repositories) = state.repositories.clone() {
                 repositories
                     .ansible_jobs
@@ -1246,6 +1266,65 @@ async fn get_enrollment(
     Path(enrollment_id): Path<String>,
 ) -> Result<Json<ApiEnvelope<EnrollmentDto>>, ApiError> {
     let enrollment_id = EnrollmentId::from_uuid(parse_uuid(&enrollment_id, "enrollment id")?);
+    let enrollment_exists = state
+        .store
+        .read()
+        .await
+        .enrollments
+        .iter()
+        .find(|enrollment| enrollment.id == enrollment_id)
+        .is_some();
+    if !enrollment_exists {
+        return Err(ApiError::not_found("enrollment not found"));
+    }
+
+    // Reconcile the enrollment view with the deployment job. This keeps the
+    // onboarding page from waiting forever when the worker has already
+    // finished (or rejected) the linked agent deployment.
+    let job_key = format!("enrollment-{}", enrollment_id.as_uuid());
+    let jobs = if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .ansible_jobs
+            .list()
+            .await
+            .map_err(|_| ApiError::storage())?
+    } else {
+        state.ansible.read().await.jobs()
+    };
+    if let Some(job) = jobs.iter().find(|job| job.idempotency_key == job_key) {
+        let target_connected = if let ResourceTarget::Target(target_id) = job.target {
+            state
+                .store
+                .read()
+                .await
+                .targets
+                .iter()
+                .any(|target| target.id == target_id && target.state == TargetState::Managed)
+        } else {
+            false
+        };
+        let mut store = state.store.write().await;
+        if let Some(current) = store
+            .enrollments
+            .iter_mut()
+            .find(|item| item.id == enrollment_id)
+        {
+            match job.status {
+                AnsibleJobStatus::Failed => current
+                    .fail("Agent-Deployment fehlgeschlagen. Details stehen im Workflow-Protokoll."),
+                AnsibleJobStatus::Applying | AnsibleJobStatus::Succeeded
+                    if current.state == EnrollmentState::Discovering =>
+                {
+                    let _ = current.transition_to(EnrollmentState::InstallingAgent);
+                }
+                AnsibleJobStatus::Succeeded if target_connected => {
+                    let _ = current.transition_to(EnrollmentState::RegisteringAgent);
+                    let _ = current.transition_to(EnrollmentState::Connected);
+                }
+                _ => {}
+            }
+        }
+    }
     let store = state.store.read().await;
     let enrollment = store
         .enrollments
@@ -1311,7 +1390,9 @@ async fn list_ansible_jobs(
     } else {
         state.ansible.read().await.jobs()
     };
-    Ok(Json(envelope(jobs.iter().map(AnsibleJobDto::from).collect())))
+    Ok(Json(envelope(
+        jobs.iter().map(AnsibleJobDto::from).collect(),
+    )))
 }
 
 async fn create_ansible_job(
@@ -1476,36 +1557,38 @@ async fn get_ansible_job_events(
 ) -> Result<Json<ApiEnvelope<Vec<lxcup_ansible::JobEvent>>>, ApiError> {
     let id = lxcup_core::AnsibleJobId::from_uuid(parse_uuid(&job_id, "ansible job id")?);
     if let Some(repositories) = state.repositories.clone() {
-            let mut events = repositories
+        let mut events = repositories
+            .ansible_jobs
+            .events(id)
+            .await
+            .map_err(|_| ApiError::storage())?;
+        let job = repositories
+            .ansible_jobs
+            .find_by_id(id)
+            .await
+            .map_err(|_| ApiError::storage())?
+            .ok_or_else(|| ApiError::not_found("ansible job not found"))?;
+        if job.status == AnsibleJobStatus::Failed
+            && !events
+                .iter()
+                .any(|event| matches!(&event.event, JobEventKind::Failed { .. }))
+        {
+            let event = JobEvent {
+                sequence: events.len() as u64 + 1,
+                job_id: id,
+                event: JobEventKind::Failed {
+                    code: JobFailureCode::WorkerUnavailable,
+                },
+                created_at: chrono::Utc::now(),
+            };
+            repositories
                 .ansible_jobs
-                .events(id)
+                .append_event(&event)
                 .await
                 .map_err(|_| ApiError::storage())?;
-            let job = repositories
-                .ansible_jobs
-                .find_by_id(id)
-                .await
-                .map_err(|_| ApiError::storage())?
-                .ok_or_else(|| ApiError::not_found("ansible job not found"))?;
-            if job.status == AnsibleJobStatus::Failed
-                && !events.iter().any(|event| matches!(&event.event, JobEventKind::Failed { .. }))
-            {
-                let event = JobEvent {
-                    sequence: events.len() as u64 + 1,
-                    job_id: id,
-                    event: JobEventKind::Failed {
-                        code: JobFailureCode::WorkerUnavailable,
-                    },
-                    created_at: chrono::Utc::now(),
-                };
-                repositories
-                    .ansible_jobs
-                    .append_event(&event)
-                    .await
-                    .map_err(|_| ApiError::storage())?;
-                events.push(event);
-            }
-            Ok(Json(envelope(events)))
+            events.push(event);
+        }
+        Ok(Json(envelope(events)))
     } else {
         state
             .ansible
@@ -2726,12 +2809,35 @@ pub struct DockerWorkloadDto {
 
 impl DockerWorkloadDto {
     fn discovered(host_container_id: ContainerId, container: DockerContainerInfo) -> Self {
-        Self { host_container_id, id: container.id, name: container.name, image: container.image, state: container.state, status: container.status, management_state: "discovered".to_owned(), discovered_at: chrono::Utc::now() }
+        Self {
+            host_container_id,
+            id: container.id,
+            name: container.name,
+            image: container.image,
+            state: container.state,
+            status: container.status,
+            management_state: "discovered".to_owned(),
+            discovered_at: chrono::Utc::now(),
+        }
     }
 }
 
 impl From<DockerWorkload> for DockerWorkloadDto {
-    fn from(item: DockerWorkload) -> Self { Self { host_container_id: item.host_container_id, id: item.id, name: item.name, image: item.image, state: item.state, status: item.status, management_state: match item.management_state { DockerWorkloadManagementState::Discovered => "discovered".to_owned(), DockerWorkloadManagementState::Managed => "managed".to_owned() }, discovered_at: item.discovered_at } }
+    fn from(item: DockerWorkload) -> Self {
+        Self {
+            host_container_id: item.host_container_id,
+            id: item.id,
+            name: item.name,
+            image: item.image,
+            state: item.state,
+            status: item.status,
+            management_state: match item.management_state {
+                DockerWorkloadManagementState::Discovered => "discovered".to_owned(),
+                DockerWorkloadManagementState::Managed => "managed".to_owned(),
+            },
+            discovered_at: item.discovered_at,
+        }
+    }
 }
 
 async fn list_docker_containers(
@@ -2740,11 +2846,30 @@ async fn list_docker_containers(
 ) -> Result<Json<ApiEnvelope<Vec<DockerWorkloadDto>>>, ApiError> {
     let container_id = parse_container_id(&container_id)?;
     if let Some(repositories) = state.repositories.as_ref() {
-        let workloads = repositories.docker_workloads.list(container_id).await.map_err(|_| ApiError::dependency("docker_inventory_unavailable", "Docker-Inventar konnte nicht gelesen werden"))?.into_iter().map(DockerWorkloadDto::from).collect();
+        let workloads = repositories
+            .docker_workloads
+            .list(container_id)
+            .await
+            .map_err(|_| {
+                ApiError::dependency(
+                    "docker_inventory_unavailable",
+                    "Docker-Inventar konnte nicht gelesen werden",
+                )
+            })?
+            .into_iter()
+            .map(DockerWorkloadDto::from)
+            .collect();
         return Ok(Json(envelope(workloads)));
     }
-    let workloads = state.store.read().await.docker_workloads.values()
-        .filter(|item| item.host_container_id == container_id).cloned().collect();
+    let workloads = state
+        .store
+        .read()
+        .await
+        .docker_workloads
+        .values()
+        .filter(|item| item.host_container_id == container_id)
+        .cloned()
+        .collect();
     Ok(Json(envelope(workloads)))
 }
 
@@ -2753,28 +2878,86 @@ async fn discover_docker_containers(
     Path(container_id): Path<String>,
 ) -> Result<Json<ApiEnvelope<Vec<DockerWorkloadDto>>>, ApiError> {
     let container_id = parse_container_id(&container_id)?;
-    let agent = state.agents.read().await.get(&container_id).cloned().ok_or_else(|| ApiError::not_found("agent not registered"))?;
-    let discovered = agent.client.docker_containers().await.map_err(|_| ApiError::dependency("docker_discovery_failed", "Docker-Inventar konnte vom Agenten nicht gelesen werden"))?;
+    let agent = state
+        .agents
+        .read()
+        .await
+        .get(&container_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("agent not registered"))?;
+    let discovered = agent.client.docker_containers().await.map_err(|_| {
+        ApiError::dependency(
+            "docker_discovery_failed",
+            "Docker-Inventar konnte vom Agenten nicht gelesen werden",
+        )
+    })?;
     if let Some(repositories) = state.repositories.as_ref() {
         for container in &discovered {
-            let workload = DockerWorkload { host_container_id: container_id, id: container.id.clone(), name: container.name.clone(), image: container.image.clone(), state: container.state.clone(), status: container.status.clone(), management_state: DockerWorkloadManagementState::Discovered, discovered_at: chrono::Utc::now() };
-            repositories.docker_workloads.upsert_discovered(&workload).await.map_err(|_| ApiError::dependency("docker_inventory_unavailable", "Docker-Inventar konnte nicht gespeichert werden"))?;
+            let workload = DockerWorkload {
+                host_container_id: container_id,
+                id: container.id.clone(),
+                name: container.name.clone(),
+                image: container.image.clone(),
+                state: container.state.clone(),
+                status: container.status.clone(),
+                management_state: DockerWorkloadManagementState::Discovered,
+                discovered_at: chrono::Utc::now(),
+            };
+            repositories
+                .docker_workloads
+                .upsert_discovered(&workload)
+                .await
+                .map_err(|_| {
+                    ApiError::dependency(
+                        "docker_inventory_unavailable",
+                        "Docker-Inventar konnte nicht gespeichert werden",
+                    )
+                })?;
         }
-        let workloads = repositories.docker_workloads.list(container_id).await.map_err(|_| ApiError::dependency("docker_inventory_unavailable", "Docker-Inventar konnte nicht gelesen werden"))?.into_iter().map(DockerWorkloadDto::from).collect();
-        state.publish(ApiEvent::status("docker", container_id.value().to_string(), "discovered"));
+        let workloads = repositories
+            .docker_workloads
+            .list(container_id)
+            .await
+            .map_err(|_| {
+                ApiError::dependency(
+                    "docker_inventory_unavailable",
+                    "Docker-Inventar konnte nicht gelesen werden",
+                )
+            })?
+            .into_iter()
+            .map(DockerWorkloadDto::from)
+            .collect();
+        state.publish(ApiEvent::status(
+            "docker",
+            container_id.value().to_string(),
+            "discovered",
+        ));
         return Ok(Json(envelope(workloads)));
     }
     let mut store = state.store.write().await;
     for container in discovered {
         let key = (container_id, container.id.clone());
-        let management_state = store.docker_workloads.get(&key).map(|item| item.management_state.clone()).unwrap_or_else(|| "discovered".to_owned());
+        let management_state = store
+            .docker_workloads
+            .get(&key)
+            .map(|item| item.management_state.clone())
+            .unwrap_or_else(|| "discovered".to_owned());
         let mut workload = DockerWorkloadDto::discovered(container_id, container);
         workload.management_state = management_state;
         store.docker_workloads.insert(key, workload);
     }
-    let workloads = store.docker_workloads.values().filter(|item| item.host_container_id == container_id).cloned().collect();
+    let workloads = store
+        .docker_workloads
+        .values()
+        .filter(|item| item.host_container_id == container_id)
+        .cloned()
+        .collect();
     drop(store);
-    state.publish(ApiEvent::status("docker", container_id.value().to_string(), "discovered"));
+    state.publish(ApiEvent::status(
+        "docker",
+        container_id.value().to_string(),
+        "discovered",
+    ));
     Ok(Json(envelope(workloads)))
 }
 
@@ -2784,33 +2967,96 @@ async fn adopt_docker_container(
 ) -> Result<Json<ApiEnvelope<DockerWorkloadDto>>, ApiError> {
     let container_id = parse_container_id(&container_id)?;
     if let Some(repositories) = state.repositories.as_ref() {
-        if !repositories.docker_workloads.adopt(container_id, &docker_id).await.map_err(|_| ApiError::dependency("docker_inventory_unavailable", "Docker-Inventar konnte nicht aktualisiert werden"))? { return Err(ApiError::not_found("Docker-Container zuerst entdecken")); }
-        let item = repositories.docker_workloads.list(container_id).await.map_err(|_| ApiError::dependency("docker_inventory_unavailable", "Docker-Inventar konnte nicht gelesen werden"))?.into_iter().find(|item| item.id == docker_id).ok_or_else(|| ApiError::not_found("Docker-Container nicht im Inventar"))?;
+        if !repositories
+            .docker_workloads
+            .adopt(container_id, &docker_id)
+            .await
+            .map_err(|_| {
+                ApiError::dependency(
+                    "docker_inventory_unavailable",
+                    "Docker-Inventar konnte nicht aktualisiert werden",
+                )
+            })?
+        {
+            return Err(ApiError::not_found("Docker-Container zuerst entdecken"));
+        }
+        let item = repositories
+            .docker_workloads
+            .list(container_id)
+            .await
+            .map_err(|_| {
+                ApiError::dependency(
+                    "docker_inventory_unavailable",
+                    "Docker-Inventar konnte nicht gelesen werden",
+                )
+            })?
+            .into_iter()
+            .find(|item| item.id == docker_id)
+            .ok_or_else(|| ApiError::not_found("Docker-Container nicht im Inventar"))?;
         return Ok(Json(envelope(DockerWorkloadDto::from(item))));
     }
     let mut store = state.store.write().await;
-    let workload = store.docker_workloads.get_mut(&(container_id, docker_id)).ok_or_else(|| ApiError::not_found("Docker-Container zuerst entdecken"))?;
+    let workload = store
+        .docker_workloads
+        .get_mut(&(container_id, docker_id))
+        .ok_or_else(|| ApiError::not_found("Docker-Container zuerst entdecken"))?;
     workload.management_state = "managed".to_owned();
     Ok(Json(envelope(workload.clone())))
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct RemoveDockerWorkloadRequest { confirmed: bool }
+struct RemoveDockerWorkloadRequest {
+    confirmed: bool,
+}
 
 async fn remove_docker_container(
     State(state): State<ApiState>,
     Path((container_id, docker_id)): Path<(String, String)>,
     JsonBody(request): JsonBody<RemoveDockerWorkloadRequest>,
 ) -> Result<StatusCode, ApiError> {
-    if !request.confirmed { return Err(ApiError::bad_request("confirmation_required", "Entfernen muss ausdrücklich bestätigt werden")); }
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "confirmation_required",
+            "Entfernen muss ausdrücklich bestätigt werden",
+        ));
+    }
     let container_id = parse_container_id(&container_id)?;
     if let Some(repositories) = state.repositories.as_ref() {
-        if !repositories.docker_workloads.remove(container_id, &docker_id).await.map_err(|_| ApiError::dependency("docker_inventory_unavailable", "Docker-Inventar konnte nicht aktualisiert werden"))? { return Err(ApiError::not_found("Docker-Container nicht im Inventar")); }
-        state.publish(ApiEvent::status("docker", container_id.value().to_string(), "removed"));
+        if !repositories
+            .docker_workloads
+            .remove(container_id, &docker_id)
+            .await
+            .map_err(|_| {
+                ApiError::dependency(
+                    "docker_inventory_unavailable",
+                    "Docker-Inventar konnte nicht aktualisiert werden",
+                )
+            })?
+        {
+            return Err(ApiError::not_found("Docker-Container nicht im Inventar"));
+        }
+        state.publish(ApiEvent::status(
+            "docker",
+            container_id.value().to_string(),
+            "removed",
+        ));
         return Ok(StatusCode::NO_CONTENT);
     }
-    if state.store.write().await.docker_workloads.remove(&(container_id, docker_id)).is_none() { return Err(ApiError::not_found("Docker-Container nicht im Inventar")); }
-    state.publish(ApiEvent::status("docker", container_id.value().to_string(), "removed"));
+    if state
+        .store
+        .write()
+        .await
+        .docker_workloads
+        .remove(&(container_id, docker_id))
+        .is_none()
+    {
+        return Err(ApiError::not_found("Docker-Container nicht im Inventar"));
+    }
+    state.publish(ApiEvent::status(
+        "docker",
+        container_id.value().to_string(),
+        "removed",
+    ));
     Ok(StatusCode::NO_CONTENT)
 }
 
