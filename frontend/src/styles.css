@@ -101,6 +101,7 @@
   .eyebrow { @apply mb-1 text-lxcup-primary; }
   .muted { color: var(--muted); }
   .error-state { @apply font-semibold; color: var(--error); }
+  .failure-code { @apply inline-block border px-1.5 py-0.5 text-[11px] font-semibold; color: var(--error); border-color: var(--error); }
   .success-state { @apply border px-2 py-1.5 font-medium; color: var(--success); border-color: #b7e7d0; background: var(--success-soft); }
   .api-alert { @apply mb-3 border px-3 py-2 font-medium; color: var(--error); border-color: #edb7c0; background: var(--error-soft); }
 

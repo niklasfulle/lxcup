@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { createAnsibleJob, type AnsibleExecutionMode, type AnsibleOperation, type CreateAnsibleJobRequest } from "../api";
-import { queryKeys, useAnsibleJobs, useTargets } from "../queries";
+import { queryKeys, useAnsibleJobEvents, useAnsibleJobs, useTargets } from "../queries";
 
 const operations: Array<{ value: AnsibleOperation; label: string; risk: string }> = [
   { value: "deploy_agent", label: "Agent installieren", risk: "Ändernd" },
@@ -111,10 +111,19 @@ export function WorkflowsPage() {
       <section className="panel">
         <div className="section-heading"><div><h2>Workflow-Protokolle</h2><p className="muted">Alle Jobs mit ihrem audit-sicheren Ausführungsprotokoll.</p></div><span className="muted">{jobs.data?.length ?? 0} Jobs</span></div>
         <div className="callout info"><strong>Ausführungszustand</strong><p><b>queued</b> bedeutet: Job wartet, er wird noch nicht bearbeitet. Erst <b>checking</b>, <b>planned</b> oder <b>applying</b> bedeutet, dass ein Worker aktiv arbeitet. In diesem Entwicklungs-Stack ist derzeit kein ausführender Ansible-Worker gestartet.</p></div>
-        {jobs.isLoading ? <p className="muted">Lade Workflows…</p> : jobs.error ? <p className="error-state" role="alert">{jobs.error.message}</p> : !jobs.data?.length ? <p className="empty-state">Noch keine Workflows gestartet.</p> : <div className="table-wrap"><table><thead><tr><th>Workflow</th><th>Ziel</th><th>Modus</th><th>Status</th><th>Bearbeitung</th><th>Gestartet</th></tr></thead><tbody>{jobs.data.map((job) => <tr key={job.id}><td><Link className="text-link" to={`/workflows/${job.id}`}>{job.operation.replaceAll("_", " ")}</Link></td><td>{workflowTarget(job)}</td><td>{job.mode}</td><td><span className={`status-badge ${job.status === "succeeded" ? "success" : job.status === "failed" || job.status === "aborted" ? "neutral" : "pending"}`}>{job.status}</span></td><td>{jobProcessingLabel(job.status)}</td><td>{new Date(job.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>}
+        {jobs.isLoading ? <p className="muted">Lade Workflows…</p> : jobs.error ? <p className="error-state" role="alert">{jobs.error.message}</p> : !jobs.data?.length ? <p className="empty-state">Noch keine Workflows gestartet.</p> : <div className="table-wrap"><table><thead><tr><th>Workflow</th><th>Ziel</th><th>Modus</th><th>Status</th><th>Fehlerursache</th><th>Bearbeitung</th><th>Gestartet</th></tr></thead><tbody>{jobs.data.map((job) => <tr key={job.id}><td><Link className="text-link" to={`/workflows/${job.id}`}>{job.operation.replaceAll("_", " ")}</Link></td><td>{workflowTarget(job)}</td><td>{job.mode}</td><td><span className={`status-badge ${job.status === "succeeded" ? "success" : job.status === "failed" || job.status === "aborted" ? "neutral" : "pending"}`}>{job.status}</span></td><td>{job.status === "failed" || job.status === "reconcile_required" ? <JobFailureSummary jobId={job.id} /> : <span className="muted">—</span>}</td><td>{jobProcessingLabel(job.status)}</td><td>{new Date(job.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>}
       </section>
     </>
   );
+}
+
+function JobFailureSummary({ jobId }: { jobId: string }) {
+  const events = useAnsibleJobEvents(jobId, false);
+  const failure = events.data?.slice().reverse().find((event) => event.event.kind === "failed");
+  if (events.isLoading) return <span className="muted">wird geladen…</span>;
+  if (failure?.event.code) return <span className="failure-code" title="Fehlercode aus dem Worker-Protokoll">{failure.event.code}</span>;
+  if (events.error) return <span className="muted">Protokoll nicht verfügbar</span>;
+  return <span className="muted">kein Fehlercode gemeldet</span>;
 }
 
 function workflowTarget(job: { target: { container: number } | { node: string } | { target: string } }) {
