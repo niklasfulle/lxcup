@@ -36,3 +36,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Datenbank und Secret-Store geleert. Die Anwendung legt Migrationen beim nächsten Start wieder an."
+Write-Host "Starte Server und Worker in der richtigen Reihenfolge neu ..."
+docker compose restart lxcup-server
+if ($LASTEXITCODE -ne 0) {
+    throw "lxcup-server konnte nicht neu gestartet werden (Exit-Code $LASTEXITCODE)."
+}
+docker compose up -d --force-recreate lxcup-worker
+if ($LASTEXITCODE -ne 0) {
+    throw "lxcup-worker konnte nicht neu erstellt werden (Exit-Code $LASTEXITCODE)."
+}
+
+Write-Host "Reset abgeschlossen. Servermigrationen und Worker sind wieder aktiv."
