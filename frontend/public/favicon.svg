@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>lxcup</title>
+  <rect width="64" height="64" rx="8" fill="#2f72e8"/>
+  <path d="M14 14h10v27h14v9H14z" fill="#fff"/>
+  <path d="M41 14h10L43 31l9 19H41l-7-14-7 14H17l9-19-8-17h10l8 14z" fill="#fff"/>
+</svg>
