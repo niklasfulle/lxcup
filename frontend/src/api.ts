@@ -219,6 +219,7 @@ export class ApiClient {
       try {
         const response = await fetch(`${this.baseUrl}${path}`, {
           ...init,
+          cache: "no-store",
           headers: { accept: "application/json", ...init?.headers },
         });
         const text = await response.text();
