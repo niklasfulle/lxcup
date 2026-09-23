@@ -232,7 +232,8 @@ async fn invoke(
             host["ansible_ssh_private_key_file"] = serde_json::json!(key)
         }
         (TargetTransport::Ssh, SecretKind::SshPassword) => {
-            host["ansible_password"] = serde_json::json!(credential.expose())
+            host["ansible_password"] = serde_json::json!(credential.expose());
+            host["ansible_become_password"] = serde_json::json!(credential.expose())
         }
         _ => return Err(JobFailureCode::InvalidCredentials),
     };
