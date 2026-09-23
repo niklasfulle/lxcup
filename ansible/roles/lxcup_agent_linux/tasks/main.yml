@@ -134,11 +134,19 @@
   failed_when: false
   when: lxcup_agent_health.status | default(0) != 200
 
+- name: Collect listening TCP sockets after health failure
+  ansible.builtin.command: ss --listen --tcp --numeric
+  register: lxcup_agent_sockets
+  changed_when: false
+  failed_when: false
+  when: lxcup_agent_health.status | default(0) != 200
+
 - name: Report sanitized agent health failure
   ansible.builtin.fail:
     msg: >-
       Agent healthcheck failed after 5 attempts
       (status={{ lxcup_agent_health.status | default('unreachable') }},
       message={{ lxcup_agent_health.msg | default('no response') }},
-      service={{ lxcup_agent_service_status.stdout | default('status unavailable') }}).
+      service={{ lxcup_agent_service_status.stdout | default('status unavailable') }},
+      sockets={{ lxcup_agent_sockets.stdout | default('socket listing unavailable') }}).
   when: lxcup_agent_health.status | default(0) != 200
