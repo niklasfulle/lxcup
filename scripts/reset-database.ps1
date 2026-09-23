@@ -8,10 +8,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $Force) {
-    Write-Host "ACHTUNG: Das leert die komplette Datenbank im Compose-Service '$Service'."
-    Write-Host "Alle Daten, inklusive SQLx-Migrationshistorie, werden gelöscht."
-    $confirmation = Read-Host "Zum Fortfahren exakt 'DELETE $Service' eingeben"
-    if ($confirmation -cne "DELETE $Service") {
+    Write-Host "ACHTUNG: Das leert die komplette Datenbank im Compose-Service '$Service' und den lxcup-Secret-Store."
+    Write-Host "Alle Daten, Secret-Werte und die SQLx-Migrationshistorie werden gelöscht."
+    $confirmation = Read-Host "Zum Fortfahren exakt 'DELETE $Service AND SECRETS' eingeben"
+    if ($confirmation -cne "DELETE $Service AND SECRETS") {
         Write-Host "Abgebrochen."
         exit 1
     }
@@ -29,4 +29,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "Datenbank konnte nicht geleert werden (Exit-Code $LASTEXITCODE). Läuft der Compose-Stack?"
 }
 
-Write-Host "Datenbank geleert. Die Anwendung legt ihre Migrationen beim nächsten Start wieder an."
+Write-Host "Leere Secret-Store ..."
+docker compose run --rm --no-deps --entrypoint /bin/sh lxcup-server -lc 'find /var/lib/lxcup/secrets -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +'
+if ($LASTEXITCODE -ne 0) {
+    throw "Secret-Store konnte nicht geleert werden (Exit-Code $LASTEXITCODE)."
+}
+
+Write-Host "Datenbank und Secret-Store geleert. Die Anwendung legt Migrationen beim nächsten Start wieder an."
