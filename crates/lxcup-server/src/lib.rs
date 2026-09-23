@@ -27,7 +27,7 @@ use lxcup_agent::{
 };
 use lxcup_ansible::{
     AnsibleJob, AnsibleJobCoordinator, AnsibleJobRequest, AnsibleJobStatus, AnsibleOperation,
-    AnsibleParameters, ExecutionMode, JobSubmission,
+    AnsibleParameters, ExecutionMode, JobEvent, JobEventKind, JobFailureCode, JobSubmission,
 };
 use lxcup_core::{
     ActorRole, AgentRegistration, Container, ContainerAction, ContainerId,
@@ -1473,11 +1473,35 @@ async fn get_ansible_job_events(
                 .repositories
                 .clone()
                 .ok_or_else(|| ApiError::not_found("ansible job not found"))?;
-            let events = repositories
+            let mut events = repositories
                 .ansible_jobs
                 .events(id)
                 .await
                 .map_err(|_| ApiError::storage())?;
+            let job = repositories
+                .ansible_jobs
+                .find_by_id(id)
+                .await
+                .map_err(|_| ApiError::storage())?
+                .ok_or_else(|| ApiError::not_found("ansible job not found"))?;
+            if job.status == AnsibleJobStatus::Failed
+                && !events.iter().any(|event| matches!(&event.event, JobEventKind::Failed { .. }))
+            {
+                let event = JobEvent {
+                    sequence: events.len() as u64 + 1,
+                    job_id: id,
+                    event: JobEventKind::Failed {
+                        code: JobFailureCode::WorkerUnavailable,
+                    },
+                    created_at: chrono::Utc::now(),
+                };
+                repositories
+                    .ansible_jobs
+                    .append_event(&event)
+                    .await
+                    .map_err(|_| ApiError::storage())?;
+                events.push(event);
+            }
             Ok(Json(envelope(events)))
         }
         Err(error) => Err(map_ansible_error(error)),
