@@ -7,7 +7,7 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes ansible-core ca-certificates curl openssh-client \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 lxcup
+    && useradd --system --uid 10001 --create-home --home-dir /home/lxcup lxcup
 COPY --from=build /src/target/release/lxcup-ansible-worker /usr/local/bin/lxcup-ansible-worker
 USER lxcup
 ENTRYPOINT ["/usr/local/bin/lxcup-ansible-worker"]
