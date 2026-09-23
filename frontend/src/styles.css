@@ -202,6 +202,8 @@
   .job-log p { @apply mb-0 mt-1 text-xs; color: var(--muted); }
   .job-log time { @apply text-right text-xs; }
   .job-log-sequence { @apply grid h-6 w-6 place-items-center bg-lxcup-primary text-xs font-bold text-white; }
+  .job-log-heading { @apply mb-2 mt-6 text-sm; }
+  .job-raw-log { @apply max-h-[32rem] overflow-auto whitespace-pre-wrap break-words border p-4 text-xs leading-relaxed; border-color: var(--line); background: #111b2d; color: var(--ink); }
   .enrollment-panel { @apply grid max-w-4xl gap-4; }
   .enrollment-steps { @apply m-0 grid list-none gap-2 p-0; }
   .enrollment-steps li { @apply flex items-center gap-2 text-sm; color: var(--muted); }
