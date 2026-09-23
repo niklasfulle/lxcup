@@ -54,9 +54,9 @@ export function SecretsPage() {
       <section className="panel">
         <h2>Secret hinzufügen</h2>
         <form className="workflow-grid" onSubmit={submit}>
-          <label>Name<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" required /></label>
-          <label>Typ<select value={kind} onChange={(event) => setKind(event.target.value as SecretKind)}>{secretKinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
-          <label>Wert<input type="password" value={value} onChange={(event) => setValue(event.target.value)} autoComplete="new-password" required /></label>
+          <label title="Interner Anzeigename. Der eigentliche Secret-Wert wird später nicht angezeigt.">Name<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" required /></label>
+          <label title="Der Typ legt fest, für welchen Verbindungs- oder Authentifizierungszweck das Secret verwendet werden darf.">Typ<select value={kind} onChange={(event) => setKind(event.target.value as SecretKind)}>{secretKinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+          <label title="Der Wert wird verschlüsselt gespeichert und nach dem Speichern nicht mehr ausgegeben.">Wert<input type="password" value={value} onChange={(event) => setValue(event.target.value)} autoComplete="new-password" required /></label>
           <button className="primary-button" type="submit" disabled={create.isPending}>{create.isPending ? "Speichert…" : "Secret speichern"}</button>
         </form>
         {create.error ? <p className="error-state" role="alert">{formatSecretError(create.error)}</p> : null}

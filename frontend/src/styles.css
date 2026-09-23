@@ -136,7 +136,6 @@
   .inline-secret-editor { @apply my-3 grid gap-3 border p-3; border-color: var(--line); background: var(--panel); }
   .workflow-grid label, .workflow-field { @apply grid gap-1 text-xs font-semibold; color: var(--muted); }
   .field-label { @apply inline-flex items-center gap-1; }
-  .field-info { @apply inline-flex h-3.5 w-3.5 cursor-help items-center justify-center rounded-full border text-[10px] font-bold; color: var(--primary); border-color: var(--primary); }
   .workflow-field { @apply max-w-lg; }
   .workflow-summary { @apply flex flex-wrap gap-4 border-l-4 px-3 py-2 text-sm; border-color: var(--primary); background: var(--paper-muted); }
   .confirm-field { @apply flex items-center gap-2 text-sm font-medium; }

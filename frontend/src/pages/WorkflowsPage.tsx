@@ -78,24 +78,24 @@ export function WorkflowsPage() {
       <section className="panel workflow-panel">
         <form onSubmit={submit}>
           <div className="workflow-grid">
-            <label> Ziel
+            <label title="Das registrierte Ziel, gegen das der freigegebene Workflow ausgeführt wird."> Ziel
               <select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
                 <option value="">Ziel auswählen</option>
                 {(targets.data ?? []).map((target) => <option key={target.id} value={target.id}>{target.name} · {target.kind} · {target.address}</option>)}
               </select>
             </label>
-            <label> Operation
+            <label title="Die erlaubte, fest registrierte Aktion des Workers."> Operation
               <select value={operation} onChange={(event) => setOperation(event.target.value as AnsibleOperation)}>
                 {operations.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
               </select>
             </label>
-            <label> Modus
+            <label title="Check prüft, Plan erstellt eine Vorschau, Apply führt aus und Reconcile gleicht einen unklaren Zustand ab."> Modus
               <select value={mode} onChange={(event) => setMode(event.target.value as AnsibleExecutionMode)} aria-describedby="mode-help">
                 {modes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
               </select>
             </label>
           </div>
-          {operation === "update_packages" ? <label className="workflow-field"> Validierte Pakete aus dem Plan
+          {operation === "update_packages" ? <label className="workflow-field" title="Nur Pakete verwenden, die bereits durch einen Update-Plan validiert wurden."> Validierte Pakete aus dem Plan
             <input value={packages} onChange={(event) => setPackages(event.target.value)} placeholder="z. B. nginx,curl" aria-describedby="package-help" />
             <small id="package-help" className="muted">Die API akzeptiert ausschließlich bereits validierte Planpakete.</small>
           </label> : null}
