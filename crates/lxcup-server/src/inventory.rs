@@ -1,21 +1,27 @@
-use super::*;
-
-pub(super) async fn list_node_containers(
-    State(state): State<ApiState>,
-    Path(node_id): Path<String>,
-) -> Result<Json<ApiEnvelope<Vec<ContainerDto>>>, ApiError> {
-    let node_id = parse_node_id(&node_id)?;
-    let containers = state
-        .store
-        .read()
-        .await
-        .containers
-        .iter()
-        .filter(|container| container.node_id == node_id)
-        .map(ContainerDto::from)
-        .collect();
-    Ok(Json(envelope(containers)))
-}
+use super::{
+    ApiEnvelope, ApiError, ApiEvent, ApiState, ContainerDto, ExecutionDto, ExecutionResultDto,
+    PlanDto, Scan, ScanDto, envelope, parse_container_id, parse_uuid, truncate,
+};
+use axum::{
+    Json,
+    extract::{Json as JsonBody, Path, State},
+    http::{HeaderMap, Method, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
+use lxcup_agent::{AgentAction, AgentCommandRequest};
+use lxcup_core::{ActorRole, PlanStatus, ScanId};
+use lxcup_execution::ExecutionRequest;
+use lxcup_execution::ExecutionStart;
+use lxcup_planner::{DryRunChange, PlannerInput, UpdatePlanner};
+use serde::Deserialize;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
+};
 
 pub(super) async fn list_containers(
     State(state): State<ApiState>,
@@ -79,6 +85,52 @@ pub(super) async fn start_scan(
         "pending",
     ));
     Ok((StatusCode::ACCEPTED, Json(envelope(dto))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_config_distinguishes_viewer_read_access_from_mutations() {
+        let config = AuthConfig::disabled().required(true).with_tokens(
+            Some("viewer".to_owned()),
+            Some("operator".to_owned()),
+            Some("admin".to_owned()),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer viewer".parse().unwrap());
+        assert_eq!(config.role(&headers), Some(ActorRole::Viewer));
+        assert!(config.allows(&Method::GET, &headers));
+        assert!(!config.allows(&Method::POST, &headers));
+        headers.insert("authorization", "Bearer operator".parse().unwrap());
+        assert_eq!(config.role(&headers), Some(ActorRole::Operator));
+        assert!(config.allows(&Method::POST, &headers));
+        headers.insert("authorization", "Bearer admin".parse().unwrap());
+        assert_eq!(config.role(&headers), Some(ActorRole::Admin));
+        assert!(config.allows(&Method::DELETE, &headers));
+        headers.insert("authorization", "Bearer unknown".parse().unwrap());
+        assert_eq!(config.role(&headers), None);
+        assert!(!config.allows(&Method::GET, &headers));
+    }
+
+    #[test]
+    fn metrics_render_exposes_all_counters() {
+        let metrics = ApiMetrics::default();
+        metrics.requests_total.fetch_add(2, Ordering::Relaxed);
+        metrics.requests_failed.fetch_add(1, Ordering::Relaxed);
+        metrics.events_published.fetch_add(3, Ordering::Relaxed);
+        let rendered = metrics.render();
+        assert!(rendered.contains("lxcup_http_requests_total 2"));
+        assert!(rendered.contains("lxcup_http_requests_failed_total 1"));
+        assert!(rendered.contains("lxcup_events_published_total 3"));
+        assert!(rendered.contains("lxcup_uptime_seconds"));
+    }
+
+    #[test]
+    fn default_authenticated_is_true() {
+        assert!(default_authenticated());
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -238,9 +290,9 @@ pub(super) async fn ready_health(State(state): State<ApiState>) -> impl IntoResp
         .store
         .read()
         .await
-        .nodes
+        .targets
         .iter()
-        .all(|node| node.status != lxcup_core::NodeStatus::Disconnected);
+        .all(|target| target.state != lxcup_core::TargetState::Disabled);
     let status = if ready {
         StatusCode::OK
     } else {

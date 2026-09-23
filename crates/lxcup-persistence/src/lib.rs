@@ -10,9 +10,9 @@ pub mod seeds;
 
 pub use repositories::{
     AgentRegistrationRepository, AnsibleJobRepository, AuditEvent, AuditEventRepository,
-    ContainerRepository, DockerWorkloadRepository, EnvironmentRepository, ExecutionEvent, ExecutionRepository,
-    ExecutionResultRecord, NodeRepository, Repositories, RepositoryError, ScanRepository,
-    TargetRepository, UpdatePlanRepository,
+    ContainerRepository, DockerWorkloadRepository, EnvironmentRepository, ExecutionEvent,
+    ExecutionRepository, ExecutionResultRecord, NodeRepository, Repositories, RepositoryError,
+    ScanRepository, TargetRepository, UpdatePlanRepository,
 };
 
 /// Konfiguration für eine PostgreSQL-Verbindung.

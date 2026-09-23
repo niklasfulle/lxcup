@@ -312,14 +312,26 @@ impl AnsibleJob {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum JobEventKind {
     Queued,
-    StatusChanged { status: AnsibleJobStatus },
-    TaskStarted { task: String },
-    TaskFinished { task: String, changed: bool },
-    Failed { code: JobFailureCode },
+    StatusChanged {
+        status: AnsibleJobStatus,
+    },
+    TaskStarted {
+        task: String,
+    },
+    TaskFinished {
+        task: String,
+        changed: bool,
+    },
+    Failed {
+        code: JobFailureCode,
+    },
     ReconcileRequired,
     /// Redacted output emitted by the isolated worker. Secret values are never
     /// included; the UI may safely render this as the job's technical log.
-    WorkerLog { source: String, message: String },
+    WorkerLog {
+        source: String,
+        message: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

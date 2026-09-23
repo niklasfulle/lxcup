@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createAnsibleJob, createSecret, createTarget, listSecrets, type SecretKind, type TargetKind, type TargetTransport } from "../api";
+import { createAnsibleJob, createSecret, createTarget, listSecrets, type SecretKind, type SecretMetadata, type TargetKind, type TargetTransport } from "../api";
 import { queryKeys, useAnsibleJob, useTargets } from "../queries";
 import { TargetLifecycle } from "../components/TargetLifecycle";
 
@@ -11,14 +11,40 @@ const kinds: Array<{ value: TargetKind; label: string; transport: TargetTranspor
   { value: "windows_server", label: "Windows-System", transport: "winrm" },
 ];
 
-export function TargetsPage() {
+type TargetArea = TargetKind | undefined;
+
+const areaContent: Record<Exclude<TargetArea, undefined>, { eyebrow: string; title: string; description: string; registrationTitle: string }> = {
+  lxc: { eyebrow: "LXC-Container", title: "LXC-Container", description: "LXC-Container werden hier manuell als eigenständige Ressourcen angelegt und verwaltet.", registrationTitle: "LXC-Container hinzufügen" },
+  linux_server: { eyebrow: "Server", title: "Linux-Server", description: "Linux-Server werden ausschließlich hier als eigenständige Ressourcen aufgenommen und verwaltet.", registrationTitle: "Serverzugang konfigurieren" },
+  windows_server: { eyebrow: "Windows", title: "Windows-Server", description: "Windows-Systeme werden ausschließlich hier über einen WinRM-Zugang aufgenommen und verwaltet.", registrationTitle: "Windows-Zugang konfigurieren" },
+};
+
+export function buildBootstrapCommand(baseUrl?: string) {
+  const configuredBase = baseUrl?.trim() || import.meta.env.VITE_BOOTSTRAP_BASE_URL?.trim() || globalThis.location?.origin || "http://localhost:5173";
+  const scriptUrl = new URL("/bootstrap-lxcup-user.sh", configuredBase).toString();
+  const shellUrl = `'${scriptUrl}'`;
+  return [
+    "set -Eeuo pipefail",
+    'SUDO=""; if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi',
+    'if ! command -v curl >/dev/null 2>&1; then',
+    '  if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive $SUDO apt-get update && DEBIAN_FRONTEND=noninteractive $SUDO apt-get install --yes curl',
+    '  elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install --assumeyes curl',
+    '  elif command -v yum >/dev/null 2>&1; then $SUDO yum install --assumeyes curl',
+    '  else echo "curl konnte nicht automatisch installiert werden." >&2; exit 1; fi',
+    "fi",
+    `curl -fsSL ${shellUrl} | $SUDO bash -s -- lxcup`,
+  ].join("\n");
+}
+
+export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const targets = useTargets();
   const secrets = useQuery({ queryKey: ["secrets"], queryFn: ({ signal }) => listSecrets(signal) });
   const [name, setName] = useState("");
   const [address, setAddress] = useState("");
   const [sshUser, setSshUser] = useState("lxcup");
-  const [kind, setKind] = useState<TargetKind>("lxc");
+  const [kind, setKind] = useState<TargetKind>(area ?? "lxc");
   const [credentialSecret, setCredentialSecret] = useState("");
   const [agentSecret, setAgentSecret] = useState("");
   const [knownHostsSecret, setKnownHostsSecret] = useState("");
@@ -29,8 +55,10 @@ export function TargetsPage() {
   const [createdTargetId, setCreatedTargetId] = useState<string>();
   const [startOnboarding, setStartOnboarding] = useState(true);
   const [deploymentJobId, setDeploymentJobId] = useState<string>();
-  const [healthJobId, setHealthJobId] = useState<string>();
+  const [bootstrapCopied, setBootstrapCopied] = useState(false);
   const healthStartedFor = useRef<string | undefined>(undefined);
+  const content = area ? areaContent[area] : { eyebrow: "Automatisierung", title: "Zugänge & Agenten", description: "Zugangsprofile verbinden Infrastrukturressourcen mit kontrollierten Automatisierungs-Workflows.", registrationTitle: "Zugangsprofil anlegen" };
+  const availableKinds = area ? kinds.filter((item) => item.value === area) : kinds;
   const selectedKind = kinds.find((item) => item.value === kind)!;
   const activeSecrets = (secrets.data ?? []).filter((item) => item.metadata.status === "active");
 
@@ -54,7 +82,7 @@ export function TargetsPage() {
   const deploymentJob = useAnsibleJob(deploymentJobId);
   const health = useMutation({
     mutationFn: (targetId: string) => createAnsibleJob({ operation: "health_check", target_id: targetId, mode: "check", parameters: { operation: "health_check" }, idempotency_key: `onboarding-health-${targetId}`, confirmed: true }),
-    onSuccess: (job) => { setHealthJobId(job.id); void queryClient.invalidateQueries({ queryKey: queryKeys.ansibleJobs }); },
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: queryKeys.ansibleJobs }); },
   });
   const create = useMutation({
     mutationFn: () => createTarget({
@@ -70,7 +98,6 @@ export function TargetsPage() {
     onSuccess: (target) => {
       setCreatedTargetId(target.id);
       setDeploymentJobId(undefined);
-      setHealthJobId(undefined);
       setName("");
       setAddress("");
       void queryClient.invalidateQueries({ queryKey: queryKeys.targets });
@@ -79,10 +106,21 @@ export function TargetsPage() {
   });
 
   const createdTarget = targets.data?.find((target) => target.id === createdTargetId) ?? create.data;
-  const pendingTargets = (targets.data ?? []).filter((target) => target.state === "pending" && target.id !== createdTargetId);
+  const visibleTargets = area ? (targets.data ?? []).filter((target) => target.kind === area) : (targets.data ?? []);
+  const pendingTargets = visibleTargets.filter((target) => target.state === "pending" && target.id !== createdTargetId);
+
+  async function copyBootstrapCommand() {
+    try {
+      await copyText(buildBootstrapCommand());
+      setBootstrapCopied(true);
+      window.setTimeout(() => setBootstrapCopied(false), 2500);
+    } catch {
+      setBootstrapCopied(false);
+    }
+  }
 
   useEffect(() => {
-    if (!startOnboarding || !createdTarget || !deploymentJob.data || deploymentJob.data.status !== "succeeded" || createdTarget.state !== "managed" || healthStartedFor.current === createdTarget.id) return;
+    if (startOnboarding === false || createdTarget === undefined || deploymentJob.data?.status !== "succeeded" || createdTarget.state !== "managed" || healthStartedFor.current === createdTarget.id) return;
     healthStartedFor.current = createdTarget.id;
     health.mutate(createdTarget.id);
   }, [createdTarget, deploymentJob.data, health, startOnboarding]);
@@ -91,90 +129,221 @@ export function TargetsPage() {
     <>
       <header className="page-header">
         <div>
-          <p className="eyebrow">Inventar</p>
-          <h1>Ziele</h1>
-          <p className="muted">Registrierte Ziele und ihr tatsächlicher Onboarding-Fortschritt.</p>
+          <p className="eyebrow">{content.eyebrow}</p>
+          <h1>{content.title}</h1>
+          <p className="muted">{content.description}</p>
         </div>
-        <Link className="secondary-button" to="/enrollments/new">LXC aus Container auswählen</Link>
       </header>
 
+      {area === undefined ? <ResourceRelationshipMap /> : null}
+
       <section className="panel workflow-panel">
-        <div className="section-heading">
+        <div className="section-heading registration-heading">
           <div>
-            <h2>Ziel registrieren</h2>
-            <p className="muted">Für ein bereits entdecktes LXC empfehlen wir den geführten Onboarding-Dialog.</p>
+            <h2>{content.registrationTitle}</h2>
+            <p className="muted">Verbindungsdaten und Secret-Referenzen bleiben auf diese Ressourcenart begrenzt.</p>
           </div>
-          <Link className="text-link" to="/enrollments/new">Zum LXC-Onboarding →</Link>
+          <span className="step-badge">Schritt 1 · Zugang</span>
         </div>
-        <form onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
-          <div className="workflow-grid">
-            <label><span className="field-label" title="Anzeigename des verwalteten Ziels.">Name</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label>
-            <label><span className="field-label" title="Plattform des Ziels. Sie bestimmt unter anderem das verwendete Ansible-Playbook.">Typ</span><select value={kind} onChange={(event) => setKind(event.target.value as TargetKind)}>{kinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
-            <label><span className="field-label" title="IP-Adresse oder DNS-Name, unter dem der Worker das Ziel erreicht.">Adresse</span><input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="IP oder DNS-Name" required /></label>
-            {selectedKind.transport === "ssh" ? <label><span className="field-label" title="Benutzername für die SSH-Verbindung zu diesem Ziel.">SSH-Benutzer</span><input value={sshUser} onChange={(event) => setSshUser(event.target.value)} placeholder="z. B. root oder lxcup" required /></label> : null}
-            <label><span className="field-label" title="Zugangsdaten für die Verbindung zum Ziel, zum Beispiel ein SSH-Passwort oder ein SSH-Private-Key.">Deployment-Secret</span><div className="inline-field"><select value={credentialSecret} onChange={(event) => setCredentialSecret(event.target.value)} required><option value="">Secret auswählen</option>{activeSecrets.map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select><button className="secondary-button" type="button" onClick={() => { setNewSecretFor("credential"); setNewSecretKind(selectedKind.transport === "ssh" ? "ssh_password" : "generic"); }}>＋ Neu</button></div></label>
-            {selectedKind.transport === "ssh" ? <label><span className="field-label" title="Bekannter SSH-Host-Fingerprint als known_hosts-Datei. Er schützt Passwort- und Schlüsselverbindungen vor Man-in-the-Middle-Angriffen.">SSH-Host-Fingerprint</span><div className="inline-field"><select value={knownHostsSecret} onChange={(event) => setKnownHostsSecret(event.target.value)} required><option value="">Known-Hosts-Secret auswählen</option>{activeSecrets.filter((item) => item.metadata.metadata.kind === "ssh_known_hosts").map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select><button className="secondary-button" type="button" onClick={() => { setNewSecretFor("known_hosts"); setNewSecretKind("ssh_known_hosts"); }}>＋ Neu</button></div></label> : null}
-            <label><span className="field-label" title="Geheimer Token, mit dem sich der installierte lxcup-Agent beim Controller authentifiziert. Er ist nicht das SSH-Passwort.">Agent-Token</span><div className="inline-field"><select value={agentSecret} onChange={(event) => setAgentSecret(event.target.value)} required><option value="">Secret auswählen</option>{activeSecrets.map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select><button className="secondary-button" type="button" onClick={() => { setNewSecretFor("agent"); setNewSecretKind("agent_token"); }}>＋ Neu</button></div></label>
-            <label><span className="field-label" title="Verbindungsprotokoll, das automatisch aus dem Zieltyp abgeleitet wird.">Transport</span><input value={selectedKind.transport.toUpperCase()} readOnly /></label>
+        <div className="registration-layout">
+          <div className="registration-form">
+            <div className="form-section-heading">
+              <div>
+                <h3>Verbindungsdaten</h3>
+                <p className="muted">Diese Angaben verwendet der Worker für SSH und das Agent-Onboarding.</p>
+              </div>
+            </div>
+            <TargetForm availableKinds={availableKinds} selectedKind={selectedKind} activeSecrets={activeSecrets} name={name} address={address} sshUser={sshUser} kind={kind} credentialSecret={credentialSecret} agentSecret={agentSecret} knownHostsSecret={knownHostsSecret} newSecretFor={newSecretFor} newSecretName={newSecretName} newSecretKind={newSecretKind} newSecretValue={newSecretValue} startOnboarding={startOnboarding} onboardingAvailable={area !== "lxc"} submitLabel={area === "lxc" ? "Zugang speichern & LXC wählen" : "Ziel registrieren"} inlineSecretPending={inlineSecret.isPending} inlineSecretError={inlineSecret.error instanceof Error ? inlineSecret.error.message : undefined} createPending={create.isPending} createError={create.error instanceof Error ? create.error.message : undefined} onSubmit={(event) => { event.preventDefault(); create.mutate(); }} onNameChange={setName} onAddressChange={setAddress} onSshUserChange={setSshUser} onKindChange={setKind} onCredentialChange={setCredentialSecret} onAgentChange={setAgentSecret} onKnownHostsChange={setKnownHostsSecret} onSecretForChange={setNewSecretFor} onSecretNameChange={setNewSecretName} onSecretKindChange={setNewSecretKind} onSecretValueChange={setNewSecretValue} onStartOnboardingChange={setStartOnboarding} onCreateSecret={() => inlineSecret.mutate()} />
           </div>
-          {newSecretFor ? <div className="inline-secret-editor" role="group" aria-label="Secret direkt erstellen"><div className="section-heading"><strong>Neues {newSecretFor === "credential" ? "Deployment-Secret" : newSecretFor === "known_hosts" ? "Known-Hosts-Secret" : "Agent-Token"}</strong><button className="text-link" type="button" onClick={() => setNewSecretFor(null)}>Abbrechen</button></div><div className="workflow-grid"><label>Name<input value={newSecretName} onChange={(event) => setNewSecretName(event.target.value)} placeholder="z. B. lxcup-test-ssh" autoComplete="off" /></label><label>Typ<select value={newSecretKind} onChange={(event) => setNewSecretKind(event.target.value as SecretKind)}><option value="ssh_password">SSH Passwort</option><option value="ssh_private_key">SSH Private Key</option><option value="ssh_known_hosts">SSH Known Hosts</option><option value="agent_token">Agent-Token</option><option value="generic">Allgemein</option></select></label><label>Wert<input type="password" value={newSecretValue} onChange={(event) => setNewSecretValue(event.target.value)} autoComplete="new-password" placeholder="Wert eingeben oder erzeugen" /></label><button className="secondary-button" type="button" onClick={() => setNewSecretValue(generateSecretValue())}>Wert erzeugen</button></div><button className="primary-button" type="button" disabled={inlineSecret.isPending || !newSecretName.trim() || !newSecretValue} onClick={() => inlineSecret.mutate()}>{inlineSecret.isPending ? "Speichert…" : "Secret erstellen und auswählen"}</button>{inlineSecret.error ? <p className="error-state" role="alert">{inlineSecret.error.message}</p> : null}</div> : null}
-          <label className="confirm-field"><input type="checkbox" checked={startOnboarding} onChange={(event) => setStartOnboarding(event.target.checked)} /> Onboarding direkt starten: Agent installieren und nach erfolgreichem Heartbeat einen Healthcheck ausführen.</label>
-          <button className="primary-button" type="submit" disabled={create.isPending || !credentialSecret || !agentSecret || (selectedKind.transport === "ssh" && !knownHostsSecret)}>
-            {create.isPending ? "Wird angelegt…" : "Ziel registrieren"}
-          </button>
-          {create.error ? <p className="error-state" role="alert">{create.error.message}</p> : null}
-        </form>
+          {selectedKind.transport === "ssh" ? <BootstrapCard copied={bootstrapCopied} onCopy={() => void copyBootstrapCommand()} /> : <WindowsSetupCard />}
+        </div>
       </section>
 
       {createdTarget ? <TargetLifecycle target={createdTarget} /> : null}
-      {createdTarget && startOnboarding ? <section className="panel"><div className="section-heading"><div><h2>Onboarding-Aktivitäten</h2><p className="muted">Jeder Schritt wird als eigener Workflow mit eigenem Protokoll geführt.</p></div></div><div className="onboarding-activities"><div><strong>1. Agent installieren</strong>{deployment.isPending ? <span className="muted"> wird erstellt…</span> : deployment.data ? <Link className="text-link" to={`/workflows/${deployment.data.id}`}>Protokoll öffnen →</Link> : null}{deployment.error ? <p className="error-state">{deployment.error.message}</p> : null}</div><div><strong>2. Healthcheck</strong>{health.isPending ? <span className="muted"> wird gestartet…</span> : health.data ? <Link className="text-link" to={`/workflows/${health.data.id}`}>Protokoll öffnen →</Link> : <p className="muted">Startet nach erfolgreicher Agent-Installation und Heartbeat.</p>}{health.error ? <p className="error-state">{health.error.message}</p> : null}</div></div></section> : null}
+      {createdTarget && startOnboarding ? <OnboardingActivities deployment={deployment} health={health} /> : null}
 
-      {pendingTargets.length ? (
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <h2>Offene Onboardings</h2>
-              <p className="muted">Diese Ziele warten noch auf Agent und Heartbeat.</p>
-            </div>
-            <span className="status-badge pending">{pendingTargets.length} offen</span>
-          </div>
-          <div className="lifecycle-list">
-            {pendingTargets.map((target) => <TargetLifecycle key={target.id} target={target} />)}
-          </div>
-        </section>
-      ) : null}
+      {pendingTargets.length > 0 && <section className="panel"><div className="section-heading"><div><h2>Offene Onboardings</h2><p className="muted">Diese Ziele warten noch auf Agent und Heartbeat.</p></div><span className="status-badge pending">{pendingTargets.length} offen</span></div><div className="lifecycle-list">{pendingTargets.map((target) => <TargetLifecycle key={target.id} target={target} />)}</div></section>}
 
       <section className="panel">
         <div className="section-heading">
           <div>
-            <h2>Target-Inventar</h2>
-            <p className="muted">Alle registrierten Verbindungen</p>
+            <h2>{area ? `${content.title}-Inventar` : "Zugangsprofil-Inventar"}</h2>
+            <p className="muted">Nur Zugänge dieser Ressourcenart</p>
           </div>
-          <span className="muted">{targets.data?.length ?? 0} Ziele</span>
+          <span className="muted">{visibleTargets.length} Einträge</span>
         </div>
-        {targets.isLoading ? <p className="muted">Lade Ziele…</p> : !targets.data?.length ? <p className="empty-state">Noch keine Ziele angelegt.</p> : (
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Name</th><th>Typ</th><th>Adresse</th><th>Transport</th><th>Status</th></tr></thead>
-              <tbody>{targets.data.map((target) => (
-                <tr key={target.id}>
-                  <td>{target.name}</td>
-                  <td>{target.kind}</td>
-                  <td>{target.address}</td>
-                  <td>{target.transport}</td>
-                  <td><span className={`status-badge ${target.state === "managed" ? "success" : target.state === "disabled" ? "neutral" : "pending"}`}>{target.state === "managed" ? "Verbunden" : target.state === "disabled" ? "Deaktiviert" : "Pending"}</span></td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </div>
-        )}
+        <TargetInventory targets={visibleTargets} isLoading={targets.isLoading} />
       </section>
     </>
   );
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("Die Zwischenablage ist in diesem Browser nicht verfügbar.");
 }
 
 function generateSecretValue() {
   const bytes = new Uint8Array(24);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function BootstrapCard({ copied, onCopy }: Readonly<{ copied: boolean; onCopy: () => void }>) {
+  return <aside className="bootstrap-card" aria-labelledby="bootstrap-card-title">
+    <p className="eyebrow">Host vorbereiten</p>
+    <h3 id="bootstrap-card-title">lxcup-Benutzer anlegen</h3>
+    <p className="muted">Führe den vorbereiteten Befehl einmal als root auf dem Zielhost aus. Er installiert bei Bedarf curl und legt danach den eingeschränkten SSH-Benutzer an.</p>
+    <ol className="bootstrap-steps">
+      <li><span>1</span><span>Auf dem Zielhost anmelden</span></li>
+      <li><span>2</span><span>Befehl kopieren und ausführen</span></li>
+      <li><span>3</span><span>Passwort im Deployment-Secret hinterlegen</span></li>
+    </ol>
+    <button className="secondary-button bootstrap-copy-button" type="button" onClick={onCopy} title="Kopiert den Bootstrap-Befehl für den lxcup-Benutzer auf dem Zielhost.">
+      {copied ? "✓ Befehl kopiert" : "＋ Installationsbefehl kopieren"}
+    </button>
+    <span className="copy-status" aria-live="polite">{copied ? "Der Befehl liegt jetzt in der Zwischenablage." : ""}</span>
+    <p className="bootstrap-note">Die Frontend-URL muss vom Zielhost erreichbar sein.</p>
+  </aside>;
+}
+
+function WindowsSetupCard() {
+  return <aside className="bootstrap-card" aria-labelledby="windows-setup-title">
+    <p className="eyebrow">Windows vorbereiten</p>
+    <h3 id="windows-setup-title">WinRM-Zugang prüfen</h3>
+    <p className="muted">Stelle vor dem Speichern sicher, dass der Windows-Host über WinRM erreichbar ist und das ausgewählte Secret die hinterlegten Zugangsdaten enthält.</p>
+    <ol className="bootstrap-steps">
+      <li><span>1</span><span>WinRM auf dem Server aktivieren</span></li>
+      <li><span>2</span><span>Zugang als Deployment-Secret hinterlegen</span></li>
+      <li><span>3</span><span>Windows-Server registrieren</span></li>
+    </ol>
+  </aside>;
+}
+
+function ResourceRelationshipMap() {
+  return <section className="resource-relationship-map" aria-label="Zusammenspiel von Inventar und Automatisierung">
+    <article><span className="relationship-step">1</span><div><strong>Infrastrukturinventar</strong><p>Nodes, LXC- &amp; Docker-Container werden entdeckt und bleiben in ihren eigenen Bereichen.</p><Link to="/containers">LXC-Inventar öffnen →</Link></div></article>
+    <span className="relationship-arrow" aria-hidden="true">→</span>
+    <article><span className="relationship-step">2</span><div><strong>Zugangsprofil</strong><p>Adresse, Secret-Referenzen und Agent-Token beschreiben die Verbindung – nicht den Container selbst.</p></div></article>
+    <span className="relationship-arrow" aria-hidden="true">→</span>
+    <article><span className="relationship-step">3</span><div><strong>LXC-Onboarding</strong><p>Verknüpft einen entdeckten LXC mit seinem Zugangsprofil und startet den Agenten.</p><Link to="/enrollments/new">LXC aufnehmen →</Link></div></article>
+  </section>;
+}
+
+type TargetFormProps = Readonly<{
+  availableKinds: Array<{ value: TargetKind; label: string; transport: TargetTransport }>;
+  selectedKind: (typeof kinds)[number];
+  activeSecrets: SecretMetadata[];
+  name: string;
+  address: string;
+  sshUser: string;
+  kind: TargetKind;
+  credentialSecret: string;
+  agentSecret: string;
+  knownHostsSecret: string;
+  newSecretFor: "credential" | "known_hosts" | "agent" | null;
+  newSecretName: string;
+  newSecretKind: SecretKind;
+  newSecretValue: string;
+  startOnboarding: boolean;
+  onboardingAvailable: boolean;
+  submitLabel: string;
+  inlineSecretPending: boolean;
+  inlineSecretError?: string;
+  createPending: boolean;
+  createError?: string;
+  onSubmit: (event: { preventDefault: () => void }) => void;
+  onNameChange: (value: string) => void;
+  onAddressChange: (value: string) => void;
+  onSshUserChange: (value: string) => void;
+  onKindChange: (value: TargetKind) => void;
+  onCredentialChange: (value: string) => void;
+  onAgentChange: (value: string) => void;
+  onKnownHostsChange: (value: string) => void;
+  onSecretForChange: (value: "credential" | "known_hosts" | "agent" | null) => void;
+  onSecretNameChange: (value: string) => void;
+  onSecretKindChange: (value: SecretKind) => void;
+  onSecretValueChange: (value: string) => void;
+  onStartOnboardingChange: (value: boolean) => void;
+  onCreateSecret: () => void;
+}>;
+
+function TargetForm(props: TargetFormProps) {
+  const { selectedKind, activeSecrets, newSecretFor, newSecretName, newSecretKind, newSecretValue, inlineSecretPending, createPending, createError, inlineSecretError } = props;
+  return <form onSubmit={props.onSubmit}>
+    <div className="workflow-grid">
+      <label><span className="field-label" title="Anzeigename des verwalteten Ziels.">Name</span><input name="target_name" autoComplete="off" value={props.name} onChange={(event) => props.onNameChange(event.target.value)} required /></label>
+      <label><span className="field-label" title="Plattform des Ziels. Sie bestimmt unter anderem das verwendete Ansible-Playbook.">Typ</span>{props.availableKinds.length === 1 ? <input name="target_kind" value={selectedKind.label} readOnly /> : <select name="target_kind" value={props.kind} onChange={(event) => props.onKindChange(event.target.value as TargetKind)}>{props.availableKinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>}</label>
+      <label><span className="field-label" title="IP-Adresse oder DNS-Name, unter dem der Worker das Ziel erreicht.">Adresse</span><input name="target_address" autoComplete="url" value={props.address} onChange={(event) => props.onAddressChange(event.target.value)} placeholder="IP oder DNS-Name …" required /></label>
+      {selectedKind.transport === "ssh" && <label><span className="field-label" title="Benutzername für die SSH-Verbindung zu diesem Ziel.">SSH-Benutzer</span><input name="ssh_user" autoComplete="username" value={props.sshUser} onChange={(event) => props.onSshUserChange(event.target.value)} placeholder="z. B. root oder lxcup …" required /></label>}
+      <SecretSelect label="Deployment-Secret" title="Zugangsdaten für die Verbindung zum Ziel, zum Beispiel ein SSH-Passwort oder ein SSH-Private-Key." value={props.credentialSecret} options={activeSecrets} onChange={props.onCredentialChange} onNew={() => { props.onSecretForChange("credential"); props.onSecretKindChange(selectedKind.transport === "ssh" ? "ssh_password" : "generic"); }} />
+      {selectedKind.transport === "ssh" && <SecretSelect label="SSH-Host-Fingerprint" title="Bekannter SSH-Host-Fingerprint als known_hosts-Datei." value={props.knownHostsSecret} options={activeSecrets.filter((item) => item.metadata.metadata.kind === "ssh_known_hosts")} onChange={props.onKnownHostsChange} onNew={() => { props.onSecretForChange("known_hosts"); props.onSecretKindChange("ssh_known_hosts"); }} emptyLabel="Known-Hosts-Secret auswählen" />}
+      <SecretSelect label="Agent-Token" title="Geheimer Token, mit dem sich der installierte lxcup-Agent beim Controller authentifiziert." value={props.agentSecret} options={activeSecrets} onChange={props.onAgentChange} onNew={() => { props.onSecretForChange("agent"); props.onSecretKindChange("agent_token"); }} />
+      <label><span className="field-label" title="Verbindungsprotokoll, das automatisch aus dem Zieltyp abgeleitet wird.">Transport</span><input name="transport" value={selectedKind.transport.toUpperCase()} readOnly /></label>
+    </div>
+    {newSecretFor && <InlineSecretEditor newSecretFor={newSecretFor} name={newSecretName} kind={newSecretKind} value={newSecretValue} pending={inlineSecretPending} error={inlineSecretError} onCancel={() => props.onSecretForChange(null)} onNameChange={props.onSecretNameChange} onKindChange={props.onSecretKindChange} onValueChange={props.onSecretValueChange} onGenerate={() => props.onSecretValueChange(generateSecretValue())} onCreate={props.onCreateSecret} />}
+    {props.onboardingAvailable ? <label className="confirm-field"><input type="checkbox" checked={props.startOnboarding} onChange={(event) => props.onStartOnboardingChange(event.target.checked)} /> Onboarding direkt starten: Agent installieren und nach erfolgreichem Heartbeat einen Healthcheck ausführen.</label> : null}
+     <button className="primary-button register-target-button" type="submit" disabled={createPending || props.credentialSecret === "" || props.agentSecret === "" || (selectedKind.transport === "ssh" && props.knownHostsSecret === "")}>{createPending ? "Wird angelegt…" : props.submitLabel}</button>
+    {createError && <p className="error-state" role="alert">{createError}</p>}
+  </form>;
+}
+
+function SecretSelect({ label, title, value, options, onChange, onNew, emptyLabel = "Secret auswählen" }: Readonly<{ label: string; title: string; value: string; options: SecretMetadata[]; onChange: (value: string) => void; onNew: () => void; emptyLabel?: string }>) {
+  return <label><span className="field-label" title={title}>{label}</span><div className="inline-field"><select value={value} onChange={(event) => onChange(event.target.value)} required><option value="">{emptyLabel}</option>{options.map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select><button className="secondary-button" type="button" onClick={onNew}>＋ Neu</button></div></label>;
+}
+
+function InlineSecretEditor({ newSecretFor, name, kind, value, pending, error, onCancel, onNameChange, onKindChange, onValueChange, onGenerate, onCreate }: Readonly<{ newSecretFor: "credential" | "known_hosts" | "agent"; name: string; kind: SecretKind; value: string; pending: boolean; error?: string; onCancel: () => void; onNameChange: (value: string) => void; onKindChange: (value: SecretKind) => void; onValueChange: (value: string) => void; onGenerate: () => void; onCreate: () => void }>) {
+  return <fieldset className="inline-secret-editor"><legend>Neues {secretPurposeLabel(newSecretFor)}</legend><button className="text-link" type="button" onClick={onCancel}>Abbrechen</button><div className="workflow-grid"><label><span>Name</span><input value={name} onChange={(event) => onNameChange(event.target.value)} placeholder="z. B. lxcup-test-ssh" autoComplete="off" /></label><label><span>Typ</span><select value={kind} onChange={(event) => onKindChange(event.target.value as SecretKind)}><option value="ssh_password">SSH Passwort</option><option value="ssh_private_key">SSH Private Key</option><option value="ssh_known_hosts">SSH Known Hosts</option><option value="agent_token">Agent-Token</option><option value="generic">Allgemein</option></select></label><label><span>Wert</span><input type="password" value={value} onChange={(event) => onValueChange(event.target.value)} autoComplete="new-password" placeholder="Wert eingeben oder erzeugen" /></label><button className="secondary-button" type="button" onClick={onGenerate}>Wert erzeugen</button></div><button className="primary-button" type="button" disabled={pending || name.trim() === "" || value === ""} onClick={onCreate}>{pending ? "Speichert…" : "Secret erstellen und auswählen"}</button>{error && <p className="error-state" role="alert">{error}</p>}</fieldset>;
+}
+
+function secretPurposeLabel(value: "credential" | "known_hosts" | "agent") {
+  if (value === "credential") return "Deployment-Secret";
+  if (value === "known_hosts") return "Known-Hosts-Secret";
+  return "Agent-Token";
+}
+
+type JobMutationView = Readonly<{ isPending: boolean; data?: { id: string }; error: unknown }>;
+
+function OnboardingActivities({ deployment, health }: Readonly<{ deployment: JobMutationView; health: JobMutationView }>) {
+  return <section className="panel"><div className="section-heading"><div><h2>Onboarding-Aktivitäten</h2><p className="muted">Jeder Schritt wird als eigener Workflow mit eigenem Protokoll geführt.</p></div></div><div className="onboarding-activities"><div><strong>1. Agent installieren</strong>{jobActivity(deployment, "wird erstellt…")}{mutationError(deployment.error)}</div><div><strong>2. Healthcheck</strong>{jobActivity(health, "wird gestartet…", "Startet nach erfolgreicher Agent-Installation und Heartbeat.")}{mutationError(health.error)}</div></div></section>;
+}
+
+function jobActivity(job: JobMutationView, pendingLabel: string, idleLabel?: string) {
+  if (job.isPending) return <span className="muted"> {pendingLabel}</span>;
+  if (job.data) return <Link className="text-link" to={`/workflows/${job.data.id}`}>Protokoll öffnen →</Link>;
+  return idleLabel ? <p className="muted">{idleLabel}</p> : null;
+}
+
+function mutationError(error: unknown) {
+  return error instanceof Error ? <p className="error-state">{error.message}</p> : null;
+}
+
+function TargetInventory({ targets, isLoading }: Readonly<{ targets: Array<{ id: string; name: string; kind: TargetKind; address: string; transport: TargetTransport; state: "pending" | "managed" | "disabled" }>; isLoading: boolean }>) {
+  if (isLoading) return <p className="muted">Lade Zugangsprofile…</p>;
+  if (targets.length === 0) return <p className="empty-state">Noch keine Zugangsprofile für diese Ressourcenart angelegt.</p>;
+  return <div className="table-wrap"><table><thead><tr><th>Name</th><th>Typ</th><th>Adresse</th><th>Transport</th><th>Status</th></tr></thead><tbody>{targets.map((target) => <tr key={target.id}><td>{target.name}</td><td>{target.kind}</td><td>{target.address}</td><td>{target.transport}</td><td><span className={`status-badge ${targetStateClass(target.state)}`}>{targetStateLabel(target.state)}</span></td></tr>)}</tbody></table></div>;
+}
+
+function targetStateClass(state: "pending" | "managed" | "disabled") {
+  if (state === "managed") return "success";
+  if (state === "disabled") return "neutral";
+  return "pending";
+}
+
+function targetStateLabel(state: "pending" | "managed" | "disabled") {
+  if (state === "managed") return "Verbunden";
+  if (state === "disabled") return "Deaktiviert";
+  return "Pending";
 }

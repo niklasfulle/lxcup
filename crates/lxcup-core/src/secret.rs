@@ -1,14 +1,13 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{ContainerId, DomainError, NodeId, SecretId, error::DomainResult};
+use crate::{ContainerId, DomainError, SecretId, error::DomainResult};
 
 /// Intended use of a stored credential. The kind is metadata only and never
 /// contains the credential itself.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretKind {
-    ProxmoxApiToken,
     SshPrivateKey,
     SshPassword,
     SshKnownHosts,
@@ -21,7 +20,6 @@ pub enum SecretKind {
 #[serde(rename_all = "snake_case", tag = "type", content = "id")]
 pub enum SecretScope {
     Global,
-    Node(NodeId),
     Container(ContainerId),
 }
 
@@ -111,14 +109,14 @@ mod tests {
     #[test]
     fn metadata_is_safe_to_serialize_without_secret_material() {
         let metadata = SecretMetadata::new(
-            "proxmox-test",
-            SecretKind::ProxmoxApiToken,
+            "connection-test",
+            SecretKind::Generic,
             SecretScope::Global,
         )
         .unwrap();
         let json = serde_json::to_string(&metadata).unwrap();
 
-        assert!(json.contains("proxmox-test"));
+        assert!(json.contains("connection-test"));
         assert!(!json.contains("value"));
     }
 

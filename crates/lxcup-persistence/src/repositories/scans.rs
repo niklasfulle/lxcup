@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    Database, RepositoryError, Scan, ScanId, ScanRepository, available_update_from_row,
+    classification_to_db, save_scan, scan_from_row,
+};
 
 impl ScanRepository {
     pub(crate) fn new(database: &Database) -> Self {

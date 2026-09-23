@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Served copy of scripts/bootstrap-lxcup-user.sh for the target registration UI.
+# Keep both files functionally identical.
 set -Eeuo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -24,9 +26,6 @@ install_package() {
 if ! command -v sudo >/dev/null 2>&1; then
   install_package sudo
 fi
-
-# Der Agent und die Bootstrap-Hilfsfunktionen verwenden curl für Downloads und
-# Healthchecks. Die Installation ist absichtlich idempotent.
 if ! command -v curl >/dev/null 2>&1; then
   install_package curl
 fi
@@ -47,8 +46,6 @@ fi
 echo "Passwort für ${username} setzen:"
 passwd "${username}"
 
-# Ansible-Playbooks benötigen für become administrative Rechte. Das Passwort
-# bleibt auf dem Ziel unverändert und wird vom Worker nur temporär verwendet.
 if getent group sudo >/dev/null 2>&1; then
   usermod -aG sudo "${username}"
 elif getent group wheel >/dev/null 2>&1; then

@@ -12,7 +12,6 @@ import {
 } from "../api";
 
 const secretKinds: Array<{ value: SecretKind; label: string }> = [
-  { value: "proxmox_api_token", label: "Proxmox API-Token" },
   { value: "agent_token", label: "Agent-Token" },
   { value: "ssh_private_key", label: "SSH Private Key" },
   { value: "ssh_password", label: "SSH Passwort" },
@@ -22,7 +21,7 @@ const secretKinds: Array<{ value: SecretKind; label: string }> = [
 export function SecretsPage() {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
-  const [kind, setKind] = useState<SecretKind>("proxmox_api_token");
+  const [kind, setKind] = useState<SecretKind>("ssh_password");
   const [value, setValue] = useState("");
   const [rotationId, setRotationId] = useState<string | null>(null);
   const [rotationValue, setRotationValue] = useState("");
@@ -43,7 +42,7 @@ export function SecretsPage() {
   const revoke = useMutation({ mutationFn: (id: string) => revokeSecret(id), onSuccess: refresh });
   const remove = useMutation({ mutationFn: (id: string) => deleteSecret(id), onSuccess: refresh });
 
-  function submit(event: React.FormEvent<HTMLFormElement>) {
+  function submit(event: Readonly<{ preventDefault: () => void }>) {
     event.preventDefault();
     if (name.trim() && value) create.mutate();
   }
@@ -77,7 +76,7 @@ export function SecretsPage() {
               {rotationId === metadata.id ? <form className="inline-form" onSubmit={(event) => { event.preventDefault(); if (rotationValue) rotate.mutate(); }}><input type="password" value={rotationValue} onChange={(event) => setRotationValue(event.target.value)} autoComplete="new-password" placeholder="Neuer Wert" required /><button type="submit" disabled={rotate.isPending}>Bestätigen</button></form> : null}
             </article>;
           })}
-          {!secrets.data?.length ? <p className="muted">Noch keine Secrets angelegt.</p> : null}
+          {secrets.data?.length === 0 ? <p className="muted">Noch keine Secrets angelegt.</p> : null}
         </div>}
       </section>
       <section className="panel">
@@ -89,7 +88,9 @@ export function SecretsPage() {
 }
 
 function formatSecretError(error: unknown): string {
-  if (!(error instanceof ApiError)) return error instanceof Error ? error.message : "Das Secret konnte nicht gespeichert werden.";
-  const details = [error.code, error.requestId ? `Request-ID ${error.requestId}` : undefined].filter(Boolean).join(" · ");
-  return details ? `${error.message} (${details})` : error.message;
+  if (error instanceof ApiError) {
+    const details = [error.code, error.requestId ? `Request-ID ${error.requestId}` : undefined].filter(Boolean).join(" · ");
+    return details ? `${error.message} (${details})` : error.message;
+  }
+  return error instanceof Error ? error.message : "Das Secret konnte nicht gespeichert werden.";
 }

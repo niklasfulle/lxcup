@@ -26,13 +26,12 @@ export function buildWorkflowRequest(
   packages: string,
   confirmed: boolean,
 ): CreateAnsibleJobRequest {
-  const parameters: Record<string, unknown> = operation === "update_packages"
-    ? { operation, packages: packages.split(",").map((value) => value.trim()).filter(Boolean) }
-    : operation === "deploy_agent" || operation === "update_agent"
-      ? { operation, agent_version: "0.1.0" }
-      : operation === "repair_agent"
-        ? { operation }
-        : { operation };
+  let parameters: Record<string, unknown> = { operation };
+  if (operation === "update_packages") {
+    parameters = { operation, packages: packages.split(",").map((value) => value.trim()).filter(Boolean) };
+  } else if (operation === "deploy_agent" || operation === "update_agent") {
+    parameters = { operation, agent_version: "0.1.0" };
+  }
 
   return {
     operation,
@@ -64,11 +63,11 @@ export function WorkflowsPage() {
   const selectedMode = useMemo(() => modes.find((item) => item.value === mode), [mode]);
   const selectedTarget = targets.data?.find((target) => target.id === targetId);
   const isMutating = operation !== "health_check";
-  const canSubmit = Boolean(targetId) && (!isMutating || confirmed) && (operation !== "update_packages" || packages.trim().length > 0);
+  const canSubmit = Boolean(targetId) && (isMutating === false || confirmed) && (operation !== "update_packages" || packages.trim().length > 0);
 
-  function submit(event: React.FormEvent<HTMLFormElement>) {
+  function submit(event: Readonly<{ preventDefault: () => void }>) {
     event.preventDefault();
-    if (!targetId || !canSubmit) return;
+    if (targetId === "" || canSubmit === false) return;
     mutation.mutate(buildWorkflowRequest(targetId, operation, mode, packages, confirmed));
   }
 
@@ -78,24 +77,24 @@ export function WorkflowsPage() {
       <section className="panel workflow-panel">
         <form onSubmit={submit}>
           <div className="workflow-grid">
-            <label title="Das registrierte Ziel, gegen das der freigegebene Workflow ausgeführt wird."> Ziel
+            <label title="Das registrierte Ziel, gegen das der freigegebene Workflow ausgeführt wird."><span>Ziel</span>
               <select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
                 <option value="">Ziel auswählen</option>
                 {(targets.data ?? []).map((target) => <option key={target.id} value={target.id}>{target.name} · {target.kind} · {target.address}</option>)}
               </select>
             </label>
-            <label title="Die erlaubte, fest registrierte Aktion des Workers."> Operation
+            <label title="Die erlaubte, fest registrierte Aktion des Workers."><span>Operation</span>
               <select value={operation} onChange={(event) => setOperation(event.target.value as AnsibleOperation)}>
                 {operations.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
               </select>
             </label>
-            <label title="Check prüft, Plan erstellt eine Vorschau, Apply führt aus und Reconcile gleicht einen unklaren Zustand ab."> Modus
+            <label title="Check prüft, Plan erstellt eine Vorschau, Apply führt aus und Reconcile gleicht einen unklaren Zustand ab."><span>Modus</span>
               <select value={mode} onChange={(event) => setMode(event.target.value as AnsibleExecutionMode)} aria-describedby="mode-help">
                 {modes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
               </select>
             </label>
           </div>
-          {operation === "update_packages" ? <label className="workflow-field" title="Nur Pakete verwenden, die bereits durch einen Update-Plan validiert wurden."> Validierte Pakete aus dem Plan
+          {operation === "update_packages" ? <label className="workflow-field" title="Nur Pakete verwenden, die bereits durch einen Update-Plan validiert wurden."><span>Validierte Pakete aus dem Plan</span>
             <input value={packages} onChange={(event) => setPackages(event.target.value)} placeholder="z. B. nginx,curl" aria-describedby="package-help" />
             <small id="package-help" className="muted">Die API akzeptiert ausschließlich bereits validierte Planpakete.</small>
           </label> : null}
@@ -103,27 +102,45 @@ export function WorkflowsPage() {
           {selectedMode ? <div id="mode-help" className="callout info" role="note"><strong>{selectedMode.label}: {selectedMode.effect}</strong><p>{selectedMode.description}</p></div> : null}
           {selectedTarget?.state === "pending" ? <div className="callout info"><strong>Onboarding für {selectedTarget.name}</strong><p>Dieses Ziel wartet noch auf seinen Agenten. Mit „Agent installieren“ startest du den nächsten nachvollziehbaren Schritt.</p></div> : null}
           {isMutating ? <label className="confirm-field"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /> Ich bestätige Ziel, Umfang und Risiko dieser Änderung.</label> : null}
-          <button className="primary-button" type="submit" disabled={!canSubmit || mutation.isPending}>{mutation.isPending ? "Wird gestartet…" : "Workflow starten"}</button>
+          <button className="primary-button" type="submit" disabled={canSubmit === false || mutation.isPending}>{mutation.isPending ? "Wird gestartet…" : "Workflow starten"}</button>
           {mutation.error ? <p className="error-state" role="alert">{mutation.error.message}</p> : null}
-          {mutation.data ? <p className="success-state" role="status">Job angenommen: <Link to={`/workflows/${mutation.data.id}`}>{mutation.data.id}</Link> · Status {mutation.data.status}</p> : null}
+          {mutation.data ? <output className="success-state">Job angenommen: <Link to={`/workflows/${mutation.data.id}`}>{mutation.data.id}</Link> · Status {mutation.data.status}</output> : null}
         </form>
       </section>
       <section className="panel">
         <div className="section-heading"><div><h2>Workflow-Protokolle</h2><p className="muted">Alle Jobs mit ihrem audit-sicheren Ausführungsprotokoll.</p></div><span className="muted">{jobs.data?.length ?? 0} Jobs</span></div>
         <div className="callout info"><strong>Ausführungszustand</strong><p><b>queued</b> bedeutet: Job wartet, er wird noch nicht bearbeitet. Erst <b>checking</b>, <b>planned</b> oder <b>applying</b> bedeutet, dass ein Worker aktiv arbeitet. In diesem Entwicklungs-Stack ist derzeit kein ausführender Ansible-Worker gestartet.</p></div>
-        {jobs.isLoading ? <p className="muted">Lade Workflows…</p> : jobs.error ? <p className="error-state" role="alert">{jobs.error.message}</p> : !jobs.data?.length ? <p className="empty-state">Noch keine Workflows gestartet.</p> : <div className="table-wrap"><table><thead><tr><th>Workflow</th><th>Ziel</th><th>Modus</th><th>Status</th><th>Fehlerursache</th><th>Bearbeitung</th><th>Gestartet</th></tr></thead><tbody>{jobs.data.map((job) => <tr key={job.id}><td><Link className="text-link" to={`/workflows/${job.id}`}>{job.operation.replaceAll("_", " ")}</Link></td><td>{workflowTarget(job)}</td><td>{job.mode}</td><td><span className={`status-badge ${job.status === "succeeded" ? "success" : job.status === "failed" || job.status === "aborted" ? "neutral" : "pending"}`}>{job.status}</span></td><td>{job.status === "failed" || job.status === "reconcile_required" ? <JobFailureSummary jobId={job.id} /> : <span className="muted">—</span>}</td><td>{jobProcessingLabel(job.status)}</td><td>{new Date(job.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>}
+        {workflowJobsContent(jobs)}
       </section>
     </>
   );
 }
 
-function JobFailureSummary({ jobId }: { jobId: string }) {
+function JobFailureSummary({ jobId }: Readonly<{ jobId: string }>) {
   const events = useAnsibleJobEvents(jobId, false);
   const failure = events.data?.slice().reverse().find((event) => event.event.kind === "failed");
   if (events.isLoading) return <span className="muted">wird geladen…</span>;
   if (failure?.event.code) return <span className="failure-code" title="Fehlercode aus dem Worker-Protokoll">{failure.event.code}</span>;
   if (events.error) return <span className="muted">Protokoll nicht verfügbar</span>;
   return <span className="muted">kein Fehlercode gemeldet</span>;
+}
+
+function workflowJobsContent(jobs: ReturnType<typeof useAnsibleJobs>) {
+  if (jobs.isLoading) return <p className="muted">Lade Workflows…</p>;
+  if (jobs.error) return <p className="error-state" role="alert">{jobs.error.message}</p>;
+  if (jobs.data === undefined || jobs.data.length === 0) return <p className="empty-state">Noch keine Workflows gestartet.</p>;
+  return <div className="table-wrap"><table><thead><tr><th>Workflow</th><th>Ziel</th><th>Modus</th><th>Status</th><th>Fehlerursache</th><th>Bearbeitung</th><th>Gestartet</th></tr></thead><tbody>{jobs.data.map((job) => <tr key={job.id}><td><Link className="text-link" to={`/workflows/${job.id}`}>{job.operation.replaceAll("_", " ")}</Link></td><td>{workflowTarget(job)}</td><td>{job.mode}</td><td><span className={`status-badge ${workflowStatusClass(job.status)}`}>{job.status}</span></td><td>{failureSummary(job.status, job.id)}</td><td>{jobProcessingLabel(job.status)}</td><td>{new Date(job.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>;
+}
+
+function workflowStatusClass(status: string) {
+  if (status === "succeeded") return "success";
+  if (status === "failed" || status === "aborted") return "neutral";
+  return "pending";
+}
+
+function failureSummary(status: string, jobId: string) {
+  if (status === "failed" || status === "reconcile_required") return <JobFailureSummary jobId={jobId} />;
+  return <span className="muted">—</span>;
 }
 
 function workflowTarget(job: { target: { container: number } | { node: string } | { target: string } }) {

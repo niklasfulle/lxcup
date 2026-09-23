@@ -1,7 +1,7 @@
 //! Domain- und Geschäftslogik von lxcup.
 //!
 //! Dieses Crate bleibt unabhängig von HTTP, PostgreSQL und konkreten
-//! Proxmox- oder Betriebssystem-Adaptern.
+//! Infrastruktur- oder Betriebssystem-Adaptern.
 
 pub mod agent;
 pub mod container;

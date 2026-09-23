@@ -1,15 +1,5 @@
 export type ApiEnvelope<T> = { data: T; request_id: string };
 
-export type NodeDto = {
-  id: string;
-  name: string;
-  address: string;
-  status: string;
-  proxmox_version: string | null;
-  capabilities: string[];
-  last_checked_at: string | null;
-};
-
 export type ContainerDto = {
   id: number;
   node_id: string;
@@ -126,7 +116,7 @@ export type CreateAnsibleJobRequest = {
   confirmed: boolean;
 };
 
-export type SecretKind = "proxmox_api_token" | "ssh_private_key" | "ssh_password" | "ssh_known_hosts" | "agent_token" | "generic";
+export type SecretKind = "ssh_private_key" | "ssh_password" | "ssh_known_hosts" | "agent_token" | "generic";
 export type SecretScope = { type: "global" } | { type: "node"; id: string } | { type: "container"; id: number };
 export type SecretMetadata = {
   metadata: {
@@ -217,29 +207,46 @@ export class ApiClient {
     const maxAttempts = 3;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
-        const response = await fetch(`${this.baseUrl}${path}`, {
-          ...init,
-          cache: "no-store",
-          headers: { accept: "application/json", ...init?.headers },
-        });
-        const text = await response.text();
-        if (response.status === 204) return undefined as T;
-        let payload: ApiEnvelope<T> | ApiErrorBody | undefined;
-        try { payload = text ? JSON.parse(text) as ApiEnvelope<T> | ApiErrorBody : undefined; } catch { payload = undefined; }
-        if (!response.ok) {
-          const error = payload as ApiErrorBody | undefined;
-          const retryable = response.status >= 500;
-          if (retryable && attempt + 1 < maxAttempts) { await delay(attempt); continue; }
-          throw new ApiError(error?.error?.message ?? "Die API-Anfrage ist fehlgeschlagen.", response.status, error?.error?.code ?? "api_error", error?.request_id, retryable);
-        }
-        if (!payload || !("data" in payload)) throw new ApiError("Die API hat eine ungültige Antwort geliefert.", response.status, "invalid_response");
-        return (payload as ApiEnvelope<T>).data;
+        return await this.requestAttempt<T>(path, init, attempt, maxAttempts);
       } catch (error) {
         if (error instanceof ApiError || attempt + 1 >= maxAttempts) throw error;
         await delay(attempt);
       }
     }
     throw new ApiError("Die API-Anfrage ist fehlgeschlagen.", 0, "api_error", undefined, true);
+  }
+
+  private async requestAttempt<T>(path: string, init: RequestInit | undefined, attempt: number, maxAttempts: number): Promise<T> {
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      ...init,
+      cache: "no-store",
+      headers: { accept: "application/json", ...init?.headers },
+    });
+    const text = await response.text();
+    if (response.status === 204) return undefined as T;
+    const payload = parsePayload<T>(text);
+    if (!response.ok) {
+      const error = payload as ApiErrorBody | undefined;
+      const retryable = response.status >= 500;
+      if (retryable && attempt + 1 < maxAttempts) {
+        await delay(attempt);
+        return this.requestAttempt<T>(path, init, attempt + 1, maxAttempts);
+      }
+      throw new ApiError(error?.error?.message ?? "Die API-Anfrage ist fehlgeschlagen.", response.status, error?.error?.code ?? "api_error", error?.request_id, retryable);
+    }
+    if (payload === undefined || !("data" in payload)) {
+      throw new ApiError("Die API hat eine ungültige Antwort geliefert.", response.status, "invalid_response");
+    }
+    return payload.data;
+  }
+}
+
+function parsePayload<T>(text: string): ApiEnvelope<T> | ApiErrorBody | undefined {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text) as ApiEnvelope<T> | ApiErrorBody;
+  } catch {
+    return undefined;
   }
 }
 

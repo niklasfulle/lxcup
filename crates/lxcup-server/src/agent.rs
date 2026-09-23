@@ -1,4 +1,16 @@
-use super::*;
+use super::{
+    ActorRole, AgentClient, AgentClientConfig, AgentHealth, AgentMetrics, AgentRegistration,
+    ApiEnvelope, ApiError, ApiEvent, ApiState, ContainerId, CreateSecret,
+    Deserialize, DockerContainerInfo, DockerWorkload, DockerWorkloadManagementState, Extension,
+    Json, JsonBody, Path, Permission, RegisteredAgent, SecretId, SecretKind, SecretScope,
+    SecretStoreError, SecretValue, Serialize, State, StatusCode, StoredSecretMetadata, envelope,
+    parse_container_id, parse_uuid, require_permission,
+};
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ConfirmedRequest {
+    pub confirmed: bool,
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct RegisterAgentRequest {
@@ -679,4 +691,74 @@ pub(super) async fn remove_docker_container(
         "removed",
     ));
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_store_errors_map_to_stable_api_categories() {
+        let cases = [
+            (
+                SecretStoreError::Missing,
+                StatusCode::BAD_GATEWAY,
+                "agent_secret_missing",
+            ),
+            (
+                SecretStoreError::Denied,
+                StatusCode::FORBIDDEN,
+                "agent_secret_denied",
+            ),
+            (
+                SecretStoreError::Invalid,
+                StatusCode::BAD_REQUEST,
+                "agent_secret_invalid",
+            ),
+            (
+                SecretStoreError::Unavailable,
+                StatusCode::BAD_GATEWAY,
+                "secret_store_unavailable",
+            ),
+        ];
+        for (error, status, code) in cases {
+            let mapped = map_secret_error(error);
+            assert_eq!(mapped.status, status);
+            assert_eq!(mapped.code, code);
+            assert!(!mapped.message.is_empty());
+        }
+    }
+
+    #[test]
+    fn secret_dtos_never_contain_secret_material() {
+        let error = map_secret_error(SecretStoreError::Invalid);
+        let rendered = format!("{error:?}");
+        assert!(!rendered.contains("secret value"));
+    }
+
+    #[test]
+    fn docker_workload_dto_preserves_discovered_and_managed_states() {
+        let discovered = DockerWorkloadDto::discovered(
+            ContainerId::new(101),
+            DockerContainerInfo {
+                id: "docker-id".to_owned(),
+                name: "web".to_owned(),
+                image: "nginx:latest".to_owned(),
+                state: "running".to_owned(),
+                status: "Up".to_owned(),
+            },
+        );
+        assert_eq!(discovered.management_state, "discovered");
+        let managed = DockerWorkload {
+            host_container_id: ContainerId::new(101),
+            id: discovered.id.clone(),
+            name: discovered.name.clone(),
+            image: discovered.image.clone(),
+            state: discovered.state.clone(),
+            status: discovered.status.clone(),
+            management_state: DockerWorkloadManagementState::Managed,
+            discovered_at: discovered.discovered_at,
+        };
+        assert_eq!(DockerWorkloadDto::from(managed).management_state, "managed");
+    }
 }

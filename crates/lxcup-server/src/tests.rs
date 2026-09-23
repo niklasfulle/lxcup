@@ -4,10 +4,11 @@ use axum::{
     http::{Request, StatusCode},
 };
 use lxcup_secrets::CreateSecret;
+use lxcup_core::{Node, NodeId};
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn nodes_endpoint_returns_versioned_envelope() {
+async fn removed_nodes_endpoint_is_not_available() {
     let state = ApiState::new();
     state
         .replace_nodes(vec![Node::new("pve01", "https://pve01:8006").unwrap()])
@@ -15,13 +16,600 @@ async fn nodes_endpoint_returns_versioned_envelope() {
     let response = router(state)
         .oneshot(
             Request::builder()
-                .uri("/api/v1/nodes")
+                .uri("/api/v1/targets")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn inventory_endpoints_list_containers_start_scans_and_render_metrics() {
+    let state = ApiState::new();
+    let node = Node::new("inventory-node", "https://pve.example.test").unwrap();
+    let node_id = node.id;
+    let container = Container::new(
+        ContainerId::new(202),
+        node_id,
+        "inventory-container",
+        lxcup_core::OperatingSystem::Debian,
+        lxcup_core::ContainerStatus::Running,
+    )
+    .unwrap();
+    state.replace_nodes(vec![node]).await;
+    state.replace_containers(vec![container]).await;
+
+    for request in [
+        Request::builder()
+            .uri("/api/v1/containers")
+            .body(Body::empty())
+            .unwrap(),
+    ] {
+        assert_eq!(
+            router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/202/scans")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let scan_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let list = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/containers/202/scans")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let run_without_agent = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/v1/scans/{scan_id}/run"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(run_without_agent.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/health/ready")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let plan_response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/202/plans")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "requested_packages": ["openssl"],
+                        "dry_run_changes": [{
+                            "package": "openssl",
+                            "from_version": "3.0",
+                            "to_version": "3.1",
+                            "kind": "Upgrade",
+                            "held": false,
+                            "authenticated": true
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(plan_response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(plan_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let plan_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/containers/202/plans")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/plans/{plan_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(!scan_id.is_empty());
+}
+
+#[tokio::test]
+async fn inventory_endpoints_fail_closed_for_invalid_ids_and_unready_nodes() {
+    let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+    let node = Node::new("disconnected-node", "https://pve.example.test").unwrap();
+    let mut disconnected = node.clone();
+    disconnected.status = lxcup_core::NodeStatus::Disconnected;
+    state.replace_nodes(vec![disconnected]).await;
+
+    assert_eq!(
+        router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/health/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    for request in [
+        Request::builder()
+            .uri("/api/v1/containers/not-a-container/scans")
+            .body(Body::empty())
+            .unwrap(),
+        Request::builder()
+            .uri("/api/v1/containers/not-a-container/plans")
+            .body(Body::empty())
+            .unwrap(),
+    ] {
+        assert_eq!(
+            router(state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    let missing_scan = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/999/scans")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_scan.status(), StatusCode::NOT_FOUND);
+
+    let invalid_plan = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/999/plans")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "requested_packages": [],
+                        "dry_run_changes": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_plan.status(), StatusCode::BAD_REQUEST);
+
+    let blocked_plan = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/999/plans")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "requested_packages": ["openssl"],
+                        "dry_run_changes": [{
+                            "package": "openssl",
+                            "from_version": "3.1",
+                            "to_version": null,
+                            "kind": "Remove",
+                            "held": false,
+                            "authenticated": true
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked_plan.status(), StatusCode::CREATED);
+    let blocked_body = axum::body::to_bytes(blocked_plan.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let blocked_id =
+        serde_json::from_slice::<serde_json::Value>(&blocked_body).unwrap()["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    let blocked_confirm = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/v1/plans/{blocked_id}/confirm"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked_confirm.status(), StatusCode::BAD_REQUEST);
+
+    for uri in [
+        "/api/v1/plans/00000000-0000-0000-0000-000000000001",
+        "/api/v1/executions/00000000-0000-0000-0000-000000000001",
+        "/api/v1/executions/00000000-0000-0000-0000-000000000001/result",
+    ] {
+        assert_eq!(
+            router(state.clone())
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap(),)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    assert_eq!(
+        router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/scans/00000000-0000-0000-0000-000000000001/run")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let abort_missing = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/executions/00000000-0000-0000-0000-000000000001/abort")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(abort_missing.status(), StatusCode::BAD_REQUEST);
+    let run_missing = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/executions/00000000-0000-0000-0000-000000000001/run")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(run_missing.status(), StatusCode::NOT_FOUND);
+
+    let reconcile = router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/executions/00000000-0000-0000-0000-000000000001/reconcile")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"observed":"unknown"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reconcile.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn execution_endpoints_confirm_run_reconcile_and_abort() {
+    let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+    let container = Container::new(
+        ContainerId::new(404),
+        NodeId::new(),
+        "execution-test",
+        lxcup_core::OperatingSystem::Debian,
+        lxcup_core::ContainerStatus::Running,
+    )
+    .unwrap();
+    state.replace_containers(vec![container]).await;
+
+    let plan_response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/404/plans")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "requested_packages": ["openssl"],
+                        "dry_run_changes": [{
+                            "package": "openssl",
+                            "from_version": "3.0",
+                            "to_version": "3.1",
+                            "kind": "Upgrade",
+                            "held": false,
+                            "authenticated": true
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(plan_response.status(), StatusCode::CREATED);
+    let plan_body = axum::body::to_bytes(plan_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let plan_id = serde_json::from_slice::<serde_json::Value>(&plan_body).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let confirm = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/v1/plans/{plan_id}/confirm"))
+                .header("x-actor", "test-suite")
+                .header("idempotency-key", "execution-test-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(confirm.status(), StatusCode::ACCEPTED);
+    let confirm_body = axum::body::to_bytes(confirm.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let execution_id = serde_json::from_slice::<serde_json::Value>(&confirm_body).unwrap()["data"]
+        ["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let agent_task = tokio::spawn(async move {
+        let info = lxcup_agent::AgentInfo {
+            agent_id: "execution-agent".to_owned(),
+            platform: lxcup_agent::AgentPlatform::Windows,
+            hostname: "execution-host".to_owned(),
+            version: "0.1.0".to_owned(),
+            protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
+        };
+        axum::serve(
+            listener,
+            lxcup_agent::agent_router(lxcup_agent::LocalAgentState::new(info, "agent-token")),
+        )
+        .await
+        .unwrap();
+    });
+    let client = lxcup_agent::AgentClient::new(
+        lxcup_agent::AgentClientConfig::new(format!("http://{address}"), "agent-token").unwrap(),
+    )
+    .unwrap();
+    state
+        .agents
+        .write()
+        .await
+        .insert(ContainerId::new(404), RegisteredAgent { client });
+
+    let run = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/v1/executions/{execution_id}/run"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(run.status(), StatusCode::OK);
+    let run_body = axum::body::to_bytes(run.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let run_json = serde_json::from_slice::<serde_json::Value>(&run_body).unwrap();
+    assert_eq!(run_json["data"]["status"], "failed");
+
+    let result = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/executions/{execution_id}/result"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.status(), StatusCode::OK);
+
+    let reconciled = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/v1/executions/{execution_id}/reconcile"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"observed":"succeeded"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reconciled.status(), StatusCode::OK);
+
+    let abort = router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/v1/executions/{execution_id}/abort"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(abort.status(), StatusCode::BAD_REQUEST);
+    agent_task.abort();
+}
+
+#[tokio::test]
+async fn docker_inventory_endpoints_manage_in_memory_workloads() {
+    let state = ApiState::new();
+    state.store.write().await.docker_workloads.insert(
+        (ContainerId::new(303), "docker-303".to_owned()),
+        DockerWorkloadDto {
+            host_container_id: ContainerId::new(303),
+            id: "docker-303".to_owned(),
+            name: "web".to_owned(),
+            image: "nginx:latest".to_owned(),
+            state: "running".to_owned(),
+            status: "Up".to_owned(),
+            management_state: "discovered".to_owned(),
+            discovered_at: chrono::Utc::now(),
+        },
+    );
+    let listed = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/containers/303/docker/containers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+
+    let adopted = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/303/docker/containers/docker-303/adopt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(adopted.status(), StatusCode::OK);
+
+    let rejected = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/v1/containers/303/docker/containers/docker-303")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirmed":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+    let removed = router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/v1/containers/303/docker/containers/docker-303")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirmed":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+
+    for request in [
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/containers/303/docker/discover")
+            .body(Body::empty())
+            .unwrap(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/containers/303/docker/containers/missing/adopt")
+            .body(Body::empty())
+            .unwrap(),
+        Request::builder()
+            .method(Method::DELETE)
+            .uri("/api/v1/containers/303/docker/containers/missing")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"confirmed":true}"#))
+            .unwrap(),
+    ] {
+        assert_eq!(
+            router(ApiState::new().with_auth_config(AuthConfig::disabled()))
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
 }
 
 #[tokio::test]
@@ -221,7 +809,7 @@ async fn configured_auth_protects_api_but_not_health() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/nodes")
+                .uri("/api/v1/targets")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -348,7 +936,237 @@ async fn agent_registration_exposes_health_and_metrics() {
 }
 
 #[tokio::test]
-async fn environment_api_keeps_secret_values_out_of_responses_and_supports_lifecycle() {
+async fn agent_heartbeat_updates_target_state_without_activity_event() {
+    let agent_token = "heartbeat-token";
+    let secret_store = InMemorySecretStore::default();
+    let secret = secret_store
+        .create(CreateSecret {
+            name: "heartbeat-agent".to_owned(),
+            kind: lxcup_core::SecretKind::AgentToken,
+            scope: lxcup_core::SecretScope::Global,
+            value: lxcup_core::SecretValue::new(agent_token).unwrap(),
+        })
+        .unwrap();
+    let target = Target::new(
+        "heartbeat-target",
+        TargetKind::LinuxServer,
+        "192.0.2.77",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        secret.metadata.id,
+    )
+    .unwrap();
+    let target_id = target.id;
+    let state = ApiState::new()
+        .with_auth_config(AuthConfig::disabled())
+        .with_secret_store(Arc::new(secret_store));
+    state.store.write().await.targets.push(target);
+    let mut events = state.events.subscribe();
+
+    let heartbeat = lxcup_agent::AgentHeartbeat {
+        target_id: target_id.as_uuid(),
+        info: lxcup_agent::AgentInfo {
+            agent_id: "heartbeat-agent".to_owned(),
+            platform: lxcup_agent::AgentPlatform::Linux,
+            hostname: "heartbeat-host".to_owned(),
+            version: "0.1.0".to_owned(),
+            protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
+        },
+        metrics: lxcup_agent::AgentMetrics {
+            collected_at: chrono::Utc::now(),
+            commands_total: 1,
+            commands_failed: 0,
+            last_command_at: None,
+        },
+        sent_at: chrono::Utc::now(),
+    };
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/agents/heartbeat")
+                .header("authorization", format!("Bearer {agent_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&heartbeat).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let store = state.store.read().await;
+    assert_eq!(store.targets[0].state, TargetState::Managed);
+    assert!(store.agent_reports.contains_key(&target_id));
+    drop(store);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), events.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn agent_endpoints_surface_unavailable_clients_and_confirmation_errors() {
+    let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+    let container_id = ContainerId::new(505);
+    let container = Container::new(
+        container_id,
+        NodeId::new(),
+        "unavailable-agent",
+        lxcup_core::OperatingSystem::Debian,
+        lxcup_core::ContainerStatus::Running,
+    )
+    .unwrap();
+    state.replace_containers(vec![container]).await;
+    let client = lxcup_agent::AgentClient::new(
+        lxcup_agent::AgentClientConfig::new("http://127.0.0.1:1", "token").unwrap(),
+    )
+    .unwrap();
+    state
+        .agents
+        .write()
+        .await
+        .insert(container_id, RegisteredAgent { client });
+
+    for uri in [
+        "/api/v1/containers/505/agent/health",
+        "/api/v1/containers/505/agent/metrics",
+    ] {
+        let response = router(state.clone())
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    let not_confirmed = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/505/agent/revoke")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirmed":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(not_confirmed.status(), StatusCode::BAD_REQUEST);
+
+    let revoked = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/505/agent/revoke")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirmed":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+
+    let second_revoke = router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/505/agent/revoke")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirmed":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_revoke.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn agent_registration_requires_a_secret_reference_and_known_container() {
+    let secret_store = InMemorySecretStore::default();
+    let agent_secret = secret_store
+        .create(CreateSecret {
+            name: "agent-config-test".to_owned(),
+            kind: lxcup_core::SecretKind::AgentToken,
+            scope: lxcup_core::SecretScope::Global,
+            value: lxcup_core::SecretValue::new("token").unwrap(),
+        })
+        .unwrap();
+    let ca_secret = secret_store
+        .create(CreateSecret {
+            name: "agent-ca-test".to_owned(),
+            kind: lxcup_core::SecretKind::Generic,
+            scope: lxcup_core::SecretScope::Global,
+            value: lxcup_core::SecretValue::new("not-a-pem").unwrap(),
+        })
+        .unwrap();
+    let state = ApiState::new()
+        .with_auth_config(AuthConfig::disabled())
+        .with_secret_store(Arc::new(secret_store));
+    let container = Container::new(
+        ContainerId::new(506),
+        NodeId::new(),
+        "secret-required-agent",
+        lxcup_core::OperatingSystem::Debian,
+        lxcup_core::ContainerStatus::Running,
+    )
+    .unwrap();
+    state.replace_containers(vec![container]).await;
+
+    let missing_secret = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/506/agent")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"endpoint":"http://127.0.0.1:1"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_secret.status(), StatusCode::BAD_REQUEST);
+
+    let invalid_ca = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/506/agent")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "endpoint": "http://127.0.0.1:1",
+                        "secret_ref": agent_secret.metadata.id,
+                        "ca_secret_ref": ca_secret.metadata.id
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_ca.status(), StatusCode::BAD_GATEWAY);
+
+    let missing_container = router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/507/agent")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "endpoint": "http://127.0.0.1:1",
+                        "secret_ref": SecretId::new()
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_container.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[allow(unreachable_code)]
+async fn removed_environment_api_is_not_available() {
     let state = ApiState::new().with_auth_config(AuthConfig::disabled());
     let create = Request::builder()
         .method(Method::POST)
@@ -365,7 +1183,8 @@ async fn environment_api_keeps_secret_values_out_of_responses_and_supports_lifec
         ))
         .unwrap();
     let response = router(state.clone()).oneshot(create).await.unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    return;
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -425,7 +1244,8 @@ async fn environment_api_keeps_secret_values_out_of_responses_and_supports_lifec
 }
 
 #[tokio::test]
-async fn container_action_api_validates_status_and_deduplicates_tasks() {
+#[allow(unreachable_code)]
+async fn removed_container_action_api_is_not_available() {
     let state = ApiState::new().with_auth_config(AuthConfig::disabled());
     let container = Container::new(
         ContainerId::new(101),
@@ -453,7 +1273,8 @@ async fn container_action_api_validates_status_and_deduplicates_tasks() {
             .unwrap()
     };
     let first = router(state.clone()).oneshot(stop_request()).await.unwrap();
-    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    assert_eq!(first.status(), StatusCode::NOT_FOUND);
+    return;
     let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -503,8 +1324,8 @@ async fn secret_api_redacts_values_and_records_lifecycle_audit() {
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::json!({
-                "name": "test-proxmox-token",
-                "kind": "proxmox_api_token",
+                "name": "test-connection-token",
+                "kind": "generic",
                 "scope": {"type": "global"},
                 "value": "never-return-this-value"
             })

@@ -3,12 +3,18 @@ use lxcup_ansible::{
     AnsibleJob, AnsibleJobStatus, AnsibleOperation, AnsibleParameters, JobEvent, JobEventKind,
     JobFailureCode,
 };
-use lxcup_core::{ResourceTarget, SecretKind, Target, TargetKind, TargetTransport};
+use lxcup_core::{
+    ResourceTarget, SecretKind, SecretValue, Target, TargetKind, TargetTransport,
+};
 use lxcup_persistence::{Database, Repositories};
 use lxcup_secrets::{EncryptedFileSecretStore, SecretMasterKey, SecretStore};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::{fs, path::Path, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::{process::Command, time::timeout};
 use uuid::Uuid;
 
@@ -190,100 +196,7 @@ async fn invoke(
     target: &Target,
     dir: &Path,
 ) -> Result<bool, JobFailureCode> {
-    let credential = r
-        .secrets
-        .read(target.credential_secret_ref)
-        .map_err(|_| JobFailureCode::InvalidCredentials)?;
-    let kind = r
-        .secrets
-        .metadata(target.credential_secret_ref)
-        .map_err(|_| JobFailureCode::InvalidCredentials)?
-        .metadata
-        .kind;
-    // The managed SSH account may intentionally have no writable home directory.
-    // Keep Ansible's remote staging area in /tmp instead of relying on
-    // /home/<user>/.ansible/tmp being present and writable.
-    let ssh_user = target.ssh_user.as_deref().unwrap_or(&r.user);
-    let mut host = serde_json::json!({
-        "ansible_host": target.address,
-        "ansible_user": ssh_user,
-        "ansible_remote_tmp": "/tmp/.ansible/tmp"
-    });
-    let key = dir.join("credential");
-    let known_hosts = if target.transport == TargetTransport::Ssh {
-        let secret_ref = target
-            .ssh_known_hosts_secret_ref
-            .ok_or(JobFailureCode::InvalidCredentials)?;
-        let value = r
-            .secrets
-            .read(secret_ref)
-            .map_err(|_| JobFailureCode::InvalidCredentials)?;
-        let metadata = r
-            .secrets
-            .metadata(secret_ref)
-            .map_err(|_| JobFailureCode::InvalidCredentials)?;
-        if metadata.metadata.kind != SecretKind::SshKnownHosts {
-            return Err(JobFailureCode::InvalidCredentials);
-        }
-        let path = dir.join("known_hosts");
-        private(&path, value.expose()).map_err(|_| JobFailureCode::WorkerUnavailable)?;
-        Some(path)
-    } else {
-        None
-    };
-    match (target.transport, kind) {
-        (TargetTransport::Ssh, SecretKind::SshPrivateKey) => {
-            private(&key, credential.expose()).map_err(|_| JobFailureCode::WorkerUnavailable)?;
-            host["ansible_ssh_private_key_file"] = serde_json::json!(key)
-        }
-        (TargetTransport::Ssh, SecretKind::SshPassword) => {
-            host["ansible_password"] = serde_json::json!(credential.expose());
-            host["ansible_become_password"] = serde_json::json!(credential.expose())
-        }
-        _ => return Err(JobFailureCode::InvalidCredentials),
-    };
-    if let Some(path) = known_hosts {
-        host["ansible_ssh_common_args"] =
-            serde_json::json!(format!("-o UserKnownHostsFile={}", path.display()));
-    }
-    let group = if target.kind == TargetKind::WindowsServer {
-        "lxcup_windows_targets"
-    } else {
-        "lxcup_targets"
-    };
-    let inventory = dir.join("inventory.json");
-    private(
-        &inventory,
-        &serde_json::json!({group:{"hosts":{"target":host}}}).to_string(),
-    )
-    .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    let mut vars =
-        serde_json::json!({"lxcup_execution_mode":format!("{:?}",job.mode).to_lowercase()});
-    let agent_token = if !matches!(
-        job.operation,
-        AnsibleOperation::HealthCheck | AnsibleOperation::ConfigureTarget
-    ) {
-        let token = r
-            .secrets
-            .read(target.agent_secret_ref)
-            .map_err(|_| JobFailureCode::InvalidCredentials)?;
-        vars["lxcup_agent_token"] = serde_json::json!(token.expose());
-        vars["lxcup_agent_id"] = serde_json::json!(target.id.as_uuid().to_string());
-        Some(token)
-    } else {
-        None
-    };
-    if let Some(controller_url) = &r.controller_url {
-        vars["lxcup_controller_url"] = serde_json::json!(controller_url);
-    }
-    if let AnsibleParameters::DeployAgent { agent_version }
-    | AnsibleParameters::UpdateAgent { agent_version } = &job.parameters
-    {
-        vars["lxcup_agent_version"] = serde_json::json!(agent_version);
-        vars["lxcup_agent_binary_src"] = serde_json::json!(artifact(r, agent_version, dir).await?)
-    };
-    let vars_file = dir.join("vars.json");
-    private(&vars_file, &vars.to_string()).map_err(|_| JobFailureCode::WorkerUnavailable)?;
+    let context = prepare_invocation(r, job, target, dir).await?;
     job.transition_to(AnsibleJobStatus::Applying)
         .map_err(|_| JobFailureCode::PlaybookFailed)?;
     let playbook = playbook(job.operation, target.kind).ok_or(JobFailureCode::PlaybookFailed)?;
@@ -294,12 +207,13 @@ async fn invoke(
             .current_dir("/opt/lxcup/ansible")
             .args([
                 "-i",
-                inventory
+                context
+                    .inventory
                     .to_str()
                     .ok_or(JobFailureCode::WorkerUnavailable)?,
                 playbook,
                 "--extra-vars",
-                &format!("@{}", vars_file.display()),
+                &format!("@{}", context.vars_file.display()),
             ])
             .output(),
     )
@@ -307,8 +221,8 @@ async fn invoke(
     .map_err(|_| JobFailureCode::Timeout)?
     .map_err(|_| JobFailureCode::WorkerUnavailable)?;
     let redactions = [
-        Some(credential.expose()),
-        agent_token.as_ref().map(|value| value.expose()),
+        Some(context.credential.expose()),
+        context.agent_token.as_ref().map(|value| value.expose()),
     ];
     for (source, output) in [("stdout", &out.stdout), ("stderr", &out.stderr)] {
         let message = redact_output(&String::from_utf8_lossy(output), &redactions);
@@ -331,17 +245,151 @@ async fn invoke(
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        if output.contains("Invalid/incorrect password")
-            || output.contains("Permission denied, please try again")
-        {
-            return Err(JobFailureCode::InvalidCredentials);
-        }
-        if output.contains("UNREACHABLE!") || output.contains("unreachable: true") {
-            return Err(JobFailureCode::Unreachable);
-        }
-        return Err(JobFailureCode::PlaybookFailed);
+        return Err(classify_playbook_failure(&output));
     };
-    Ok(!String::from_utf8_lossy(&out.stdout).contains("changed=0"))
+    Ok(playbook_changed(&String::from_utf8_lossy(&out.stdout)))
+}
+
+fn classify_playbook_failure(output: &str) -> JobFailureCode {
+    if output.contains("Invalid/incorrect password")
+        || output.contains("Permission denied, please try again")
+    {
+        JobFailureCode::InvalidCredentials
+    } else if output.contains("UNREACHABLE!") || output.contains("unreachable: true") {
+        JobFailureCode::Unreachable
+    } else {
+        JobFailureCode::PlaybookFailed
+    }
+}
+
+fn playbook_changed(stdout: &str) -> bool {
+    !stdout.contains("changed=0")
+}
+
+struct InvocationContext {
+    inventory: PathBuf,
+    vars_file: PathBuf,
+    credential: SecretValue,
+    agent_token: Option<SecretValue>,
+}
+
+async fn prepare_invocation(
+    r: &Runtime,
+    job: &AnsibleJob,
+    target: &Target,
+    dir: &Path,
+) -> Result<InvocationContext, JobFailureCode> {
+    let credential = r
+        .secrets
+        .read(target.credential_secret_ref)
+        .map_err(|_| JobFailureCode::InvalidCredentials)?;
+    let kind = r
+        .secrets
+        .metadata(target.credential_secret_ref)
+        .map_err(|_| JobFailureCode::InvalidCredentials)?
+        .metadata
+        .kind;
+    let mut host = serde_json::json!({
+        "ansible_host": target.address,
+        "ansible_user": target.ssh_user.as_deref().unwrap_or(&r.user),
+        "ansible_remote_tmp": "/tmp/.ansible/tmp"
+    });
+    let key = dir.join("credential");
+    let known_hosts = prepare_known_hosts(r, target, dir)?;
+    match (target.transport, kind) {
+        (TargetTransport::Ssh, SecretKind::SshPrivateKey) => {
+            private(&key, credential.expose()).map_err(|_| JobFailureCode::WorkerUnavailable)?;
+            host["ansible_ssh_private_key_file"] = serde_json::json!(key);
+        }
+        (TargetTransport::Ssh, SecretKind::SshPassword) => {
+            host["ansible_password"] = serde_json::json!(credential.expose());
+            host["ansible_become_password"] = serde_json::json!(credential.expose());
+        }
+        _ => return Err(JobFailureCode::InvalidCredentials),
+    }
+    if let Some(path) = known_hosts {
+        host["ansible_ssh_common_args"] =
+            serde_json::json!(format!("-o UserKnownHostsFile={}", path.display()));
+    }
+    let group = if target.kind == TargetKind::WindowsServer {
+        "lxcup_windows_targets"
+    } else {
+        "lxcup_targets"
+    };
+    let inventory = dir.join("inventory.json");
+    private(
+        &inventory,
+        &serde_json::json!({group:{"hosts":{"target":host}}}).to_string(),
+    )
+    .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+    let mut vars =
+        serde_json::json!({"lxcup_execution_mode":format!("{:?}",job.mode).to_lowercase()});
+    let agent_token = prepare_agent_vars(r, job, target, &mut vars)?;
+    if let Some(controller_url) = &r.controller_url {
+        vars["lxcup_controller_url"] = serde_json::json!(controller_url);
+    }
+    if let AnsibleParameters::DeployAgent { agent_version }
+    | AnsibleParameters::UpdateAgent { agent_version } = &job.parameters
+    {
+        vars["lxcup_agent_version"] = serde_json::json!(agent_version);
+        vars["lxcup_agent_binary_src"] = serde_json::json!(artifact(r, agent_version, dir).await?);
+    }
+    let vars_file = dir.join("vars.json");
+    private(&vars_file, &vars.to_string()).map_err(|_| JobFailureCode::WorkerUnavailable)?;
+    Ok(InvocationContext {
+        inventory,
+        vars_file,
+        credential,
+        agent_token,
+    })
+}
+
+fn prepare_known_hosts(
+    r: &Runtime,
+    target: &Target,
+    dir: &Path,
+) -> Result<Option<PathBuf>, JobFailureCode> {
+    if target.transport != TargetTransport::Ssh {
+        return Ok(None);
+    }
+    let secret_ref = target
+        .ssh_known_hosts_secret_ref
+        .ok_or(JobFailureCode::InvalidCredentials)?;
+    let value = r
+        .secrets
+        .read(secret_ref)
+        .map_err(|_| JobFailureCode::InvalidCredentials)?;
+    let metadata = r
+        .secrets
+        .metadata(secret_ref)
+        .map_err(|_| JobFailureCode::InvalidCredentials)?;
+    if metadata.metadata.kind != SecretKind::SshKnownHosts {
+        return Err(JobFailureCode::InvalidCredentials);
+    }
+    let path = dir.join("known_hosts");
+    private(&path, value.expose()).map_err(|_| JobFailureCode::WorkerUnavailable)?;
+    Ok(Some(path))
+}
+
+fn prepare_agent_vars(
+    r: &Runtime,
+    job: &AnsibleJob,
+    target: &Target,
+    vars: &mut serde_json::Value,
+) -> Result<Option<SecretValue>, JobFailureCode> {
+    if matches!(
+        job.operation,
+        AnsibleOperation::HealthCheck | AnsibleOperation::ConfigureTarget
+    ) {
+        return Ok(None);
+    }
+    let token = r
+        .secrets
+        .read(target.agent_secret_ref)
+        .map_err(|_| JobFailureCode::InvalidCredentials)?;
+    vars["lxcup_agent_token"] = serde_json::json!(token.expose());
+    vars["lxcup_agent_id"] = serde_json::json!(target.id.as_uuid().to_string());
+    Ok(Some(token))
 }
 
 fn redact_output(output: &str, secrets: &[Option<&str>]) -> String {
@@ -421,4 +469,234 @@ async fn event(
             created_at: Utc::now(),
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_playbook_failure, playbook_changed, *};
+    use lxcup_ansible::{AnsibleJobRequest, ExecutionMode};
+    use lxcup_core::{ActorRole, ResourceLifecycle, SecretId, SecretScope};
+    use lxcup_secrets::CreateSecret;
+
+    fn runtime_with_secrets(
+        path: &Path,
+    ) -> (
+        Runtime,
+        lxcup_core::SecretId,
+        lxcup_core::SecretId,
+        lxcup_core::SecretId,
+    ) {
+        let store =
+            EncryptedFileSecretStore::new(path, SecretMasterKey::from_bytes([7; 32]), []).unwrap();
+        let credential = store
+            .create(CreateSecret {
+                name: "worker-credential".to_owned(),
+                kind: SecretKind::SshPassword,
+                scope: SecretScope::Global,
+                value: SecretValue::new("ssh-password").unwrap(),
+            })
+            .unwrap();
+        let agent = store
+            .create(CreateSecret {
+                name: "worker-agent".to_owned(),
+                kind: SecretKind::AgentToken,
+                scope: SecretScope::Global,
+                value: SecretValue::new("agent-token").unwrap(),
+            })
+            .unwrap();
+        let known_hosts = store
+            .create(CreateSecret {
+                name: "worker-known-hosts".to_owned(),
+                kind: SecretKind::SshKnownHosts,
+                scope: SecretScope::Global,
+                value: SecretValue::new("192.0.2.20 ssh-ed25519 AAAA").unwrap(),
+            })
+            .unwrap();
+        (
+            Runtime {
+                secrets: store,
+                artifacts: "http://127.0.0.1:1".to_owned(),
+                user: "lxcup".to_owned(),
+                controller_url: None,
+            },
+            credential.metadata.id,
+            agent.metadata.id,
+            known_hosts.metadata.id,
+        )
+    }
+
+    #[test]
+    fn playbook_registry_is_explicit_for_supported_operations() {
+        assert_eq!(
+            playbook(AnsibleOperation::DeployAgent, TargetKind::Lxc),
+            Some("playbooks/agent-linux.yml")
+        );
+        assert_eq!(
+            playbook(AnsibleOperation::UpdateAgent, TargetKind::WindowsServer),
+            Some("playbooks/agent-windows.yml")
+        );
+        assert_eq!(
+            playbook(AnsibleOperation::RepairAgent, TargetKind::LinuxServer),
+            Some("playbooks/agent-linux-repair.yml")
+        );
+        assert_eq!(
+            playbook(AnsibleOperation::UpdatePackages, TargetKind::WindowsServer),
+            Some("playbooks/packages-windows.yml")
+        );
+        assert_eq!(
+            playbook(AnsibleOperation::UpdatePackages, TargetKind::Lxc),
+            Some("playbooks/packages-linux.yml")
+        );
+        assert_eq!(
+            playbook(AnsibleOperation::HealthCheck, TargetKind::Lxc),
+            None
+        );
+        assert_eq!(
+            playbook(AnsibleOperation::ConfigureTarget, TargetKind::Lxc),
+            None
+        );
+    }
+
+    #[test]
+    fn worker_logs_redact_all_secret_occurrences_and_ignore_empty_values() {
+        let output = redact_output(
+            "password=abc token=xyz abc",
+            &[Some("abc"), Some("xyz"), Some("")],
+        );
+        assert_eq!(output, "password=[REDACTED] token=[REDACTED] [REDACTED]");
+    }
+
+    #[test]
+    fn worker_classifies_common_ansible_failures_and_change_summary() {
+        assert_eq!(
+            classify_playbook_failure("fatal: Invalid/incorrect password"),
+            JobFailureCode::InvalidCredentials
+        );
+        assert_eq!(
+            classify_playbook_failure("target UNREACHABLE! unreachable: true"),
+            JobFailureCode::Unreachable
+        );
+        assert_eq!(
+            classify_playbook_failure("role was not found"),
+            JobFailureCode::PlaybookFailed
+        );
+        assert!(!playbook_changed("PLAY RECAP changed=0 failed=0"));
+        assert!(playbook_changed("PLAY RECAP changed=1 failed=0"));
+    }
+
+    #[test]
+    fn private_writes_exact_contents_for_temporary_worker_files() {
+        let path = std::env::temp_dir().join(format!("lxcup-worker-test-{}", Uuid::new_v4()));
+        private(&path, "inventory").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "inventory");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn agent_variables_are_skipped_for_health_checks_and_require_a_secret_otherwise() {
+        let root = std::env::temp_dir().join(format!("lxcup-worker-secrets-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let mut target = Target::new(
+            "worker-test",
+            TargetKind::LinuxServer,
+            "192.0.2.20",
+            TargetTransport::Ssh,
+            SecretId::new(),
+            SecretId::new(),
+        )
+        .unwrap();
+        let (runtime, _credential_secret_ref, agent_secret_ref, _known_hosts_secret_ref) =
+            runtime_with_secrets(&root);
+        target.agent_secret_ref = agent_secret_ref;
+        let health_job = AnsibleJob::from_request(AnsibleJobRequest {
+            operation: AnsibleOperation::HealthCheck,
+            target: ResourceTarget::Target(target.id),
+            lifecycle: ResourceLifecycle::Managed,
+            mode: ExecutionMode::Check,
+            parameters: AnsibleParameters::HealthCheck,
+            secret_refs: Vec::new(),
+            idempotency_key: "worker-health-test".to_owned(),
+            confirmed: true,
+            actor_role: ActorRole::Operator,
+        })
+        .unwrap();
+        let mut vars = serde_json::json!({});
+        assert!(
+            prepare_agent_vars(&runtime, &health_job, &target, &mut vars)
+                .unwrap()
+                .is_none()
+        );
+        assert!(vars.get("lxcup_agent_token").is_none());
+
+        let deploy_job = AnsibleJob::from_request(AnsibleJobRequest {
+            operation: AnsibleOperation::UpdatePackages,
+            target: ResourceTarget::Target(target.id),
+            lifecycle: ResourceLifecycle::Managed,
+            mode: ExecutionMode::Check,
+            parameters: AnsibleParameters::UpdatePackages {
+                packages: vec!["curl".to_owned()],
+            },
+            secret_refs: vec![target.agent_secret_ref],
+            idempotency_key: "worker-package-test".to_owned(),
+            confirmed: true,
+            actor_role: ActorRole::Operator,
+        })
+        .unwrap();
+        let mut vars = serde_json::json!({});
+        assert!(
+            prepare_agent_vars(&runtime, &deploy_job, &target, &mut vars)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(vars["lxcup_agent_token"], "agent-token");
+        assert_eq!(vars["lxcup_agent_id"], target.id.as_uuid().to_string());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invocation_prepares_private_inventory_and_known_hosts_files() {
+        let root = std::env::temp_dir().join(format!("lxcup-worker-invocation-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let (runtime, credential_ref, _agent_ref, known_hosts_ref) = runtime_with_secrets(&root);
+        let mut target = Target::new(
+            "worker-invocation",
+            TargetKind::LinuxServer,
+            "192.0.2.20",
+            TargetTransport::Ssh,
+            credential_ref,
+            SecretId::new(),
+        )
+        .unwrap();
+        target.ssh_user = Some("deploy".to_owned());
+        target.ssh_known_hosts_secret_ref = Some(known_hosts_ref);
+        let job = AnsibleJob::from_request(AnsibleJobRequest {
+            operation: AnsibleOperation::HealthCheck,
+            target: ResourceTarget::Target(target.id),
+            lifecycle: ResourceLifecycle::Managed,
+            mode: ExecutionMode::Check,
+            parameters: AnsibleParameters::HealthCheck,
+            secret_refs: Vec::new(),
+            idempotency_key: "worker-invocation-test".to_owned(),
+            confirmed: true,
+            actor_role: ActorRole::Operator,
+        })
+        .unwrap();
+        let context = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(prepare_invocation(&runtime, &job, &target, &root))
+            .unwrap();
+        let inventory = fs::read_to_string(&context.inventory).unwrap();
+        let vars = fs::read_to_string(&context.vars_file).unwrap();
+        assert!(inventory.contains("192.0.2.20"));
+        assert!(inventory.contains("deploy"));
+        assert!(inventory.contains("known_hosts"));
+        assert!(vars.contains("check"));
+        assert_eq!(context.credential.expose(), "ssh-password");
+        assert!(context.agent_token.is_none());
+        assert_eq!(
+            fs::read_to_string(root.join("known_hosts")).unwrap(),
+            "192.0.2.20 ssh-ed25519 AAAA"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }

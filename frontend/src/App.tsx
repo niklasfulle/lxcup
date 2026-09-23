@@ -3,14 +3,10 @@ import { Link, NavLink, Route, Routes } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiClient, type ApiEvent } from "./api";
 import { queryKeys, useAnsibleJobs, useTargets } from "./queries";
-import { DataTable } from "./components/DataTable";
 import { Dashboard } from "./pages/Dashboard";
-import { NodesPage } from "./pages/NodesPage";
-import { ContainersPage } from "./pages/ContainersPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { WorkflowDetailPage } from "./pages/WorkflowDetailPage";
 import { SecretsPage } from "./pages/SecretsPage";
-import { ResourceTree } from "./components/ResourceTree";
 import { ContainerDetailPage } from "./pages/ContainerDetailPage";
 import { EnrollmentPage } from "./pages/EnrollmentPage";
 import { TargetsPage } from "./pages/TargetsPage";
@@ -40,7 +36,7 @@ export default function App() {
         setEvents((current) => [{ id: crypto.randomUUID(), event, receivedAt: new Date().toISOString() }, ...current].slice(0, 40));
         if (event.type === "Error") setStreamError(event.payload.message);
         if (event.type === "Status") {
-          const queryKey = event.payload.resource === "node" ? queryKeys.nodes : event.payload.resource === "ansible_job" ? queryKeys.ansibleJobs : queryKeys.containers;
+          const queryKey = eventQueryKey(event.payload.resource);
           void queryClient.invalidateQueries({ queryKey });
         }
       },
@@ -55,20 +51,20 @@ export default function App() {
           <span className="brand-mark" aria-hidden="true">LX</span>
           <span><strong>lxcup</strong><small>CONTROL PLANE</small></span>
         </Link>
-        <p className="brand-caption">Datacenter Management</p>
+        <p className="brand-caption">Datacenter Control</p>
         <nav aria-label="Hauptnavigation">
-          <span className="nav-heading">Datacenter</span>
+          <span className="nav-heading">Übersicht</span>
           <NavLink className="nav-link" to="/"><span aria-hidden="true">▣</span> Übersicht</NavLink>
-          <NavLink className="nav-link" to="/nodes"><span aria-hidden="true">◈</span> Nodes</NavLink>
+          <span className="nav-heading">Ressourcen</span>
+          <NavLink className="nav-link" to="/servers"><span aria-hidden="true">▰</span> Server</NavLink>
           <NavLink className="nav-link" to="/containers"><span aria-hidden="true">▤</span> LXC-Container</NavLink>
           <NavLink className="nav-link" to="/docker"><span aria-hidden="true">◫</span> Docker-Container</NavLink>
-          <NavLink className="nav-link" to="/targets"><span aria-hidden="true">⬡</span> Ziele</NavLink>
-          <span className="nav-heading">Aufgaben</span>
+          <NavLink className="nav-link" to="/windows"><span aria-hidden="true">▣</span> Windows</NavLink>
+          <span className="nav-heading">Automatisierung</span>
           <NavLink className="nav-link" to="/workflows"><span aria-hidden="true">↗</span> Tasks & Workflows</NavLink>
           <span className="nav-heading">System</span>
           <NavLink className="nav-link" to="/secrets"><span aria-hidden="true">⌘</span> Secrets</NavLink>
         </nav>
-        <ResourceTree />
         <div className="connection-indicator" aria-live="polite">
           <span className={connectionState === "verbunden" ? "status-dot ok" : "status-dot warn"} />
           <span><strong>LIVE BUS</strong><small>SSE: {connectionState}</small></span>
@@ -84,9 +80,10 @@ export default function App() {
           <TaskMonitor events={events} onClear={() => setEvents([])} />
           <Routes>
             <Route path="/" element={<Dashboard />} />
-            <Route path="/nodes" element={<NodesPage />} />
+            <Route path="/servers" element={<TargetsPage area="linux_server" />} />
+            <Route path="/windows" element={<TargetsPage area="windows_server" />} />
+            <Route path="/containers" element={<TargetsPage area="lxc" />} />
             <Route path="/targets" element={<TargetsPage />} />
-            <Route path="/containers" element={<ContainersPage />} />
             <Route path="/containers/:containerId" element={<ContainerDetailPage />} />
             <Route path="/docker" element={<DockerPage />} />
             <Route path="/enrollments/new" element={<EnrollmentPage />} />
@@ -106,9 +103,20 @@ function NotificationCenter() {
   const failed = (jobs.data ?? []).filter((job) => job.status === "failed" || job.status === "reconcile_required");
   const [open, setOpen] = useState(false);
   const [read, setRead] = useState<string[]>(() => JSON.parse(globalThis.localStorage?.getItem("lxcup-read-notifications") ?? "[]") as string[]);
-  const unread = failed.filter((job) => !read.includes(job.id));
+  const unread = failed.filter((job) => read.includes(job.id) === false);
   const markRead = (id: string) => setRead((current) => { const next = current.includes(id) ? current : [...current, id]; globalThis.localStorage?.setItem("lxcup-read-notifications", JSON.stringify(next)); return next; });
-  return <div className="notification-center"><button className="theme-button notification-button" type="button" aria-label="Benachrichtigungen" onClick={() => setOpen((value) => !value)}>🔔{unread.length ? <span className="notification-count">{unread.length}</span> : null}</button>{open ? <div className="notification-popover"><strong>Benachrichtigungen</strong>{!failed.length ? <p className="muted">Keine fehlgeschlagenen Jobs.</p> : failed.slice(0, 8).map((job) => <Link key={job.id} to={`/workflows/${job.id}`} onClick={() => markRead(job.id)}><span className={`status-badge ${job.status === "failed" ? "neutral" : "pending"}`}>{job.status === "failed" ? "Fehlgeschlagen" : "Abgleich"}</span><span>{job.operation.replaceAll("_", " ")}</span><small>{new Date(job.updated_at).toLocaleString()}</small></Link>)}</div> : null}</div>;
+  return <div className="notification-center"><button className="theme-button notification-button" type="button" aria-label="Benachrichtigungen" onClick={() => setOpen((value) => value === false)}>🔔{unread.length ? <span className="notification-count">{unread.length}</span> : null}</button>{open ? <div className="notification-popover"><strong>Benachrichtigungen</strong>{notificationBody(failed, markRead)}</div> : null}</div>;
+}
+
+function eventQueryKey(resource: string) {
+  if (resource === "target") return queryKeys.targets;
+  if (resource === "ansible_job") return queryKeys.ansibleJobs;
+  return queryKeys.containers;
+}
+
+function notificationBody(failed: ReturnType<typeof useAnsibleJobs>["data"], markRead: (id: string) => void) {
+  if (failed === undefined || failed.length === 0) return <p className="muted">Keine fehlgeschlagenen Jobs.</p>;
+  return failed.slice(0, 8).map((job) => <Link key={job.id} to={`/workflows/${job.id}`} onClick={() => markRead(job.id)}><span className={`status-badge ${job.status === "failed" ? "neutral" : "pending"}`}>{job.status === "failed" ? "Fehlgeschlagen" : "Abgleich"}</span><span>{job.operation.replaceAll("_", " ")}</span><small>{new Date(job.updated_at).toLocaleString()}</small></Link>);
 }
 
 function NotFound() {
@@ -119,11 +127,11 @@ export function ResourceSummary() {
   const targets = useTargets();
   const targetCount = useMemo(() => targets.data?.length ?? 0, [targets.data]);
   const connectedCount = useMemo(() => targets.data?.filter((target) => target.state === "managed").length ?? 0, [targets.data]);
-  return <div className="summary-grid"><SummaryCard label="Ziele" value={targetCount} loading={targets.isLoading} /><SummaryCard label="Agenten verbunden" value={connectedCount} loading={targets.isLoading} /></div>;
+  return <div className="summary-grid"><SummaryCard label="Verwaltete Ressourcen" value={targetCount} loading={targets.isLoading} /><SummaryCard label="Agenten verbunden" value={connectedCount} loading={targets.isLoading} /></div>;
 }
 
-function SummaryCard({ label, value, loading }: { label: string; value: number; loading: boolean }) {
+function SummaryCard({ label, value, loading }: Readonly<{ label: string; value: number; loading: boolean }>) {
   return <article className="summary-card"><span>{label}</span><strong>{loading ? "…" : value}</strong></article>;
 }
 
-export { DataTable };
+export { DataTable } from "./components/DataTable";

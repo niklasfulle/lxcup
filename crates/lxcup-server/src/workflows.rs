@@ -1,4 +1,22 @@
-use super::*;
+use super::{
+    ApiEnvelope, ApiError, ApiEvent, ApiState, CreateEnrollmentRequest, Enrollment, EnrollmentDto,
+    envelope, parse_uuid,
+};
+use axum::{
+    Json,
+    extract::{Extension, Json as JsonBody, Path, State},
+    http::StatusCode,
+};
+use lxcup_ansible::{
+    AnsibleJob, AnsibleJobRequest, AnsibleJobStatus, AnsibleOperation, AnsibleParameters,
+    ExecutionMode, JobEvent, JobEventKind, JobFailureCode, JobSubmission,
+};
+use lxcup_core::{
+    ActorRole, ContainerId, ContainerManagementState, EnrollmentId, EnrollmentState,
+    ResourceLifecycle, ResourceTarget, SecretId, TargetId, TargetState,
+};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 pub(super) async fn create_enrollment(
     State(state): State<ApiState>,
@@ -57,83 +75,12 @@ pub(super) async fn create_enrollment(
     let dto = EnrollmentDto::from(&enrollment);
     store
         .enrollment_keys
-        .insert(request.idempotency_key, enrollment.id);
+        .insert(request.idempotency_key.clone(), enrollment.id);
     store.enrollments.push(enrollment);
     drop(store);
 
-    // When the worker credential references are configured, enrollment also
-    // creates the allowlisted deployment job. Development instances without
-    // worker configuration still expose the lifecycle request for contract
-    // testing; no shell or free-form playbook path is ever accepted here.
-    if request.start_onboarding && request.target_id.is_some() {
-        let target_id = request.target_id.expect("target id checked above");
-        let target = state
-            .store
-            .read()
-            .await
-            .targets
-            .iter()
-            .find(|target| target.id == target_id)
-            .cloned()
-            .ok_or_else(|| ApiError::not_found("target not found"))?;
-        let lifecycle = match target.state {
-            TargetState::Pending => ResourceLifecycle::Pending,
-            TargetState::Managed => ResourceLifecycle::Managed,
-            TargetState::Disabled => ResourceLifecycle::Disabled,
-        };
-        let job_request = AnsibleJobRequest {
-            operation: AnsibleOperation::DeployAgent,
-            target: ResourceTarget::Target(target_id),
-            lifecycle,
-            mode: ExecutionMode::Apply,
-            parameters: AnsibleParameters::DeployAgent {
-                agent_version: "0.1.0".to_owned(),
-            },
-            secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
-            idempotency_key: format!("enrollment-{}", dto.id.as_uuid()),
-            confirmed: true,
-            actor_role: ActorRole::Operator,
-        };
-        let submission = state
-            .ansible
-            .write()
-            .await
-            .submit(job_request)
-            .map_err(|_| {
-                ApiError::conflict(
-                    "enrollment_job_rejected",
-                    "agent deployment could not be queued",
-                )
-            })?;
-        let is_created = matches!(&submission, JobSubmission::Created(_));
-        let job = match submission {
-            JobSubmission::Created(job) | JobSubmission::Duplicate(job) => job,
-        };
-        if is_created {
-            if let Some(repositories) = state.repositories.clone() {
-                repositories
-                    .ansible_jobs
-                    .save(&job)
-                    .await
-                    .map_err(|_| ApiError::storage())?;
-            }
-            let mut store = state.store.write().await;
-            if let Some(enrollment) = store.enrollments.iter_mut().find(|item| item.id == dto.id) {
-                enrollment
-                    .transition_to(EnrollmentState::Discovering)
-                    .map_err(|_| {
-                        ApiError::conflict(
-                            "enrollment_invalid_state",
-                            "enrollment cannot start discovery",
-                        )
-                    })?;
-            }
-            state.publish(ApiEvent::status(
-                "ansible_job",
-                job.id.as_uuid().to_string(),
-                "queued",
-            ));
-        }
+    if request.start_onboarding {
+        queue_enrollment_job(&state, &request, &dto).await?;
     }
 
     state.publish(ApiEvent::status(
@@ -278,12 +225,136 @@ pub(super) async fn list_ansible_jobs(
     )))
 }
 
+async fn queue_enrollment_job(
+    state: &ApiState,
+    request: &CreateEnrollmentRequest,
+    dto: &EnrollmentDto,
+) -> Result<(), ApiError> {
+    let Some(target_id) = request.target_id else {
+        return Ok(());
+    };
+    let target = state
+        .store
+        .read()
+        .await
+        .targets
+        .iter()
+        .find(|target| target.id == target_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("target not found"))?;
+    let lifecycle = match target.state {
+        TargetState::Pending => ResourceLifecycle::Pending,
+        TargetState::Managed => ResourceLifecycle::Managed,
+        TargetState::Disabled => ResourceLifecycle::Disabled,
+    };
+    let submission = state
+        .ansible
+        .write()
+        .await
+        .submit(AnsibleJobRequest {
+            operation: AnsibleOperation::DeployAgent,
+            target: ResourceTarget::Target(target_id),
+            lifecycle,
+            mode: ExecutionMode::Apply,
+            parameters: AnsibleParameters::DeployAgent {
+                agent_version: "0.1.0".to_owned(),
+            },
+            secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
+            idempotency_key: format!("enrollment-{}", dto.id.as_uuid()),
+            confirmed: true,
+            actor_role: ActorRole::Operator,
+        })
+        .map_err(|_| {
+            ApiError::conflict(
+                "enrollment_job_rejected",
+                "agent deployment could not be queued",
+            )
+        })?;
+    let (job, is_created) = match submission {
+        JobSubmission::Created(job) => (job, true),
+        JobSubmission::Duplicate(job) => (job, false),
+    };
+    if !is_created {
+        return Ok(());
+    }
+    if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .ansible_jobs
+            .save(&job)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    let mut store = state.store.write().await;
+    if let Some(enrollment) = store.enrollments.iter_mut().find(|item| item.id == dto.id) {
+        enrollment
+            .transition_to(EnrollmentState::Discovering)
+            .map_err(|_| {
+                ApiError::conflict(
+                    "enrollment_invalid_state",
+                    "enrollment cannot start discovery",
+                )
+            })?;
+    }
+    state.publish(ApiEvent::status(
+        "ansible_job",
+        job.id.as_uuid().to_string(),
+        "queued",
+    ));
+    Ok(())
+}
+
 pub(super) async fn create_ansible_job(
     State(state): State<ApiState>,
     Extension(actor_role): Extension<ActorRole>,
     JsonBody(request): JsonBody<CreateAnsibleJobRequest>,
 ) -> Result<(StatusCode, Json<ApiEnvelope<AnsibleJobDto>>), ApiError> {
-    let (target, lifecycle, target_secret_ref) = if let Some(target_id) = request.target_id {
+    let (target, lifecycle, target_secret_ref) = resolve_ansible_target(&state, &request).await?;
+    let secret_refs = resolve_job_secret_refs(request.operation, target_secret_ref)?;
+    let job_request = AnsibleJobRequest {
+        operation: request.operation,
+        target,
+        lifecycle,
+        mode: request.mode,
+        parameters: request.parameters,
+        secret_refs,
+        idempotency_key: request.idempotency_key,
+        confirmed: request.confirmed,
+        actor_role,
+    };
+    let target = job_request.target;
+    if let Some(existing) = find_existing_job(&state, target, &job_request.idempotency_key).await? {
+        return Ok((
+            StatusCode::OK,
+            Json(envelope(AnsibleJobDto::from(&existing))),
+        ));
+    }
+    let submission = state
+        .ansible
+        .write()
+        .await
+        .submit(job_request)
+        .map_err(map_ansible_error)?;
+    let (status, job, created) = match submission {
+        JobSubmission::Created(job) => (StatusCode::ACCEPTED, job, true),
+        JobSubmission::Duplicate(job) => (StatusCode::OK, job, false),
+    };
+    if created {
+        persist_created_job(&state, &job).await?;
+    }
+    let dto = AnsibleJobDto::from(&job);
+    state.publish(ApiEvent::status(
+        "ansible_job",
+        dto.id.as_uuid().to_string(),
+        "queued",
+    ));
+    Ok((status, Json(envelope(dto))))
+}
+
+async fn resolve_ansible_target(
+    state: &ApiState,
+    request: &CreateAnsibleJobRequest,
+) -> Result<(ResourceTarget, ResourceLifecycle, Option<SecretId>), ApiError> {
+    if let Some(target_id) = request.target_id {
         let target = state
             .store
             .read()
@@ -298,117 +369,100 @@ pub(super) async fn create_ansible_job(
             TargetState::Managed => ResourceLifecycle::Managed,
             TargetState::Disabled => ResourceLifecycle::Disabled,
         };
-        (
+        return Ok((
             ResourceTarget::Target(target_id),
             lifecycle,
             Some(target.credential_secret_ref),
-        )
-    } else {
-        if request.container_id == 0 {
-            return Err(ApiError::bad_request(
-                "target_required",
-                "target id must be provided",
-            ));
-        }
-        let container_id = ContainerId::new(request.container_id);
-        let lifecycle = state
-            .store
-            .read()
-            .await
-            .containers
-            .iter()
-            .find(|container| container.id == container_id)
-            .map(|container| match container.management_state {
-                ContainerManagementState::Discovered => ResourceLifecycle::Discovered,
-                ContainerManagementState::Managed => ResourceLifecycle::Managed,
-                ContainerManagementState::Ignored | ContainerManagementState::Disabled => {
-                    ResourceLifecycle::Disabled
-                }
-            })
-            .ok_or_else(|| ApiError::not_found("container not found"))?;
-        (ResourceTarget::Container(container_id), lifecycle, None)
-    };
-
-    let secret_refs = if request.operation == AnsibleOperation::HealthCheck {
-        Vec::new()
-    } else {
-        target_secret_ref.map_or_else(configured_ansible_secret_refs, |secret| Ok(vec![secret]))?
-    };
-    let job_request = AnsibleJobRequest {
-        operation: request.operation,
-        target,
-        lifecycle,
-        mode: request.mode,
-        parameters: request.parameters,
-        secret_refs,
-        idempotency_key: request.idempotency_key,
-        confirmed: request.confirmed,
-        actor_role,
-    };
-    let target = job_request.target;
-    if let Some(repositories) = state.repositories.clone() {
-        if let Some(existing) = repositories
-            .ansible_jobs
-            .find_by_idempotency_key(target, &job_request.idempotency_key)
-            .await
-            .map_err(|_| ApiError::storage())?
-        {
-            return Ok((
-                StatusCode::OK,
-                Json(envelope(AnsibleJobDto::from(&existing))),
-            ));
-        }
-        if repositories
-            .ansible_jobs
-            .has_active_target(target)
-            .await
-            .map_err(|_| ApiError::storage())?
-        {
-            return Err(ApiError::conflict(
-                "ansible_target_busy",
-                "another job is active for this target",
-            ));
-        }
+        ));
     }
-    let submission = state
-        .ansible
-        .write()
+    if request.container_id == 0 {
+        return Err(ApiError::bad_request(
+            "target_required",
+            "target id must be provided",
+        ));
+    }
+    let container_id = ContainerId::new(request.container_id);
+    let lifecycle = state
+        .store
+        .read()
         .await
-        .submit(job_request)
-        .map_err(map_ansible_error)?;
-    let (status, job, created) = match submission {
-        JobSubmission::Created(job) => (StatusCode::ACCEPTED, job, true),
-        JobSubmission::Duplicate(job) => (StatusCode::OK, job, false),
-    };
-    if created {
-        if let Some(repositories) = state.repositories.clone() {
-            repositories
-                .ansible_jobs
-                .save(&job)
-                .await
-                .map_err(|_| ApiError::storage())?;
-            let events = state
-                .ansible
-                .read()
-                .await
-                .events(job.id)
-                .map_err(map_ansible_error)?;
-            for event in events {
-                repositories
-                    .ansible_jobs
-                    .append_event(&event)
-                    .await
-                    .map_err(|_| ApiError::storage())?;
+        .containers
+        .iter()
+        .find(|container| container.id == container_id)
+        .map(|container| match container.management_state {
+            ContainerManagementState::Discovered => ResourceLifecycle::Discovered,
+            ContainerManagementState::Managed => ResourceLifecycle::Managed,
+            ContainerManagementState::Ignored | ContainerManagementState::Disabled => {
+                ResourceLifecycle::Disabled
             }
-        }
+        })
+        .ok_or_else(|| ApiError::not_found("container not found"))?;
+    Ok((ResourceTarget::Container(container_id), lifecycle, None))
+}
+
+fn resolve_job_secret_refs(
+    operation: AnsibleOperation,
+    target_secret_ref: Option<SecretId>,
+) -> Result<Vec<SecretId>, ApiError> {
+    if operation == AnsibleOperation::HealthCheck {
+        return Ok(Vec::new());
     }
-    let dto = AnsibleJobDto::from(&job);
-    state.publish(ApiEvent::status(
-        "ansible_job",
-        dto.id.as_uuid().to_string(),
-        "queued",
-    ));
-    Ok((status, Json(envelope(dto))))
+    target_secret_ref.map_or_else(configured_ansible_secret_refs, |secret| Ok(vec![secret]))
+}
+
+async fn find_existing_job(
+    state: &ApiState,
+    target: ResourceTarget,
+    idempotency_key: &str,
+) -> Result<Option<AnsibleJob>, ApiError> {
+    let Some(repositories) = state.repositories.clone() else {
+        return Ok(None);
+    };
+    if let Some(existing) = repositories
+        .ansible_jobs
+        .find_by_idempotency_key(target, idempotency_key)
+        .await
+        .map_err(|_| ApiError::storage())?
+    {
+        return Ok(Some(existing));
+    }
+    if repositories
+        .ansible_jobs
+        .has_active_target(target)
+        .await
+        .map_err(|_| ApiError::storage())?
+    {
+        return Err(ApiError::conflict(
+            "ansible_target_busy",
+            "another job is active for this target",
+        ));
+    }
+    Ok(None)
+}
+
+async fn persist_created_job(state: &ApiState, job: &AnsibleJob) -> Result<(), ApiError> {
+    let Some(repositories) = state.repositories.clone() else {
+        return Ok(());
+    };
+    repositories
+        .ansible_jobs
+        .save(job)
+        .await
+        .map_err(|_| ApiError::storage())?;
+    let events = state
+        .ansible
+        .read()
+        .await
+        .events(job.id)
+        .map_err(map_ansible_error)?;
+    for event in events {
+        repositories
+            .ansible_jobs
+            .append_event(&event)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    Ok(())
 }
 
 pub(super) async fn get_ansible_job(

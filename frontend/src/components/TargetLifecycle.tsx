@@ -17,11 +17,11 @@ function stepStatus(target: TargetDto, step: StepKey): "complete" | "current" | 
   return "pending";
 }
 
-export function TargetLifecycle({ target }: { target: TargetDto }) {
+export function TargetLifecycle({ target }: Readonly<{ target: TargetDto }>) {
   const isManaged = target.state === "managed";
   const isDisabled = target.state === "disabled";
-  const statusLabel = isManaged ? "Verbunden" : isDisabled ? "Deaktiviert" : "Wartet auf Agent";
-  const statusClass = isManaged ? "success" : isDisabled ? "neutral" : "pending";
+  const statusLabel = lifecycleStatusLabel(target.state);
+  const statusClass = lifecycleStatusClass(target.state);
 
   return (
     <section className="panel lifecycle-panel" aria-label={`Onboarding-Status für ${target.name}`}>
@@ -40,7 +40,7 @@ export function TargetLifecycle({ target }: { target: TargetDto }) {
           return (
             <li className={`lifecycle-step ${status}`} key={step.key}>
               <span className="lifecycle-marker" aria-hidden="true">
-                {status === "complete" ? "✓" : status === "blocked" ? "—" : status === "current" ? "•" : index + 1}
+                {stepMarker(status, index)}
               </span>
               <div>
                 <strong>{step.label}</strong>
@@ -51,27 +51,36 @@ export function TargetLifecycle({ target }: { target: TargetDto }) {
         })}
       </ol>
 
-      {isManaged ? (
-        <div className="callout success" role="status">
-          <strong>Der LXC ist bereit.</strong>
-          <p>Der Agent ist verbunden. Healthchecks und Workflows können jetzt ausgeführt werden.</p>
-          <Link className="text-link" to="/workflows">Workflows öffnen →</Link>
-        </div>
-      ) : isDisabled ? (
-        <div className="callout">
-          <strong>Das Ziel ist deaktiviert.</strong>
-          <p>Es werden keine Agenten- oder Workflow-Aktionen ausgeführt.</p>
-        </div>
-      ) : (
-        <div className="callout info">
-          <strong>Warum steht der Status auf „pending“?</strong>
-          <p>Das Ziel ist angelegt. Es wird erst als verbunden markiert, wenn der Agent bereitgestellt wurde und den ersten Heartbeat sendet.</p>
-          <div className="callout-actions">
-            <Link className="primary-button" to={`/workflows?target=${encodeURIComponent(target.id)}`}>Agent-Workflow öffnen</Link>
-            {target.kind === "lxc" ? <Link className="text-link" to="/enrollments/new">LXC-Auswahl öffnen</Link> : null}
-          </div>
-        </div>
-      )}
+      {lifecycleCallout(target, isManaged, isDisabled)}
     </section>
   );
+}
+
+function lifecycleStatusLabel(state: TargetDto["state"]) {
+  if (state === "managed") return "Verbunden";
+  if (state === "disabled") return "Deaktiviert";
+  return "Wartet auf Agent";
+}
+
+function lifecycleStatusClass(state: TargetDto["state"]) {
+  if (state === "managed") return "success";
+  if (state === "disabled") return "neutral";
+  return "pending";
+}
+
+function stepMarker(status: ReturnType<typeof stepStatus>, index: number) {
+  if (status === "complete") return "✓";
+  if (status === "blocked") return "—";
+  if (status === "current") return "•";
+  return index + 1;
+}
+
+function lifecycleCallout(target: TargetDto, isManaged: boolean, isDisabled: boolean) {
+  if (isManaged) {
+    return <div className="callout success"><strong>Der LXC ist bereit.</strong><p>Der Agent ist verbunden. Healthchecks und Workflows können jetzt ausgeführt werden.</p><Link className="text-link" to="/workflows">Workflows öffnen →</Link></div>;
+  }
+  if (isDisabled) {
+    return <div className="callout"><strong>Das Ziel ist deaktiviert.</strong><p>Es werden keine Agenten- oder Workflow-Aktionen ausgeführt.</p></div>;
+  }
+  return <div className="callout info"><strong>Warum steht der Status auf „pending“?</strong><p>Das Ziel ist angelegt. Es wird erst als verbunden markiert, wenn der Agent bereitgestellt wurde und den ersten Heartbeat sendet.</p><div className="callout-actions"><Link className="primary-button" to={`/workflows?target=${encodeURIComponent(target.id)}`}>Agent-Workflow öffnen</Link>{target.kind === "lxc" && <Link className="text-link" to="/enrollments/new">LXC-Auswahl öffnen</Link>}</div></div>;
 }

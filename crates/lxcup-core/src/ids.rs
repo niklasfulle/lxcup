@@ -39,7 +39,7 @@ uuid_id!(AgentRegistrationId);
 uuid_id!(UpdatePlanId);
 uuid_id!(ExecutionId);
 
-/// Proxmox-VMID eines LXC-Containers.
+/// Numerische Kennung eines historischen LXC-Datensatzes.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ContainerId(u64);
 

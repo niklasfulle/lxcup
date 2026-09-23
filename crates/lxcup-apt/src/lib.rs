@@ -28,7 +28,7 @@ impl AptInspectionRequest {
     }
 }
 
-/// Captured output from a controlled agent or Proxmox execution.
+/// Captured output from a controlled agent execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AptExecutionResult {
     pub stdout: String,

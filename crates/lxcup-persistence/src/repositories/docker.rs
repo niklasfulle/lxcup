@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    ContainerId, Database, DockerWorkload, DockerWorkloadRepository, RepositoryError,
+    docker_workload_from_row,
+};
 
 impl DockerWorkloadRepository {
     pub(crate) fn new(database: &Database) -> Self {

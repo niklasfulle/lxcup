@@ -12,7 +12,7 @@ export function WorkflowDetailPage() {
   const events = useAnsibleJobEvents(jobId, true);
 
   if (job.isLoading) return <section className="panel"><p className="muted">Lade Workflow…</p></section>;
-  if (job.error || !job.data) return <section className="panel"><h1>Workflow nicht gefunden</h1><p className="error-state">{job.error?.message ?? "Der Job ist nicht mehr verfügbar."}</p><Link className="text-link" to="/workflows">Zur Workflow-Übersicht</Link></section>;
+  if (job.error !== null || job.data === undefined) return <section className="panel"><h1>Workflow nicht gefunden</h1><p className="error-state">{job.error?.message ?? "Der Job ist nicht mehr verfügbar."}</p><Link className="text-link" to="/workflows">Zur Workflow-Übersicht</Link></section>;
 
   const currentJob = job.data;
   const latestEvent = events.data?.at(-1);
@@ -20,20 +20,33 @@ export function WorkflowDetailPage() {
   const rawLog = events.data?.map((event) => `[${new Date(event.created_at).toISOString()}] #${event.sequence} ${eventTitle(event)}\n${eventDetail(event)}`).join("\n\n") ?? "";
   return <>
     <header className="page-header"><div><p className="eyebrow">Workflow-Protokoll</p><h1>{currentJob.operation.replaceAll("_", " ")}</h1><p className="muted">Job {currentJob.id}</p></div><Link className="secondary-button" to="/workflows">← Alle Workflows</Link></header>
-    <div className="panel-grid"><section className="panel"><h2>Ausführung</h2><dl className="detail-list"><dt>Status</dt><dd><span className={`status-badge ${currentJob.status === "succeeded" ? "success" : currentJob.status === "failed" || currentJob.status === "aborted" ? "neutral" : "pending"}`}>{currentJob.status}</span></dd><dt>Modus</dt><dd>{currentJob.mode}</dd><dt>Playbook</dt><dd>{currentJob.playbook} · v{currentJob.playbook_version}</dd></dl></section><section className="panel"><h2>Zeiten</h2><dl className="detail-list"><dt>Erstellt</dt><dd>{new Date(currentJob.created_at).toLocaleString()}</dd><dt>Letzte Änderung</dt><dd>{new Date(currentJob.updated_at).toLocaleString()}</dd><dt>Protokoll</dt><dd>{active ? "wird automatisch aktualisiert" : "abgeschlossen"}</dd></dl></section></div>
-    <section className={`callout ${guidance.level}`} role={guidance.level === "danger" ? "alert" : "status"}><strong>{guidance.title}</strong><p>{guidance.detail}</p></section>
-    <section className="panel"><div className="section-heading"><div><h2>Ausführungsprotokoll</h2><p className="muted">Zeitlich sortierte, audit-sichere Schritte und Fehlerhinweise dieses Jobs.</p></div><span className="muted">{events.data?.length ?? 0} Einträge</span></div>{events.isLoading ? <p className="muted">Lade Protokoll…</p> : events.error ? <p className="error-state" role="alert">{events.error.message}</p> : !events.data?.length ? <p className="empty-state">Noch keine Worker-Meldung. Prüfe, ob ein Ansible-Worker läuft und das Ziel erreichbar ist.</p> : <><ol className="job-log">{events.data.map((event) => <li key={event.sequence}><span className="job-log-sequence">{event.sequence}</span><div><strong>{eventTitle(event)}</strong><p>{eventDetail(event)}</p></div><time className="muted">{new Date(event.created_at).toLocaleString()}</time></li>)}</ol><div className="job-log-heading"><h3>Vollständiger technischer Log</h3><CopyLogButton log={rawLog} /></div><pre className="job-raw-log">{rawLog}</pre></>}</section>
+    <div className="panel-grid"><section className="panel"><h2>Ausführung</h2><dl className="detail-list"><dt>Status</dt><dd><span className={`status-badge ${statusClass(currentJob.status)}`}>{currentJob.status}</span></dd><dt>Modus</dt><dd>{currentJob.mode}</dd><dt>Playbook</dt><dd>{currentJob.playbook} · v{currentJob.playbook_version}</dd></dl></section><section className="panel"><h2>Zeiten</h2><dl className="detail-list"><dt>Erstellt</dt><dd>{new Date(currentJob.created_at).toLocaleString()}</dd><dt>Letzte Änderung</dt><dd>{new Date(currentJob.updated_at).toLocaleString()}</dd><dt>Protokoll</dt><dd>{active ? "wird automatisch aktualisiert" : "abgeschlossen"}</dd></dl></section></div>
+    <output className={`callout ${guidance.level}`} aria-live="polite"><strong>{guidance.title}</strong><p>{guidance.detail}</p></output>
+    <section className="panel"><div className="section-heading"><div><h2>Ausführungsprotokoll</h2><p className="muted">Zeitlich sortierte, audit-sichere Schritte und Fehlerhinweise dieses Jobs.</p></div><span className="muted">{events.data?.length ?? 0} Einträge</span></div>{workflowLogContent(events, rawLog)}</section>
   </>;
 }
 
-function CopyLogButton({ log }: { log: string }) {
+function CopyLogButton({ log }: Readonly<{ log: string }>) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     await navigator.clipboard.writeText(log);
     setCopied(true);
-    window.setTimeout(() => setCopied(false), 2_000);
+    globalThis.setTimeout(() => setCopied(false), 2_000);
   };
   return <button className="secondary-button copy-log-button" type="button" onClick={copy}>{copied ? "Log kopiert" : "Log kopieren"}</button>;
+}
+
+function statusClass(status: string) {
+  if (status === "succeeded") return "success";
+  if (status === "failed" || status === "aborted") return "neutral";
+  return "pending";
+}
+
+function workflowLogContent(events: ReturnType<typeof useAnsibleJobEvents>, rawLog: string) {
+  if (events.isLoading) return <p className="muted">Lade Protokoll…</p>;
+  if (events.error) return <p className="error-state" role="alert">{events.error.message}</p>;
+  if (events.data === undefined || events.data.length === 0) return <p className="empty-state">Noch keine Worker-Meldung. Prüfe, ob ein Ansible-Worker läuft und das Ziel erreichbar ist.</p>;
+  return <><ol className="job-log">{events.data.map((event) => <li key={event.sequence}><span className="job-log-sequence">{event.sequence}</span><div><strong>{eventTitle(event)}</strong><p>{eventDetail(event)}</p></div><time className="muted">{new Date(event.created_at).toLocaleString()}</time></li>)}</ol><div className="job-log-heading"><h3>Vollständiger technischer Log</h3><CopyLogButton log={rawLog} /></div><pre className="job-raw-log">{rawLog}</pre></>;
 }
 
 function eventTitle(event: AnsibleJobEvent) {

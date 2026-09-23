@@ -25,4 +25,11 @@ describe("TargetLifecycle", () => {
     expect(screen.getByText(/ersten Heartbeat sendet/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Agent-Workflow öffnen" })).toHaveAttribute("href", "/workflows?target=target-1");
   });
+
+  it("renders managed and disabled status branches", () => {
+    render(<MemoryRouter><TargetLifecycle target={{ ...pendingTarget, state: "managed", name: "managed" }} /><TargetLifecycle target={{ ...pendingTarget, state: "disabled", name: "disabled", kind: "linux_server" }} /></MemoryRouter>);
+    expect(screen.getByText("Der LXC ist bereit.")).toBeInTheDocument();
+    expect(screen.getByText("Das Ziel ist deaktiviert.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Workflows öffnen →" })).toHaveAttribute("href", "/workflows");
+  });
 });

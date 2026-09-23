@@ -3,18 +3,16 @@
 use std::{
     collections::HashMap,
     convert::Infallible,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Instant,
+    sync::{Arc, atomic::Ordering},
 };
 
+#[cfg(test)]
+use axum::http::Method;
 use axum::{
     Json, Router,
     extract::{Extension, Json as JsonBody, Path, State},
-    http::{HeaderMap, Method, StatusCode},
-    middleware::{self, Next},
+    http::StatusCode,
+    middleware,
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
@@ -22,24 +20,18 @@ use axum::{
     routing::{get, post},
 };
 use lxcup_agent::{
-    AgentAction, AgentClient, AgentClientConfig, AgentCommandRequest, AgentHealth, AgentHeartbeat,
-    AgentMetrics, DockerContainerInfo,
+    AgentClient, AgentClientConfig, AgentHealth, AgentHeartbeat, AgentMetrics, DockerContainerInfo,
 };
-use lxcup_ansible::{
-    AnsibleJob, AnsibleJobCoordinator, AnsibleJobRequest, AnsibleJobStatus, AnsibleOperation,
-    AnsibleParameters, ExecutionMode, JobEvent, JobEventKind, JobFailureCode, JobSubmission,
-};
+use lxcup_ansible::AnsibleJobCoordinator;
 use lxcup_core::{
-    ActorRole, AgentRegistration, Container, ContainerAction, ContainerId,
-    ContainerManagementState, DockerWorkload, DockerWorkloadManagementState, Enrollment,
-    EnrollmentId, EnrollmentState, EnvironmentId, EnvironmentStatus, Execution, ExecutionId, Node,
-    NodeId, Permission, PlanStatus, ProxmoxEnvironment, ResourceLifecycle, ResourceTarget, Scan,
+    ActorRole, AgentRegistration, Container, ContainerId, DockerWorkload,
+    DockerWorkloadManagementState, Enrollment, EnrollmentId, EnrollmentState, Execution,
+    ExecutionId, Permission, Scan,
     ScanId, SecretId, SecretKind, SecretScope, SecretValue, Target, TargetId, TargetKind,
     TargetState, TargetTransport, UpdatePlan, UpdatePlanId,
 };
-use lxcup_execution::{ExecutionCoordinator, ExecutionRequest, ExecutionStart};
+use lxcup_execution::ExecutionCoordinator;
 use lxcup_persistence::Repositories;
-use lxcup_planner::{DryRunChange, PlannerInput, UpdatePlanner};
 use lxcup_safety::{HealthCheckResult, RebootRequirement, SnapshotState};
 use lxcup_secrets::{
     CreateSecret, InMemorySecretStore, SecretStore, SecretStoreError, StoredSecretMetadata,
@@ -49,14 +41,29 @@ use tokio::sync::{RwLock, broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use uuid::Uuid;
 
-mod resources;
-pub(crate) use resources::*;
+mod targets;
+pub(crate) use targets::{
+    create_target, get_target, list_targets, receive_agent_heartbeat, require_permission,
+};
 mod workflows;
-pub(crate) use workflows::*;
+pub(crate) use workflows::{
+    create_ansible_job, create_enrollment, get_ansible_job, get_ansible_job_events, get_enrollment,
+    list_ansible_jobs,
+};
 mod inventory;
-pub(crate) use inventory::*;
+pub(crate) use inventory::{
+    ApiMetrics, AuthConfig, abort_execution, confirm_plan, create_plan, get_execution_result,
+    get_plan, list_container_plans, list_containers, list_scans, live_health,
+    metrics, ready_health, reconcile_execution, request_middleware, run_execution, run_scan,
+    start_scan,
+};
 mod agent;
-pub(crate) use agent::*;
+pub(crate) use agent::{
+    DockerWorkloadDto, SecretAuditEvent, adopt_docker_container, create_secret, delete_secret,
+    discover_docker_containers, get_agent_health, get_agent_metrics, get_secret,
+    list_docker_containers, list_secret_audit, list_secrets, map_secret_error, register_agent,
+    remove_docker_container, revoke_agent, revoke_secret, rotate_secret,
+};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -102,14 +109,6 @@ impl ApiState {
         self
     }
 
-    pub async fn replace_nodes(&self, nodes: Vec<Node>) {
-        self.store.write().await.nodes = nodes;
-    }
-
-    pub async fn replace_containers(&self, containers: Vec<Container>) {
-        self.store.write().await.containers = containers;
-    }
-
     /// Restores the platform-neutral target inventory after a server restart.
     pub async fn restore_targets(&self) -> usize {
         let Some(repositories) = self.repositories.as_ref() else {
@@ -121,6 +120,14 @@ impl ApiState {
         let restored = targets.len();
         self.store.write().await.targets = targets;
         restored
+    }
+
+    #[cfg(test)]
+    pub async fn replace_nodes(&self, _nodes: Vec<lxcup_core::Node>) {}
+
+    #[cfg(test)]
+    pub async fn replace_containers(&self, containers: Vec<Container>) {
+        self.store.write().await.containers = containers;
     }
 
     /// Rebuilds active agent clients from persisted registrations after a
@@ -211,8 +218,6 @@ impl Default for ApiState {
 struct ApiStore {
     targets: Vec<Target>,
     agent_reports: HashMap<TargetId, AgentHeartbeat>,
-    environments: Vec<ProxmoxEnvironment>,
-    nodes: Vec<Node>,
     containers: Vec<Container>,
     enrollments: Vec<Enrollment>,
     enrollment_keys: HashMap<String, EnrollmentId>,
@@ -221,8 +226,6 @@ struct ApiStore {
     executions: Vec<Execution>,
     safety: HashMap<ExecutionId, SafetyDto>,
     results: HashMap<ExecutionId, ExecutionResultDto>,
-    container_actions: Vec<ContainerActionTask>,
-    container_action_keys: HashMap<(ContainerId, String), Uuid>,
     secret_audit: Vec<SecretAuditEvent>,
     docker_workloads: HashMap<(ContainerId, String), DockerWorkloadDto>,
 }
@@ -277,25 +280,6 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/targets", get(list_targets).post(create_target))
         .route("/api/v1/targets/{target_id}", get(get_target))
         .route("/api/v1/agents/heartbeat", post(receive_agent_heartbeat))
-        .route("/api/v1/nodes", get(list_nodes))
-        .route(
-            "/api/v1/environments",
-            get(list_environments).post(create_environment),
-        )
-        .route(
-            "/api/v1/environments/{environment_id}",
-            get(get_environment)
-                .patch(update_environment)
-                .delete(delete_environment),
-        )
-        .route(
-            "/api/v1/environments/{environment_id}/check",
-            post(check_environment),
-        )
-        .route(
-            "/api/v1/environments/{environment_id}/disable",
-            post(disable_environment),
-        )
         .route("/api/v1/secrets", get(list_secrets).post(create_secret))
         .route("/api/v1/secrets/audit", get(list_secret_audit))
         .route(
@@ -315,19 +299,7 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/ansible/jobs/{job_id}/events",
             get(get_ansible_job_events),
         )
-        .route(
-            "/api/v1/nodes/{node_id}/containers",
-            get(list_node_containers),
-        )
         .route("/api/v1/containers", get(list_containers))
-        .route(
-            "/api/v1/containers/{container_id}/actions",
-            post(create_container_action),
-        )
-        .route(
-            "/api/v1/container-actions/{action_id}",
-            get(get_container_action),
-        )
         .route(
             "/api/v1/containers/{container_id}/scans",
             get(list_scans).post(start_scan),
@@ -533,7 +505,6 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/health/live": {"get": {}},
     "/health/ready": {"get": {}},
     "/metrics": {"get": {}},
-    "/api/v1/nodes": {"get": {"responses": {"200": {"description": "Nodes"}}}},
     "/api/v1/enrollments": {"post": {"responses": {"202": {"description": "Enrollment accepted"}}}},
     "/api/v1/enrollments/{enrollment_id}": {"get": {"responses": {"200": {"description": "Enrollment status"}}}},
     "/api/v1/ansible/jobs": {"post": {"responses": {"202": {"description": "Ansible job accepted"}}}},
@@ -595,17 +566,6 @@ fn parse_uuid(value: &str, label: &'static str) -> Result<Uuid, ApiError> {
     Uuid::parse_str(value).map_err(|_| ApiError::bad_request("invalid_id", label))
 }
 
-fn parse_node_id(value: &str) -> Result<NodeId, ApiError> {
-    Ok(NodeId::from_uuid(parse_uuid(value, "node id")?))
-}
-
-fn parse_environment_id(value: &str) -> Result<EnvironmentId, ApiError> {
-    Ok(EnvironmentId::from_uuid(parse_uuid(
-        value,
-        "environment id",
-    )?))
-}
-
 fn parse_container_id(value: &str) -> Result<ContainerId, ApiError> {
     value
         .parse::<u64>()
@@ -616,34 +576,8 @@ fn parse_container_id(value: &str) -> Result<ContainerId, ApiError> {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct NodeDto {
-    pub id: NodeId,
-    pub name: String,
-    pub address: String,
-    pub status: String,
-    pub proxmox_version: Option<String>,
-    pub capabilities: Vec<String>,
-    pub last_checked_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-impl From<&Node> for NodeDto {
-    fn from(node: &Node) -> Self {
-        Self {
-            id: node.id,
-            name: node.name.clone(),
-            address: node.address.clone(),
-            status: format!("{:?}", node.status).to_ascii_lowercase(),
-            proxmox_version: node.proxmox_version.clone(),
-            capabilities: node.capabilities.clone(),
-            last_checked_at: node.last_checked_at,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub struct ContainerDto {
     pub id: ContainerId,
-    pub node_id: NodeId,
     pub name: String,
     pub operating_system: String,
     pub status: String,
@@ -655,7 +589,6 @@ impl From<&Container> for ContainerDto {
     fn from(container: &Container) -> Self {
         Self {
             id: container.id,
-            node_id: container.node_id,
             name: container.name.clone(),
             operating_system: format!("{:?}", container.operating_system).to_ascii_lowercase(),
             status: format!("{:?}", container.status).to_ascii_lowercase(),

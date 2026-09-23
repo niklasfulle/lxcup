@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "lxcup", version, about = "Proxmox LXC update manager")]
+#[command(name = "lxcup", version, about = "Managed resource update manager")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

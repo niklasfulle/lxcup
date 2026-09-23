@@ -73,7 +73,7 @@ pub enum DomainError {
     #[error("package name must not contain whitespace")]
     InvalidPackageName,
 
-    /// Eine Proxmox-Endpoint-URL ist nicht sicher oder nicht kanonisch.
+    /// Eine Endpoint-URL ist nicht sicher oder nicht kanonisch.
     #[error("environment endpoint must be a valid https URL without whitespace")]
     InvalidEnvironmentEndpoint,
 
@@ -149,3 +149,85 @@ impl LxcupError {
 
 /// Einheitlicher Result-Typ für Anwendungsgrenzen.
 pub type LxcupResult<T> = Result<T, LxcupError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_codes_are_stable_snake_case_values() {
+        let codes = [
+            (ErrorCode::InvalidRequest, "invalid_request"),
+            (ErrorCode::NotFound, "not_found"),
+            (ErrorCode::Unauthorized, "unauthorized"),
+            (ErrorCode::Forbidden, "forbidden"),
+            (ErrorCode::Conflict, "conflict"),
+            (ErrorCode::DependencyUnavailable, "dependency_unavailable"),
+            (ErrorCode::Timeout, "timeout"),
+            (ErrorCode::Internal, "internal_error"),
+        ];
+        for (code, expected) in codes {
+            assert_eq!(code.as_str(), expected);
+            assert!(!serde_json::to_string(&code).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn retry_policy_is_bounded_and_allows_only_configured_attempts() {
+        let policy = RetryPolicy::conservative();
+        assert_eq!(policy.max_attempts, 3);
+        assert_eq!(policy.delay_ms(0), 100);
+        assert_eq!(policy.delay_ms(1), 200);
+        assert_eq!(policy.delay_ms(6), 2_000);
+        assert_eq!(policy.delay_ms(255), 2_000);
+        assert!(policy.allows_retry(0));
+        assert!(policy.allows_retry(1));
+        assert!(!policy.allows_retry(2));
+        assert!(!policy.allows_retry(u8::MAX));
+    }
+
+    #[test]
+    fn infrastructure_and_domain_errors_expose_safe_categories() {
+        let domain = LxcupError::from(DomainError::PermissionDenied);
+        assert_eq!(domain.code(), "domain_error");
+        assert_eq!(
+            domain.public_message(),
+            "The requested domain operation is not valid."
+        );
+
+        let source = std::io::Error::other("secret detail");
+        let infrastructure = InfrastructureError::new("connect", source);
+        assert_eq!(infrastructure.operation(), "connect");
+        let error = LxcupError::from(infrastructure);
+        assert_eq!(error.code(), "infrastructure_error");
+        assert_eq!(
+            error.public_message(),
+            "A required infrastructure operation failed."
+        );
+        assert!(!error.to_string().contains("secret detail"));
+    }
+
+    #[test]
+    fn domain_error_messages_remain_actionable() {
+        assert_eq!(
+            DomainError::EmptyValue { field: "name" }.to_string(),
+            "name must not be empty"
+        );
+        assert_eq!(
+            DomainError::InvalidPackageName.to_string(),
+            "package name must not contain whitespace"
+        );
+        assert_eq!(
+            DomainError::InvalidEnvironmentEndpoint.to_string(),
+            "environment endpoint must be a valid https URL without whitespace"
+        );
+        assert_eq!(
+            DomainError::InvalidStateTransition("queued").to_string(),
+            "invalid domain state transition: queued"
+        );
+        assert_eq!(
+            DomainError::ConfirmationRequired.to_string(),
+            "explicit confirmation is required"
+        );
+    }
+}

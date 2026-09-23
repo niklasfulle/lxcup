@@ -44,6 +44,7 @@
   body { @apply m-0 min-w-[320px] font-sans text-sm; color: var(--ink); background: var(--paper); }
   button, input, select { font: inherit; }
   a { @apply no-underline; color: inherit; }
+  :where(a, button, input, select, textarea):focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 }
 
 @layer components {
@@ -129,8 +130,18 @@
   th { color: var(--muted); background: var(--paper-muted); }
   tbody tr:hover { background: var(--primary-soft); }
   .sort-button { @apply border-0 bg-transparent p-0 font-bold; font: inherit; }
-  .workflow-panel form { @apply grid max-w-5xl gap-4; }
-  .workflow-grid { @apply grid grid-cols-1 gap-3 md:grid-cols-3; }
+  .workflow-panel form { @apply grid max-w-none gap-4; }
+  .registration-heading { @apply mb-4 items-start; }
+  .registration-heading h2 { @apply mb-1 text-base; }
+  .step-badge { @apply shrink-0 border px-2 py-1 text-[10px] font-bold uppercase tracking-wider; color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+  .registration-layout { @apply grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,22rem)]; }
+  .registration-form { @apply min-w-0; }
+  .register-target-button { @apply justify-self-center px-8; min-width: 15rem; }
+  .form-section-heading { @apply mb-4 flex items-start justify-between gap-4 border-b pb-3; border-color: var(--line); }
+  .form-section-heading h3, .bootstrap-card h3 { @apply m-0 text-sm font-semibold; }
+  .form-section-heading p { @apply mb-0 mt-1 text-xs; }
+  .form-section-heading .text-link { @apply m-0 shrink-0; }
+  .workflow-grid { @apply grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3; }
   .inline-field { @apply flex items-stretch gap-2; }
   .inline-field select { @apply min-w-0 flex-1; }
   .inline-secret-editor { @apply my-3 grid gap-3 border p-3; border-color: var(--line); background: var(--panel); }
@@ -140,6 +151,23 @@
   .workflow-summary { @apply flex flex-wrap gap-4 border-l-4 px-3 py-2 text-sm; border-color: var(--primary); background: var(--paper-muted); }
   .confirm-field { @apply flex items-center gap-2 text-sm font-medium; }
   .confirm-field input { @apply h-4 w-4 accent-blue-600; }
+  .bootstrap-card { @apply grid gap-3 border p-4; border-color: var(--line); background: var(--paper-muted); }
+  .bootstrap-card .eyebrow { @apply mb-0; }
+  .bootstrap-card > p { @apply mb-0 text-xs leading-5; }
+  .bootstrap-steps { @apply m-0 grid list-none gap-2 border-y py-3 pl-0; border-color: var(--line); }
+  .bootstrap-steps li { @apply flex items-center gap-2 text-xs; }
+  .bootstrap-steps li > span:first-child { @apply grid h-5 w-5 shrink-0 place-items-center rounded-full bg-lxcup-primary text-[10px] font-bold text-white; }
+  .bootstrap-copy-button { @apply w-full; }
+  .copy-status { @apply min-h-4 text-xs font-medium; color: var(--success); }
+  .bootstrap-note { @apply border-l-2 pl-2 text-[11px] leading-4; border-color: var(--primary); }
+  .resource-relationship-map { @apply mb-3 grid items-stretch gap-3 lg:grid-cols-[1fr_auto_1fr_auto_1fr]; }
+  .resource-relationship-map article { @apply flex gap-3 border p-3; border-color: var(--line); background: var(--panel); }
+  .resource-relationship-map article > div { @apply min-w-0; }
+  .resource-relationship-map strong { @apply block text-xs; }
+  .resource-relationship-map p { @apply mb-2 mt-1 text-xs leading-5; color: var(--muted); }
+  .resource-relationship-map a { @apply text-xs font-semibold text-lxcup-primary hover:underline; }
+  .relationship-step { @apply grid h-6 w-6 shrink-0 place-items-center rounded-full bg-lxcup-primary text-xs font-bold text-white; }
+  .relationship-arrow { @apply hidden self-center text-lg font-bold lg:block; color: var(--primary); }
   .section-heading, .secret-row, .audit-list li { @apply flex items-center justify-between gap-3; }
   .section-heading h2 { @apply mb-0; }
   .secret-list, .audit-list { @apply m-0 grid list-none gap-2 p-0; }
@@ -222,6 +250,8 @@
   .topbar, .page-header, .page-toolbar { @apply items-start flex-col; }
   .topbar-actions { @apply justify-start; }
   .section-heading, .secret-row { @apply items-start flex-col; }
+  .form-section-heading { @apply flex-col; }
+  .resource-relationship-map { @apply grid-cols-1; }
   .job-log li { @apply grid-cols-[auto_1fr]; }
   .job-log time { @apply col-start-2 text-left; }
 }

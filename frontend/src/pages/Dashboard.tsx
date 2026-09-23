@@ -11,6 +11,13 @@ export function Dashboard() {
   </>;
 }
 
-function ResourcePanel({ title, loading, error, empty, children }: { title: string; loading: boolean; error: Error | null; empty: boolean; children: React.ReactNode }) {
-  return <article className="panel"><h2>{title}</h2>{loading ? <p className="muted">Daten werden geladen…</p> : error ? <p className="error-state">{error.message}</p> : empty ? <p className="empty-state">Noch keine Daten vorhanden.</p> : children}</article>;
+function ResourcePanel({ title, loading, error, empty, children }: Readonly<{ title: string; loading: boolean; error: Error | null; empty: boolean; children: React.ReactNode }>) {
+  return <article className="panel"><h2>{title}</h2>{resourcePanelBody({ loading, error, empty, children })}</article>;
+}
+
+function resourcePanelBody({ loading, error, empty, children }: Readonly<{ loading: boolean; error: Error | null; empty: boolean; children: React.ReactNode }>) {
+  if (loading) return <p className="muted">Daten werden geladen…</p>;
+  if (error) return <p className="error-state">{error.message}</p>;
+  if (empty) return <p className="empty-state">Noch keine Daten vorhanden.</p>;
+  return children;
 }

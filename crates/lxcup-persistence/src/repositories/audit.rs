@@ -1,4 +1,6 @@
-use super::*;
+use super::{
+    AuditEvent, AuditEventRepository, Database, ExecutionId, NodeId, RepositoryError, UpdatePlanId,
+};
 
 impl AuditEventRepository {
     pub(crate) fn new(database: &Database) -> Self {

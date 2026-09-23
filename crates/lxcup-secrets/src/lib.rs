@@ -621,8 +621,8 @@ mod tests {
 
     fn request(value: &str) -> CreateSecret {
         CreateSecret {
-            name: "proxmox-test".to_owned(),
-            kind: SecretKind::ProxmoxApiToken,
+            name: "connection-test".to_owned(),
+            kind: SecretKind::Generic,
             scope: SecretScope::Global,
             value: SecretValue::new(value).unwrap(),
         }
@@ -724,13 +724,13 @@ mod tests {
     #[test]
     fn docker_secret_provider_is_read_only_and_path_safe() {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("proxmox-token"), "docker-secret").unwrap();
+        std::fs::write(directory.path().join("connection-token"), "docker-secret").unwrap();
         let store = DockerSecretStore::new(
             directory.path(),
             [DockerSecretDefinition {
-                name: "proxmox-test".to_owned(),
-                file_name: "proxmox-token".to_owned(),
-                kind: SecretKind::ProxmoxApiToken,
+                name: "connection-test".to_owned(),
+                file_name: "connection-token".to_owned(),
+                kind: SecretKind::Generic,
                 scope: SecretScope::Global,
             }],
         )

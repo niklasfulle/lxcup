@@ -47,6 +47,9 @@ services:
       dockerfile: frontend/Dockerfile
     environment:
       VITE_API_PROXY_TARGET: http://lxcup-server:8080
+      # Öffentliche URL, unter der ein Zielhost das Bootstrap-Skript laden kann.
+      # Fällt ohne Konfiguration auf die Browser-Origin zurück.
+      VITE_BOOTSTRAP_BASE_URL: ${LXCUP_PUBLIC_URL:-}
     depends_on:
       lxcup-server:
         condition: service_started

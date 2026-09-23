@@ -1,11 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { apiClient, getAnsibleJob, getAnsibleJobEvents, getEnrollment, listAnsibleJobs, listDockerWorkloads, listTargets, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type NodeDto, type TargetDto } from "./api";
+import { apiClient, getAnsibleJob, getAnsibleJobEvents, getEnrollment, listAnsibleJobs, listDockerWorkloads, listTargets, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type TargetDto } from "./api";
 
 export const queryKeys = {
   targets: ["targets"] as const,
-  nodes: ["nodes"] as const,
   containers: ["containers"] as const,
-  nodeContainers: (nodeId: string) => ["nodes", nodeId, "containers"] as const,
   executionSafety: (executionId: string) => ["executions", executionId, "safety"] as const,
   ansibleJobs: ["ansible-jobs"] as const,
   ansibleJob: (jobId: string) => ["ansible-jobs", jobId] as const,
@@ -22,14 +20,6 @@ export function useTargets() {
   });
 }
 
-export function useNodes() {
-  return useQuery<NodeDto[]>({
-    queryKey: queryKeys.nodes,
-    queryFn: ({ signal }) => apiClient.get<NodeDto[]>("/api/v1/nodes", signal),
-    staleTime: 15_000,
-  });
-}
-
 export function useExecutionSafety(executionId: string | undefined) {
   return useQuery<ExecutionSafetyDto>({
     queryKey: executionId ? queryKeys.executionSafety(executionId) : ["executions", "none", "safety"],
@@ -43,15 +33,6 @@ export function useContainers() {
   return useQuery<ContainerDto[]>({
     queryKey: queryKeys.containers,
     queryFn: ({ signal }) => apiClient.get<ContainerDto[]>("/api/v1/containers", signal),
-    staleTime: 15_000,
-  });
-}
-
-export function useNodeContainers(nodeId: string | undefined) {
-  return useQuery<ContainerDto[]>({
-    queryKey: nodeId ? queryKeys.nodeContainers(nodeId) : ["nodes", "none", "containers"],
-    queryFn: ({ signal }) => apiClient.get<ContainerDto[]>(`/api/v1/nodes/${nodeId}/containers`, signal),
-    enabled: Boolean(nodeId),
     staleTime: 15_000,
   });
 }

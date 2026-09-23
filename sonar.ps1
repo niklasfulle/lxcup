@@ -67,6 +67,29 @@ function Test-SonarHost {
     }
 }
 
+function Import-CoverageDatabaseUrl {
+    param([string]$Root)
+
+    if (-not [string]::IsNullOrWhiteSpace($env:DATABASE_TEST_URL)) {
+        return
+    }
+
+    $dotEnv = Join-Path $Root ".env"
+    if (-not (Test-Path -LiteralPath $dotEnv)) {
+        return
+    }
+
+    foreach ($line in Get-Content -LiteralPath $dotEnv) {
+        if ($line -match '^\s*DATABASE_TEST_URL\s*=\s*(.*)\s*$') {
+            $value = $matches[1].Trim().Trim('"')
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                $env:DATABASE_TEST_URL = $value
+            }
+            break
+        }
+    }
+}
+
 function Invoke-Coverage {
     param([string]$Root)
 
@@ -106,11 +129,12 @@ if (-not (Test-Path -LiteralPath $properties)) {
     throw "sonar-project.properties wurde im Projektroot nicht gefunden: $root"
 }
 
-Test-SonarHost -Url $SonarHostUrl
-Invoke-Coverage -Root $root
-
 $oldToken = $env:SONAR_TOKEN
+$oldDatabaseTestUrl = $env:DATABASE_TEST_URL
 try {
+    Import-CoverageDatabaseUrl -Root $root
+    Test-SonarHost -Url $SonarHostUrl
+    Invoke-Coverage -Root $root
     if ([string]::IsNullOrWhiteSpace($Token)) {
         Remove-Item Env:SONAR_TOKEN -ErrorAction SilentlyContinue
         Write-Warning "Kein Token übergeben. Der Scan funktioniert nur, wenn SonarQube anonyme Analyse erlaubt."
@@ -139,5 +163,11 @@ finally {
     }
     else {
         $env:SONAR_TOKEN = $oldToken
+    }
+    if ($null -eq $oldDatabaseTestUrl) {
+        Remove-Item Env:DATABASE_TEST_URL -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:DATABASE_TEST_URL = $oldDatabaseTestUrl
     }
 }

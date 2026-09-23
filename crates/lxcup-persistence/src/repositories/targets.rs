@@ -1,4 +1,4 @@
-use super::*;
+use super::{Database, RepositoryError, Target, TargetId, TargetRepository, target_from_row};
 
 impl TargetRepository {
     pub(crate) fn new(database: &Database) -> Self {

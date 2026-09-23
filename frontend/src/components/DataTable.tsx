@@ -1,7 +1,9 @@
 import { flexRender, getCoreRowModel, getFilteredRowModel, getSortedRowModel, useReactTable, type ColumnDef, type SortingState } from "@tanstack/react-table";
 import { useState } from "react";
 
-export function DataTable<T>({ columns, data, emptyMessage }: { columns: ColumnDef<T, any>[]; data: T[]; emptyMessage: string }) {
+type DataTableProps<T> = Readonly<{ columns: ColumnDef<T, any>[]; data: T[]; emptyMessage: string }>;
+
+export function DataTable<T>({ columns, data, emptyMessage }: DataTableProps<T>) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [filter, setFilter] = useState("");
   const table = useReactTable({
@@ -19,7 +21,19 @@ export function DataTable<T>({ columns, data, emptyMessage }: { columns: ColumnD
     {table.getRowModel().rows.length === 0 ? <p className="empty-state">{emptyMessage}</p> : <table><thead>{table.getHeaderGroups().map((group) => <tr key={group.id}>{group.headers.map((header) => {
       if (header.isPlaceholder) return <th key={header.id} />;
       const sorted = header.column.getIsSorted();
-      return <th key={header.id} aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : "none"}><button type="button" className="sort-button" aria-label={`${String(header.column.columnDef.header)} sortieren`} onClick={header.column.getToggleSortingHandler()}>{flexRender(header.column.columnDef.header, header.getContext())}{sorted === "asc" ? " ↑" : sorted === "desc" ? " ↓" : ""}</button></th>;
+      return <th key={header.id} aria-sort={sortAriaValue(sorted)}><button type="button" className="sort-button" aria-label={`${String(header.column.columnDef.header)} sortieren`} onClick={header.column.getToggleSortingHandler()}>{flexRender(header.column.columnDef.header, header.getContext())}{sortIndicator(sorted)}</button></th>;
     })}</tr>)}</thead><tbody>{table.getRowModel().rows.map((row) => <tr key={row.id}>{row.getVisibleCells().map((cell) => <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>)}</tbody></table>}
   </div>;
+}
+
+function sortAriaValue(sorted: false | "asc" | "desc") {
+  if (sorted === "asc") return "ascending";
+  if (sorted === "desc") return "descending";
+  return "none";
+}
+
+function sortIndicator(sorted: false | "asc" | "desc") {
+  if (sorted === "asc") return " ↑";
+  if (sorted === "desc") return " ↓";
+  return "";
 }

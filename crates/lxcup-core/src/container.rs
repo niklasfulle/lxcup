@@ -80,7 +80,7 @@ pub enum OperatingSystem {
     Unknown(String),
 }
 
-/// Ein von lxcup entdeckter Proxmox-LXC-Container.
+/// Ein historischer LXC-Datensatz; neue Ressourcen werden als Target angelegt.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Container {
     pub id: ContainerId,
