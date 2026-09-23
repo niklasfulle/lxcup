@@ -5,7 +5,7 @@ RUN cargo build --release -p lxcup-ansible-worker
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes ansible-core ca-certificates curl openssh-client \
+    && apt-get install --no-install-recommends --yes ansible-core ca-certificates curl openssh-client sshpass \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home --home-dir /home/lxcup lxcup
 COPY --from=build /src/target/release/lxcup-ansible-worker /usr/local/bin/lxcup-ansible-worker
