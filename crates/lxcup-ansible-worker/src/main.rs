@@ -250,6 +250,7 @@ async fn invoke(
     let out = timeout(
         Duration::from_secs(900),
         Command::new("ansible-playbook")
+            .env("ANSIBLE_ROLES_PATH", "/opt/lxcup/ansible/roles")
             .current_dir("/opt/lxcup/ansible")
             .args([
                 "-i",
