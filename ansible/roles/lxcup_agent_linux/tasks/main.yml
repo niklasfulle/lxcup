@@ -49,6 +49,7 @@
   loop:
     - "{{ lxcup_agent_install_dir }}"
     - "{{ lxcup_agent_config_dir }}"
+    - /var/lib/lxcup
 
 - name: Read current agent target for rollback
   ansible.builtin.command:
