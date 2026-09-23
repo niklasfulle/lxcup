@@ -195,7 +195,14 @@ async fn invoke(
         .map_err(|_| JobFailureCode::InvalidCredentials)?
         .metadata
         .kind;
-    let mut host = serde_json::json!({"ansible_host":target.address,"ansible_user":r.user});
+    // The managed SSH account may intentionally have no writable home directory.
+    // Keep Ansible's remote staging area in /tmp instead of relying on
+    // /home/<user>/.ansible/tmp being present and writable.
+    let mut host = serde_json::json!({
+        "ansible_host": target.address,
+        "ansible_user": r.user,
+        "ansible_remote_tmp": "/tmp/.ansible/tmp"
+    });
     let key = dir.join("credential");
     match (target.transport, kind) {
         (TargetTransport::Ssh, SecretKind::SshPrivateKey) => {
