@@ -45,6 +45,8 @@ pub struct Target {
     pub address: String,
     pub transport: TargetTransport,
     pub credential_secret_ref: SecretId,
+    #[serde(default)]
+    pub ssh_known_hosts_secret_ref: Option<SecretId>,
     pub agent_secret_ref: SecretId,
     pub state: TargetState,
     pub created_at: DateTime<Utc>,
@@ -85,6 +87,7 @@ impl Target {
             address,
             transport,
             credential_secret_ref,
+            ssh_known_hosts_secret_ref: None,
             agent_secret_ref,
             state: TargetState::Pending,
             created_at: now,

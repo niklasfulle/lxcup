@@ -204,6 +204,27 @@ async fn invoke(
         "ansible_remote_tmp": "/tmp/.ansible/tmp"
     });
     let key = dir.join("credential");
+    let known_hosts = if target.transport == TargetTransport::Ssh {
+        let secret_ref = target
+            .ssh_known_hosts_secret_ref
+            .ok_or(JobFailureCode::InvalidCredentials)?;
+        let value = r
+            .secrets
+            .read(secret_ref)
+            .map_err(|_| JobFailureCode::InvalidCredentials)?;
+        let metadata = r
+            .secrets
+            .metadata(secret_ref)
+            .map_err(|_| JobFailureCode::InvalidCredentials)?;
+        if metadata.metadata.kind != SecretKind::SshKnownHosts {
+            return Err(JobFailureCode::InvalidCredentials);
+        }
+        let path = dir.join("known_hosts");
+        private(&path, value.expose()).map_err(|_| JobFailureCode::WorkerUnavailable)?;
+        Some(path)
+    } else {
+        None
+    };
     match (target.transport, kind) {
         (TargetTransport::Ssh, SecretKind::SshPrivateKey) => {
             private(&key, credential.expose()).map_err(|_| JobFailureCode::WorkerUnavailable)?;
@@ -214,6 +235,12 @@ async fn invoke(
         }
         _ => return Err(JobFailureCode::InvalidCredentials),
     };
+    if let Some(path) = known_hosts {
+        host["ansible_ssh_common_args"] = serde_json::json!(format!(
+            "-o UserKnownHostsFile={}",
+            path.display()
+        ));
+    }
     let group = if target.kind == TargetKind::WindowsServer {
         "lxcup_windows_targets"
     } else {

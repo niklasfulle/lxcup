@@ -11,6 +11,7 @@ pub enum SecretKind {
     ProxmoxApiToken,
     SshPrivateKey,
     SshPassword,
+    SshKnownHosts,
     AgentToken,
     Generic,
 }
