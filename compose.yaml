@@ -79,6 +79,8 @@ services:
       LXCUP_SECRET_MASTER_KEY: ${LXCUP_SECRET_MASTER_KEY:-}
       LXCUP_ARTIFACT_BASE_URL: ${LXCUP_ARTIFACT_BASE_URL:-http://artifacts}
       LXCUP_WORKER_SSH_USER: ${LXCUP_WORKER_SSH_USER:-lxcup}
+      # Vom Zielsystem erreichbare Controller-URL für Agent-Heartbeats.
+      LXCUP_CONTROLLER_URL: ${LXCUP_CONTROLLER_URL:-}
     volumes:
       - lxcup-secrets:/var/lib/lxcup/secrets:ro
       - ./ansible:/opt/lxcup/ansible:ro

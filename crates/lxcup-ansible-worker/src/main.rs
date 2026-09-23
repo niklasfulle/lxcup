@@ -27,6 +27,7 @@ struct Runtime {
     secrets: EncryptedFileSecretStore,
     artifacts: String,
     user: String,
+    controller_url: Option<String>,
 }
 
 #[tokio::main]
@@ -109,6 +110,10 @@ impl Runtime {
                 .trim_end_matches('/')
                 .into(),
             user: std::env::var("LXCUP_WORKER_SSH_USER").unwrap_or_else(|_| "lxcup".into()),
+            controller_url: std::env::var("LXCUP_CONTROLLER_URL")
+                .ok()
+                .map(|value| value.trim_end_matches('/').to_owned())
+                .filter(|value| !value.is_empty()),
         })
     }
 }
@@ -238,10 +243,8 @@ async fn invoke(
         _ => return Err(JobFailureCode::InvalidCredentials),
     };
     if let Some(path) = known_hosts {
-        host["ansible_ssh_common_args"] = serde_json::json!(format!(
-            "-o UserKnownHostsFile={}",
-            path.display()
-        ));
+        host["ansible_ssh_common_args"] =
+            serde_json::json!(format!("-o UserKnownHostsFile={}", path.display()));
     }
     let group = if target.kind == TargetKind::WindowsServer {
         "lxcup_windows_targets"
@@ -260,11 +263,19 @@ async fn invoke(
         job.operation,
         AnsibleOperation::HealthCheck | AnsibleOperation::ConfigureTarget
     ) {
-        let token = r.secrets.read(target.agent_secret_ref).map_err(|_| JobFailureCode::InvalidCredentials)?;
+        let token = r
+            .secrets
+            .read(target.agent_secret_ref)
+            .map_err(|_| JobFailureCode::InvalidCredentials)?;
         vars["lxcup_agent_token"] = serde_json::json!(token.expose());
         vars["lxcup_agent_id"] = serde_json::json!(target.id.as_uuid().to_string());
         Some(token)
-    } else { None };
+    } else {
+        None
+    };
+    if let Some(controller_url) = &r.controller_url {
+        vars["lxcup_controller_url"] = serde_json::json!(controller_url);
+    }
     if let AnsibleParameters::DeployAgent { agent_version }
     | AnsibleParameters::UpdateAgent { agent_version } = &job.parameters
     {
@@ -295,13 +306,23 @@ async fn invoke(
     .await
     .map_err(|_| JobFailureCode::Timeout)?
     .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    let redactions = [Some(credential.expose()), agent_token.as_ref().map(|value| value.expose())];
+    let redactions = [
+        Some(credential.expose()),
+        agent_token.as_ref().map(|value| value.expose()),
+    ];
     for (source, output) in [("stdout", &out.stdout), ("stderr", &out.stderr)] {
         let message = redact_output(&String::from_utf8_lossy(output), &redactions);
         if !message.trim().is_empty() {
-            event(repos, job.id, JobEventKind::WorkerLog { source: source.to_owned(), message })
-                .await
-                .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+            event(
+                repos,
+                job.id,
+                JobEventKind::WorkerLog {
+                    source: source.to_owned(),
+                    message,
+                },
+            )
+            .await
+            .map_err(|_| JobFailureCode::WorkerUnavailable)?;
         }
     }
     if !out.status.success() {
@@ -324,9 +345,16 @@ async fn invoke(
 }
 
 fn redact_output(output: &str, secrets: &[Option<&str>]) -> String {
-    secrets.iter().flatten().fold(output.to_owned(), |value, secret| {
-        if secret.is_empty() { value } else { value.replace(secret, "[REDACTED]") }
-    })
+    secrets
+        .iter()
+        .flatten()
+        .fold(output.to_owned(), |value, secret| {
+            if secret.is_empty() {
+                value
+            } else {
+                value.replace(secret, "[REDACTED]")
+            }
+        })
 }
 async fn artifact(r: &Runtime, version: &str, dir: &Path) -> Result<String, JobFailureCode> {
     let base = format!("{}/agent/{version}", r.artifacts);
