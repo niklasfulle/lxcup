@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createAnsibleJob, createTarget, listSecrets, type TargetKind, type TargetTransport } from "../api";
+import { createAnsibleJob, createSecret, createTarget, listSecrets, type SecretKind, type TargetKind, type TargetTransport } from "../api";
 import { queryKeys, useAnsibleJob, useTargets } from "../queries";
 import { TargetLifecycle } from "../components/TargetLifecycle";
 
@@ -20,13 +20,29 @@ export function TargetsPage() {
   const [kind, setKind] = useState<TargetKind>("lxc");
   const [credentialSecret, setCredentialSecret] = useState("");
   const [agentSecret, setAgentSecret] = useState("");
+  const [newSecretFor, setNewSecretFor] = useState<"credential" | "agent" | null>(null);
+  const [newSecretName, setNewSecretName] = useState("");
+  const [newSecretKind, setNewSecretKind] = useState<SecretKind>("ssh_password");
+  const [newSecretValue, setNewSecretValue] = useState("");
   const [createdTargetId, setCreatedTargetId] = useState<string>();
   const [startOnboarding, setStartOnboarding] = useState(true);
   const [deploymentJobId, setDeploymentJobId] = useState<string>();
   const [healthJobId, setHealthJobId] = useState<string>();
-  const healthStartedFor = useRef<string>();
+  const healthStartedFor = useRef<string | undefined>(undefined);
   const selectedKind = kinds.find((item) => item.value === kind)!;
   const activeSecrets = (secrets.data ?? []).filter((item) => item.metadata.status === "active");
+
+  const inlineSecret = useMutation({
+    mutationFn: () => createSecret({ name: newSecretName.trim(), kind: newSecretKind, scope: { type: "global" }, value: newSecretValue }),
+    onSuccess: (secret) => {
+      if (newSecretFor === "credential") setCredentialSecret(secret.metadata.metadata.id);
+      if (newSecretFor === "agent") setAgentSecret(secret.metadata.metadata.id);
+      setNewSecretFor(null);
+      setNewSecretName("");
+      setNewSecretValue("");
+      void queryClient.invalidateQueries({ queryKey: ["secrets"] });
+    },
+  });
 
   const deployment = useMutation({
     mutationFn: (targetId: string) => createAnsibleJob({ operation: "deploy_agent", target_id: targetId, mode: "apply", parameters: { operation: "deploy_agent", agent_version: "0.1.0" }, idempotency_key: `onboarding-deploy-${targetId}`, confirmed: true }),
@@ -90,10 +106,11 @@ export function TargetsPage() {
             <label>Name<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
             <label>Typ<select value={kind} onChange={(event) => setKind(event.target.value as TargetKind)}>{kinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
             <label>Adresse<input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="IP oder DNS-Name" required /></label>
-            <label>Deployment-Secret<select value={credentialSecret} onChange={(event) => setCredentialSecret(event.target.value)} required><option value="">Secret auswählen</option>{activeSecrets.map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select></label>
-            <label>Agent-Token<select value={agentSecret} onChange={(event) => setAgentSecret(event.target.value)} required><option value="">Secret auswählen</option>{activeSecrets.map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select></label>
+            <label>Deployment-Secret<div className="inline-field"><select value={credentialSecret} onChange={(event) => setCredentialSecret(event.target.value)} required><option value="">Secret auswählen</option>{activeSecrets.map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select><button className="secondary-button" type="button" onClick={() => { setNewSecretFor("credential"); setNewSecretKind(selectedKind.transport === "ssh" ? "ssh_password" : "generic"); }}>＋ Neu</button></div></label>
+            <label>Agent-Token<div className="inline-field"><select value={agentSecret} onChange={(event) => setAgentSecret(event.target.value)} required><option value="">Secret auswählen</option>{activeSecrets.map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select><button className="secondary-button" type="button" onClick={() => { setNewSecretFor("agent"); setNewSecretKind("agent_token"); }}>＋ Neu</button></div></label>
             <label>Transport<input value={selectedKind.transport.toUpperCase()} readOnly /></label>
           </div>
+          {newSecretFor ? <div className="inline-secret-editor" role="group" aria-label="Secret direkt erstellen"><div className="section-heading"><strong>Neues {newSecretFor === "credential" ? "Deployment-Secret" : "Agent-Token"}</strong><button className="text-link" type="button" onClick={() => setNewSecretFor(null)}>Abbrechen</button></div><div className="workflow-grid"><label>Name<input value={newSecretName} onChange={(event) => setNewSecretName(event.target.value)} placeholder="z. B. lxcup-test-ssh" autoComplete="off" /></label><label>Typ<select value={newSecretKind} onChange={(event) => setNewSecretKind(event.target.value as SecretKind)}><option value="ssh_password">SSH Passwort</option><option value="ssh_private_key">SSH Private Key</option><option value="agent_token">Agent-Token</option><option value="generic">Allgemein</option></select></label><label>Wert<input type="password" value={newSecretValue} onChange={(event) => setNewSecretValue(event.target.value)} autoComplete="new-password" placeholder="Wert eingeben oder erzeugen" /></label><button className="secondary-button" type="button" onClick={() => setNewSecretValue(generateSecretValue())}>Wert erzeugen</button></div><button className="primary-button" type="button" disabled={inlineSecret.isPending || !newSecretName.trim() || !newSecretValue} onClick={() => inlineSecret.mutate()}>{inlineSecret.isPending ? "Speichert…" : "Secret erstellen und auswählen"}</button>{inlineSecret.error ? <p className="error-state" role="alert">{inlineSecret.error.message}</p> : null}</div> : null}
           <label className="confirm-field"><input type="checkbox" checked={startOnboarding} onChange={(event) => setStartOnboarding(event.target.checked)} /> Onboarding direkt starten: Agent installieren und nach erfolgreichem Heartbeat einen Healthcheck ausführen.</label>
           <button className="primary-button" type="submit" disabled={create.isPending || !credentialSecret || !agentSecret}>
             {create.isPending ? "Wird angelegt…" : "Ziel registrieren"}
@@ -147,4 +164,10 @@ export function TargetsPage() {
       </section>
     </>
   );
+}
+
+function generateSecretValue() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

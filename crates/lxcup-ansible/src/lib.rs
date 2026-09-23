@@ -317,6 +317,9 @@ pub enum JobEventKind {
     TaskFinished { task: String, changed: bool },
     Failed { code: JobFailureCode },
     ReconcileRequired,
+    /// Redacted output emitted by the isolated worker. Secret values are never
+    /// included; the UI may safely render this as the job's technical log.
+    WorkerLog { source: String, message: String },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

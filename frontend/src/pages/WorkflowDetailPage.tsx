@@ -31,6 +31,7 @@ function eventTitle(event: AnsibleJobEvent) {
   if (kind === "task_started") return `Task gestartet: ${event.event.task ?? "unbekannt"}`;
   if (kind === "task_finished") return `Task beendet: ${event.event.task ?? "unbekannt"}`;
   if (kind === "failed") return "Workflow fehlgeschlagen";
+  if (kind === "worker_log") return `Worker · ${event.event.source ?? "stdout"}`;
   return "Abgleich erforderlich";
 }
 
@@ -38,6 +39,7 @@ function eventDetail(event: AnsibleJobEvent) {
   if (event.event.kind === "task_finished") return event.event.changed ? "Die Aufgabe hat Änderungen vorgenommen." : "Die Aufgabe wurde ohne Änderungen beendet.";
   if (event.event.kind === "failed") return `Fehlercode: ${event.event.code ?? "unbekannt"}`;
   if (event.event.kind === "reconcile_required") return "Der Status muss durch einen kontrollierten Abgleich bestätigt werden.";
+  if (event.event.kind === "worker_log") return event.event.message ?? "(keine Ausgabe)";
   return "Vom Workflow-Controller erfasst.";
 }
 

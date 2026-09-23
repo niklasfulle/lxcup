@@ -174,11 +174,12 @@ async fn run(
     .map_err(|_| JobFailureCode::WorkerUnavailable)?;
     let dir = std::env::temp_dir().join(format!("lxcup-{}-{}", job.id.as_uuid(), Uuid::new_v4()));
     fs::create_dir_all(&dir).map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    let result = invoke(r, job, &target, &dir).await;
+    let result = invoke(repos, r, job, &target, &dir).await;
     let _ = fs::remove_dir_all(dir);
     result
 }
 async fn invoke(
+    repos: &Repositories,
     r: &Runtime,
     job: &mut AnsibleJob,
     target: &Target,
@@ -219,18 +220,15 @@ async fn invoke(
     .map_err(|_| JobFailureCode::WorkerUnavailable)?;
     let mut vars =
         serde_json::json!({"lxcup_execution_mode":format!("{:?}",job.mode).to_lowercase()});
-    if !matches!(
+    let agent_token = if !matches!(
         job.operation,
         AnsibleOperation::HealthCheck | AnsibleOperation::ConfigureTarget
     ) {
-        vars["lxcup_agent_token"] = serde_json::json!(
-            r.secrets
-                .read(target.agent_secret_ref)
-                .map_err(|_| JobFailureCode::InvalidCredentials)?
-                .expose()
-        );
-        vars["lxcup_agent_id"] = serde_json::json!(target.id.as_uuid().to_string())
-    };
+        let token = r.secrets.read(target.agent_secret_ref).map_err(|_| JobFailureCode::InvalidCredentials)?;
+        vars["lxcup_agent_token"] = serde_json::json!(token.expose());
+        vars["lxcup_agent_id"] = serde_json::json!(target.id.as_uuid().to_string());
+        Some(token)
+    } else { None };
     if let AnsibleParameters::DeployAgent { agent_version }
     | AnsibleParameters::UpdateAgent { agent_version } = &job.parameters
     {
@@ -260,10 +258,25 @@ async fn invoke(
     .await
     .map_err(|_| JobFailureCode::Timeout)?
     .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+    let redactions = [Some(credential.expose()), agent_token.as_ref().map(|value| value.expose())];
+    for (source, output) in [("stdout", &out.stdout), ("stderr", &out.stderr)] {
+        let message = redact_output(&String::from_utf8_lossy(output), &redactions);
+        if !message.trim().is_empty() {
+            event(repos, job.id, JobEventKind::WorkerLog { source: source.to_owned(), message })
+                .await
+                .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+        }
+    }
     if !out.status.success() {
         return Err(JobFailureCode::PlaybookFailed);
     };
     Ok(!String::from_utf8_lossy(&out.stdout).contains("changed=0"))
+}
+
+fn redact_output(output: &str, secrets: &[Option<&str>]) -> String {
+    secrets.iter().flatten().fold(output.to_owned(), |value, secret| {
+        if secret.is_empty() { value } else { value.replace(secret, "[REDACTED]") }
+    })
 }
 async fn artifact(r: &Runtime, version: &str, dir: &Path) -> Result<String, JobFailureCode> {
     let base = format!("{}/agent/{version}", r.artifacts);

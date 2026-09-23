@@ -93,11 +93,13 @@ export type AnsibleJobEvent = {
   sequence: number;
   job_id: string;
   event: {
-    kind: "queued" | "status_changed" | "task_started" | "task_finished" | "failed" | "reconcile_required";
+    kind: "queued" | "status_changed" | "task_started" | "task_finished" | "failed" | "reconcile_required" | "worker_log";
     status?: string;
     task?: string;
     changed?: boolean;
     code?: string;
+    source?: string;
+    message?: string;
   };
   created_at: string;
 };

@@ -39,7 +39,7 @@ export function EnrollmentPage() {
   const [submitError, setSubmitError] = useState<string>();
   const [startOnboarding, setStartOnboarding] = useState(true);
   const [healthJobId, setHealthJobId] = useState<string>();
-  const healthStartedFor = useRef<string>();
+  const healthStartedFor = useRef<string | undefined>(undefined);
   const enrollment = useEnrollment(enrollmentId);
   const available = (containers.data ?? []).filter((container) => container.status === "running");
 

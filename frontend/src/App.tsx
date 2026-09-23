@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink, Route, Routes } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiClient, type ApiEvent } from "./api";
-import { queryKeys, useTargets } from "./queries";
+import { queryKeys, useAnsibleJobs, useTargets } from "./queries";
 import { DataTable } from "./components/DataTable";
 import { Dashboard } from "./pages/Dashboard";
 import { NodesPage } from "./pages/NodesPage";
@@ -64,7 +64,6 @@ export default function App() {
           <NavLink className="nav-link" to="/docker"><span aria-hidden="true">◫</span> Docker-Container</NavLink>
           <NavLink className="nav-link" to="/targets"><span aria-hidden="true">⬡</span> Ziele</NavLink>
           <span className="nav-heading">Aufgaben</span>
-          <NavLink className="nav-link" to="/enrollments/new"><span aria-hidden="true">＋</span> LXC einbinden</NavLink>
           <NavLink className="nav-link" to="/workflows"><span aria-hidden="true">↗</span> Tasks & Workflows</NavLink>
           <span className="nav-heading">System</span>
           <NavLink className="nav-link" to="/secrets"><span aria-hidden="true">⌘</span> Secrets</NavLink>
@@ -78,7 +77,7 @@ export default function App() {
       <main className="main-content">
         <header className="topbar">
           <div className="topbar-context"><span className="environment-label">Datacenter</span><strong>lxcup-control</strong><span className="muted">/ Übersicht</span></div>
-          <div className="topbar-actions"><Link className="new-lxc-button" to="/enrollments/new">＋ LXC einbinden</Link><span className="user-pill">Admin</span><button className="theme-button" type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="Theme wechseln">{theme === "dark" ? "☼" : "☾"}</button></div>
+          <div className="topbar-actions"><NotificationCenter /><span className="user-pill">Admin</span><button className="theme-button" type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="Theme wechseln">{theme === "dark" ? "☼" : "☾"}</button></div>
         </header>
         <div className="content-area">
           {streamError ? <div className="api-alert" role="alert">{streamError}</div> : null}
@@ -100,6 +99,16 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+function NotificationCenter() {
+  const jobs = useAnsibleJobs();
+  const failed = (jobs.data ?? []).filter((job) => job.status === "failed" || job.status === "reconcile_required");
+  const [open, setOpen] = useState(false);
+  const [read, setRead] = useState<string[]>(() => JSON.parse(globalThis.localStorage?.getItem("lxcup-read-notifications") ?? "[]") as string[]);
+  const unread = failed.filter((job) => !read.includes(job.id));
+  const markRead = (id: string) => setRead((current) => { const next = current.includes(id) ? current : [...current, id]; globalThis.localStorage?.setItem("lxcup-read-notifications", JSON.stringify(next)); return next; });
+  return <div className="notification-center"><button className="theme-button notification-button" type="button" aria-label="Benachrichtigungen" onClick={() => setOpen((value) => !value)}>🔔{unread.length ? <span className="notification-count">{unread.length}</span> : null}</button>{open ? <div className="notification-popover"><strong>Benachrichtigungen</strong>{!failed.length ? <p className="muted">Keine fehlgeschlagenen Jobs.</p> : failed.slice(0, 8).map((job) => <Link key={job.id} to={`/workflows/${job.id}`} onClick={() => markRead(job.id)}><span className={`status-badge ${job.status === "failed" ? "neutral" : "pending"}`}>{job.status === "failed" ? "Fehlgeschlagen" : "Abgleich"}</span><span>{job.operation.replaceAll("_", " ")}</span><small>{new Date(job.updated_at).toLocaleString()}</small></Link>)}</div> : null}</div>;
 }
 
 function NotFound() {

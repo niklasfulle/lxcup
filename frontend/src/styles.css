@@ -85,6 +85,12 @@
   .user-pill { @apply border px-2 py-1 text-xs font-medium; color: var(--muted); border-color: var(--line); background: var(--panel); }
   .theme-button, .secondary-button, .secret-actions button, .inline-form button { @apply inline-flex items-center justify-center border px-2 py-1.5 text-xs font-medium; color: var(--ink); border-color: var(--line); background: var(--panel); }
   .theme-button:hover, .secondary-button:hover, .secret-actions button:hover, .inline-form button:hover { color: var(--primary); background: var(--primary-soft); }
+  .notification-center { @apply relative; }
+  .notification-button { @apply relative; }
+  .notification-count { @apply absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] text-white; }
+  .notification-popover { @apply absolute right-0 top-9 z-20 grid w-80 gap-2 border p-3 shadow-xl; color: var(--ink); border-color: var(--line); background: var(--panel); }
+  .notification-popover a { @apply grid gap-1 border-b pb-2 text-xs last:border-0 last:pb-0; border-color: var(--line); }
+  .notification-popover a small { color: var(--muted); }
   .new-lxc-button, .primary-button { @apply inline-flex items-center justify-center border border-lxcup-primary bg-lxcup-primary px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700; }
   .primary-button:disabled { @apply cursor-not-allowed opacity-50; }
 
@@ -124,6 +130,9 @@
   .sort-button { @apply border-0 bg-transparent p-0 font-bold; font: inherit; }
   .workflow-panel form { @apply grid max-w-5xl gap-4; }
   .workflow-grid { @apply grid grid-cols-1 gap-3 md:grid-cols-3; }
+  .inline-field { @apply flex items-stretch gap-2; }
+  .inline-field select { @apply min-w-0 flex-1; }
+  .inline-secret-editor { @apply my-3 grid gap-3 border p-3; border-color: var(--line); background: var(--panel); }
   .workflow-grid label, .workflow-field { @apply grid gap-1 text-xs font-semibold; color: var(--muted); }
   .workflow-field { @apply max-w-lg; }
   .workflow-summary { @apply flex flex-wrap gap-4 border-l-4 px-3 py-2 text-sm; border-color: var(--primary); background: var(--paper-muted); }
