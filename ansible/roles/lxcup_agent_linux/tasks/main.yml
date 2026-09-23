@@ -19,6 +19,14 @@
     fail_msg: Required agent deployment inputs are missing or invalid.
   no_log: true
 
+- name: Validate controller heartbeat endpoint
+  ansible.builtin.assert:
+    that:
+      - lxcup_controller_url is defined
+      - lxcup_controller_url | length > 0
+      - lxcup_controller_url is match('^https?://')
+    fail_msg: LXCUP_CONTROLLER_URL is missing or invalid; the agent cannot report its heartbeat.
+
 - name: Install runtime prerequisites
   ansible.builtin.apt:
     name: ca-certificates
