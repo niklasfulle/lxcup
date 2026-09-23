@@ -85,6 +85,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      lxcup-server:
+        condition: service_healthy
       artifacts:
         condition: service_started
 
