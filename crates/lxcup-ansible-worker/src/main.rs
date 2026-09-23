@@ -304,6 +304,19 @@ async fn invoke(
         }
     }
     if !out.status.success() {
+        let output = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if output.contains("Invalid/incorrect password")
+            || output.contains("Permission denied, please try again")
+        {
+            return Err(JobFailureCode::InvalidCredentials);
+        }
+        if output.contains("UNREACHABLE!") || output.contains("unreachable: true") {
+            return Err(JobFailureCode::Unreachable);
+        }
         return Err(JobFailureCode::PlaybookFailed);
     };
     Ok(!String::from_utf8_lossy(&out.stdout).contains("changed=0"))
