@@ -20,8 +20,15 @@ export default defineConfig(({ mode }) => {
         provider: "v8",
         reporter: ["text", "lcov"],
         reportsDirectory: "./coverage",
+        thresholds: {
+          lines: 80,
+          functions: 80,
+          branches: 80,
+          statements: 80,
+        },
         exclude: [
           "src/test-setup.ts",
+          "src/tests.rs",
           "src/**/*.test.ts",
           "src/**/*.test.tsx",
           "src/**/*.d.ts",
