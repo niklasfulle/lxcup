@@ -1,5 +1,7 @@
 # Terminate HTTPS in front of the lxcup server.
 # Replace the hostname with the internal DNS name used in production.
 lxcup.example.internal {
-    reverse_proxy 127.0.0.1:8080
+    @metrics path /metrics
+    respond @metrics 404
+    reverse_proxy lxcup-server:8080
 }

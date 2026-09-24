@@ -418,27 +418,27 @@ pub(super) async fn ready_health(State(state): State<ApiState>) -> impl IntoResp
 
 pub(super) async fn metrics(State(state): State<ApiState>) -> impl IntoResponse {
     let mut rendered = state.metrics.render();
-    if let Some(repositories) = state.repositories.as_ref() {
-        if let Ok(queue) = repositories.ansible_jobs.queue_metrics().await {
-            let queue_age = queue
-                .oldest_queued_at
-                .map(|created| (chrono::Utc::now() - created).num_seconds().max(0))
-                .unwrap_or(0);
-            rendered.push_str(&format!(
-                "# TYPE lxcup_ansible_jobs_queued gauge\nlxcup_ansible_jobs_queued {}\n# TYPE lxcup_ansible_jobs_failed gauge\nlxcup_ansible_jobs_failed {}\n# TYPE lxcup_ansible_queue_age_seconds gauge\nlxcup_ansible_queue_age_seconds {}\n",
-                queue.queued_jobs, queue.failed_jobs, queue_age
-            ));
-        }
-        if let Ok(last_seen) = repositories.worker_heartbeats.latest().await {
-            let heartbeat_age = last_seen
-                .map(|seen| (chrono::Utc::now() - seen).num_seconds().max(0))
-                .unwrap_or(-1);
-            rendered.push_str(&format!(
-                "# TYPE lxcup_worker_heartbeat_age_seconds gauge\nlxcup_worker_heartbeat_age_seconds {}\n",
-                heartbeat_age
-            ));
-        }
-    }
+    let (queue, last_seen) = if let Some(repositories) = state.repositories.as_ref() {
+        let (queue, heartbeat) = tokio::join!(
+            repositories.ansible_jobs.queue_metrics(),
+            repositories.worker_heartbeats.latest()
+        );
+        (queue.unwrap_or_default(), heartbeat.ok().flatten())
+    } else {
+        (Default::default(), None)
+    };
+    let queue_age = queue
+        .oldest_queued_at
+        .map(|created| (chrono::Utc::now() - created).num_seconds().max(0))
+        .unwrap_or(0);
+    let heartbeat_age = last_seen
+        .map(|seen| (chrono::Utc::now() - seen).num_seconds().max(0))
+        .unwrap_or(-1);
+    let worker_available = i32::from((0..=10).contains(&heartbeat_age));
+    rendered.push_str(&format!(
+        "# TYPE lxcup_ansible_jobs_queued gauge\nlxcup_ansible_jobs_queued {}\n# TYPE lxcup_ansible_jobs_failed gauge\nlxcup_ansible_jobs_failed {}\n# TYPE lxcup_ansible_queue_age_seconds gauge\nlxcup_ansible_queue_age_seconds {}\n# TYPE lxcup_worker_heartbeat_age_seconds gauge\nlxcup_worker_heartbeat_age_seconds {}\n# TYPE lxcup_worker_available gauge\nlxcup_worker_available {}\n",
+        queue.queued_jobs, queue.failed_jobs, queue_age, heartbeat_age, worker_available
+    ));
     (
         [(
             axum::http::header::CONTENT_TYPE,

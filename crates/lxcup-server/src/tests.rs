@@ -2003,3 +2003,77 @@ fn invalid_ids_are_rejected() {
     assert!(parse_container_id("0").is_err());
     assert!(parse_uuid("not-an-id", "plan id").is_err());
 }
+
+#[tokio::test]
+async fn readiness_reports_degraded_targets_and_metrics_keep_operational_signals_visible() {
+    let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+    let mut target = Target::new(
+        "disabled-healthcheck-target",
+        TargetKind::LinuxServer,
+        "192.0.2.40",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    target.state = lxcup_core::TargetState::Disabled;
+    state.store.write().await.targets.push(target);
+
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/health/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let readiness: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(readiness["checks"]["targets"], "degraded");
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let metrics = String::from_utf8(body.to_vec()).unwrap();
+    assert!(metrics.contains("lxcup_ansible_jobs_queued 0"));
+    assert!(metrics.contains("lxcup_ansible_jobs_failed 0"));
+    assert!(metrics.contains("lxcup_ansible_queue_age_seconds 0"));
+    assert!(metrics.contains("lxcup_worker_heartbeat_age_seconds -1"));
+    assert!(metrics.contains("lxcup_worker_available 0"));
+}
+
+#[tokio::test]
+async fn metrics_endpoint_reports_worker_and_queue_signals_without_a_database() {
+    let response = router(ApiState::new().with_auth_config(AuthConfig::disabled()))
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let metrics = String::from_utf8(body.to_vec()).unwrap();
+    assert!(metrics.contains("lxcup_ansible_jobs_queued 0"));
+    assert!(metrics.contains("lxcup_ansible_jobs_failed 0"));
+    assert!(metrics.contains("lxcup_ansible_queue_age_seconds 0"));
+    assert!(metrics.contains("lxcup_worker_heartbeat_age_seconds -1"));
+    assert!(metrics.contains("lxcup_worker_available 0"));
+}

@@ -18,19 +18,41 @@ zusätzlich die Datenbankverbindung und meldet deaktivierte Ziele als
 `degraded`. Compose prüft PostgreSQL, API, Artefakt-Service und Worker über
 eigene Healthchecks; ein Worker-Healthcheck bestätigt nur den laufenden
 Prozess, die fachliche Verfügbarkeit kommt aus dem Worker-Heartbeat.
+Frontend und produktiver Caddy besitzen ebenfalls Healthchecks. Der Caddy-
+Healthcheck validiert die Konfiguration; sein Upstream ist der Compose-
+Servicename `lxcup-server`, nicht localhost im Caddy-Container.
 
 ## Wichtige Signale
 
 | Signal | Bedeutung | Alarmbedingung |
 | --- | --- | --- |
 | `lxcup_worker_heartbeat_age_seconds` | Alter des letzten Worker-Polls | `> 10` Sekunden oder `-1` |
+| `lxcup_worker_available` | Worker-Heartbeat jünger/gleich 10 s (`1`/`0`) | `0` länger als 30 Sekunden |
 | `lxcup_ansible_queue_age_seconds` | Alter des ältesten wartenden Jobs | steigt trotz verfügbarer Worker weiter an |
 | `lxcup_ansible_jobs_failed` | Anzahl fehlgeschlagener Jobs | Anstieg seit dem letzten Check |
 | `lxcup_http_requests_failed_total` | HTTP-Fehlerzähler | unerwarteter Anstieg |
 
 Die Werte enthalten keine Secret-Werte. Job-, Ziel- und Worker-Korrelationen
-stehen in den strukturierten Workflow-Ereignissen und werden nur über deren
-öffentliche IDs referenziert.
+stehen in den strukturierten Worker-Logs als `worker_id`, `job_id` und `target`;
+API-Zugriffe tragen zusätzlich `request_id` und geben sie im Header
+`x-request-id` zurück. Die Kennungen enthalten nur IDs, nie Zugangsdaten.
+
+## Alarmregeln
+
+- `/health/ready` liefert länger als 30 Sekunden keinen HTTP-Status `200`.
+- `lxcup_worker_available == 0` oder `lxcup_worker_heartbeat_age_seconds > 10`
+  länger als 30 Sekunden.
+- `lxcup_ansible_jobs_queued > 0` und
+  `lxcup_ansible_queue_age_seconds > 120` Sekunden.
+- `lxcup_ansible_jobs_failed` steigt; bei produktiven Änderungen zusätzlich
+  sofort den Jobstatus `reconcile_required` untersuchen.
+- Compose meldet `unhealthy` für PostgreSQL, API, Frontend, Artefakte, Worker
+  oder Caddy.
+
+`/metrics` ist ein Prometheus-Textformat ohne Secret-Werte. In Produktion
+blockiert der öffentliche Caddy-Eingang diesen Pfad; ein privater Scraper im
+Compose-Netz kann `http://lxcup-server:8080/metrics` abrufen. Die Metriken sind
+Betriebsinformationen und gehören nicht ins öffentliche Netz.
 
 ## Typische Störungen
 

@@ -17,6 +17,7 @@ use std::{
     time::Duration,
 };
 use tokio::{process::Command, time::timeout};
+use tracing::Instrument;
 use uuid::Uuid;
 
 #[derive(Deserialize)]
@@ -54,7 +55,7 @@ async fn main() {
         if let Err(error) = repos.worker_heartbeats.record(&worker_name).await {
             tracing::error!(?error, "worker heartbeat failed");
         }
-        if let Err(e) = process(&repos, &runtime).await {
+        if let Err(e) = process(&repos, &runtime, &worker_name).await {
             tracing::error!(?e, "worker cycle failed");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -145,23 +146,43 @@ impl Runtime {
 async fn process(
     repos: &Repositories,
     runtime: &Runtime,
+    worker_name: &str,
 ) -> Result<(), lxcup_persistence::RepositoryError> {
     while let Some(mut job) = repos.ansible_jobs.claim_next_queued().await? {
-        let result = run(repos, runtime, &mut job).await;
-        let (status, job_event) = match result {
-            Ok(changed) => (
-                AnsibleJobStatus::Succeeded,
-                JobEventKind::TaskFinished {
-                    task: job.playbook.clone(),
-                    changed,
-                },
-            ),
-            Err(code) => (AnsibleJobStatus::Failed, JobEventKind::Failed { code }),
-        };
-        job.transition_to(status).expect("claimed status");
-        repos.ansible_jobs.update(&job).await?;
-        event(repos, job.id, job_event).await?;
-        event(repos, job.id, JobEventKind::StatusChanged { status }).await?;
+        let span = tracing::info_span!(
+            "worker_job",
+            worker_id = %worker_name,
+            job_id = ?job.id,
+            target = ?job.target
+        );
+        async {
+            tracing::info!(status = ?job.status, "claimed workflow job");
+            let result = run(repos, runtime, &mut job).await;
+            let (status, job_event) = match result {
+                Ok(changed) => {
+                    tracing::info!(changed, "workflow job execution completed");
+                    (
+                        AnsibleJobStatus::Succeeded,
+                        JobEventKind::TaskFinished {
+                            task: job.playbook.clone(),
+                            changed,
+                        },
+                    )
+                }
+                Err(code) => {
+                    tracing::error!(failure_code = ?code, "workflow job execution failed");
+                    (AnsibleJobStatus::Failed, JobEventKind::Failed { code })
+                }
+            };
+            job.transition_to(status).expect("claimed status");
+            repos.ansible_jobs.update(&job).await?;
+            event(repos, job.id, job_event).await?;
+            event(repos, job.id, JobEventKind::StatusChanged { status }).await?;
+            tracing::info!(status = ?status, "workflow job status persisted");
+            Ok::<(), lxcup_persistence::RepositoryError>(())
+        }
+        .instrument(span)
+        .await?;
     }
     Ok(())
 }
@@ -1084,7 +1105,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("lxcup-worker-flow-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let (runtime, _, _, _) = runtime_with_secrets(&root);
-        process(&repos, &runtime).await.unwrap();
+        process(&repos, &runtime, "test-worker").await.unwrap();
         let failed = repos
             .ansible_jobs
             .find_by_id(queued.id)
