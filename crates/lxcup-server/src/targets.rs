@@ -141,7 +141,7 @@ pub(super) async fn get_target(
 pub(super) async fn receive_agent_heartbeat(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    JsonBody(heartbeat): JsonBody<AgentHeartbeat>,
+    JsonBody(mut heartbeat): JsonBody<AgentHeartbeat>,
 ) -> Result<StatusCode, ApiError> {
     let token = headers
         .get("authorization")
@@ -161,6 +161,7 @@ pub(super) async fn receive_agent_heartbeat(
     if expected.expose() != token {
         return Err(ApiError::unauthorized());
     }
+    sanitize_telemetry_window(&mut heartbeat);
     target.mark_managed();
     let persisted = target.clone();
     store.agent_reports.insert(persisted.id, heartbeat);
@@ -181,6 +182,44 @@ pub(super) async fn receive_agent_heartbeat(
         }
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Treat telemetry as best-effort heartbeat data: discard malformed, stale,
+/// duplicate, or oversized sample windows while preserving the heartbeat.
+/// This bounds persistence work even for an authenticated but buggy agent.
+fn sanitize_telemetry_window(heartbeat: &mut AgentHeartbeat) {
+    const MAX_SAMPLES: usize = 32;
+    let samples = &mut heartbeat.telemetry.samples;
+    if samples.len() > MAX_SAMPLES {
+        samples.drain(..samples.len() - MAX_SAMPLES);
+        heartbeat.telemetry.partial = true;
+    }
+
+    let now = chrono::Utc::now();
+    let cutoff = now - chrono::Duration::seconds(30);
+    let future_limit = now + chrono::Duration::seconds(5);
+    let before_filter = samples.len();
+    samples.retain(|sample| {
+        sample.collected_at >= cutoff
+            && sample.collected_at <= future_limit
+            && sample.cpu_basis_points.is_none_or(|value| value <= 10_000)
+            && sample
+                .memory_basis_points
+                .is_none_or(|value| value <= 10_000)
+            && sample
+                .storage_basis_points
+                .is_none_or(|value| value <= 10_000)
+    });
+    if samples.len() != before_filter {
+        heartbeat.telemetry.partial = true;
+    }
+
+    samples.sort_by_key(|sample| sample.collected_at);
+    let before_deduplication = samples.len();
+    samples.dedup_by_key(|sample| sample.collected_at);
+    if samples.len() != before_deduplication {
+        heartbeat.telemetry.partial = true;
+    }
 }
 
 pub(super) fn require_permission(role: ActorRole, permission: Permission) -> Result<(), ApiError> {

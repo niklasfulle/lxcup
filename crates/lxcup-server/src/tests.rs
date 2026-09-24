@@ -1359,13 +1359,57 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
             protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
         },
         metrics: lxcup_agent::AgentMetrics {
-            collected_at: chrono::Utc::now(),
+            collected_at: now,
             commands_total: 1,
             commands_failed: 0,
             last_command_at: None,
         },
-        sent_at: chrono::Utc::now(),
-        telemetry: lxcup_agent::SystemTelemetryWindow::default(),
+        sent_at: now,
+        telemetry: lxcup_agent::SystemTelemetryWindow {
+            samples: vec![
+                lxcup_agent::SystemTelemetrySample {
+                    collected_at: now,
+                    cpu_basis_points: Some(4_200),
+                    memory_basis_points: Some(5_000),
+                    storage_basis_points: Some(6_000),
+                    load_1_milli: None,
+                    network_rx_bytes: None,
+                    network_tx_bytes: None,
+                    process_count: None,
+                },
+                lxcup_agent::SystemTelemetrySample {
+                    collected_at: now - chrono::Duration::seconds(1),
+                    cpu_basis_points: Some(3_500),
+                    memory_basis_points: Some(4_500),
+                    storage_basis_points: Some(5_500),
+                    load_1_milli: None,
+                    network_rx_bytes: None,
+                    network_tx_bytes: None,
+                    process_count: None,
+                },
+                lxcup_agent::SystemTelemetrySample {
+                    collected_at: now,
+                    cpu_basis_points: Some(10_001),
+                    memory_basis_points: None,
+                    storage_basis_points: None,
+                    load_1_milli: None,
+                    network_rx_bytes: None,
+                    network_tx_bytes: None,
+                    process_count: None,
+                },
+                lxcup_agent::SystemTelemetrySample {
+                    collected_at: now - chrono::Duration::seconds(31),
+                    cpu_basis_points: None,
+                    memory_basis_points: None,
+                    storage_basis_points: None,
+                    load_1_milli: None,
+                    network_rx_bytes: None,
+                    network_tx_bytes: None,
+                    process_count: None,
+                },
+            ],
+            partial: false,
+        },
     };
     let response = router(state.clone())
         .oneshot(
@@ -1384,7 +1428,33 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
     let store = state.store.read().await;
     assert_eq!(store.targets[0].state, TargetState::Managed);
     assert!(store.agent_reports.contains_key(&target_id));
+    let received_telemetry = &store.agent_reports[&target_id].telemetry;
+    assert!(received_telemetry.partial);
+    assert_eq!(received_telemetry.samples.len(), 2);
+    assert!(
+        received_telemetry.samples[0].collected_at < received_telemetry.samples[1].collected_at
+    );
     drop(store);
+
+    let telemetry_response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/targets/{}/telemetry", target_id.as_uuid()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(telemetry_response.status(), StatusCode::OK);
+    let telemetry_body = axum::body::to_bytes(telemetry_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let telemetry_json: serde_json::Value = serde_json::from_slice(&telemetry_body).unwrap();
+    assert_eq!(
+        telemetry_json["data"]["samples"].as_array().unwrap().len(),
+        2
+    );
+
     let targets = router(state.clone())
         .oneshot(
             Request::builder()
