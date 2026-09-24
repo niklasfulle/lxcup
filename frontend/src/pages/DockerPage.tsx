@@ -1,13 +1,15 @@
 import { cn, ui } from "../ui";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { adoptDockerWorkload, discoverDockerWorkloads, removeDockerWorkload } from "../api";
 import { queryKeys, useContainers, useDockerDiscovery, useDockerWorkloads } from "../queries";
 
 export function DockerPage() {
   const containers = useContainers();
-  const [hostId, setHostId] = useState<number | undefined>();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedHost = Number(searchParams.get("host"));
+  const [hostId, setHostId] = useState<number | undefined>(() => Number.isSafeInteger(requestedHost) && requestedHost > 0 ? requestedHost : undefined);
   const workloads = useDockerWorkloads(hostId);
   const discovery = useDockerDiscovery(hostId);
   const queryClient = useQueryClient();
@@ -27,7 +29,11 @@ export function DockerPage() {
     <header className={ui.pageHeader}><div><p className={ui.eyebrow}>Agent-Inventar</p><h1>Docker-Container</h1><p className={ui.muted}>Erkannte Docker-Container auf eingebundenen LXC-Agenten aufnehmen und verwalten.</p></div></header>
     <section className={ui.panel}>
       <div className={ui.workflowGrid}><label><span>LXC mit Agent</span>
-        <select value={hostId ?? ""} onChange={(event) => setHostId(event.target.value ? Number(event.target.value) : undefined)}>
+        <select value={hostId ?? ""} onChange={(event) => {
+          const next = event.target.value ? Number(event.target.value) : undefined;
+          setHostId(next);
+          setSearchParams(next ? { host: String(next) } : {});
+        }}>
           <option value="">LXC auswählen</option>
           {(containers.data ?? []).map((container) => <option key={container.id} value={container.id}>{container.name} · VMID {container.id}</option>)}
         </select>

@@ -49,7 +49,8 @@ export function WorkflowsPage() {
   const jobs = useAnsibleJobs();
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
-  const [targetId, setTargetId] = useState<string>(() => searchParams.get("target") ?? "");
+  const targetFilter = searchParams.get("target");
+  const [targetId, setTargetId] = useState<string>(() => targetFilter ?? "");
   const [operation, setOperation] = useState<AnsibleOperation>("health_check");
   const [mode, setMode] = useState<AnsibleExecutionMode>("check");
   const [packages, setPackages] = useState("");
@@ -63,6 +64,7 @@ export function WorkflowsPage() {
   const selectedOperation = useMemo(() => operations.find((item) => item.value === operation), [operation]);
   const selectedMode = useMemo(() => modes.find((item) => item.value === mode), [mode]);
   const selectedTarget = targets.data?.find((target) => target.id === targetId);
+  const visibleJobs = jobs.data?.filter((job) => targetFilter === null || ("target" in job.target && job.target.target === targetFilter));
   const isMutating = operation !== "health_check";
   const canSubmit = Boolean(targetId) && (isMutating === false || confirmed) && (operation !== "update_packages" || packages.trim().length > 0);
 
@@ -109,9 +111,9 @@ export function WorkflowsPage() {
         </form>
       </section>
       <section className={ui.panel}>
-        <div className={ui.sectionHeading}><div><h2>Workflow-Protokolle</h2><p className={ui.muted}>Alle Jobs mit ihrem audit-sicheren Ausführungsprotokoll.</p></div><span className={ui.muted}>{jobs.data?.length ?? 0} Jobs</span></div>
+        <div className={ui.sectionHeading}><div><h2>Workflow-Protokolle</h2><p className={ui.muted}>{targetFilter ? `Jobs für ${targets.data?.find((target) => target.id === targetFilter)?.name ?? "dieses Ziel"}.` : "Alle Jobs mit ihrem audit-sicheren Ausführungsprotokoll."}</p></div><span className={ui.muted}>{visibleJobs?.length ?? 0} Jobs</span></div>
         <div className={cn(ui.callout, ui.calloutInfo)}><strong>Ausführungszustand</strong><p><b>queued</b> bedeutet: Job wartet, er wird noch nicht bearbeitet. Erst <b>checking</b>, <b>planned</b> oder <b>applying</b> bedeutet, dass ein Worker aktiv arbeitet. In diesem Entwicklungs-Stack ist derzeit kein ausführender Ansible-Worker gestartet.</p></div>
-        {workflowJobsContent(jobs)}
+        {workflowJobsContent(jobs, visibleJobs)}
       </section>
     </>
   );
@@ -126,11 +128,11 @@ function JobFailureSummary({ jobId }: Readonly<{ jobId: string }>) {
   return <span className={ui.muted}>kein Fehlercode gemeldet</span>;
 }
 
-function workflowJobsContent(jobs: ReturnType<typeof useAnsibleJobs>) {
+function workflowJobsContent(jobs: ReturnType<typeof useAnsibleJobs>, visibleJobs: typeof jobs.data) {
   if (jobs.isLoading) return <p className={ui.muted}>Lade Workflows…</p>;
   if (jobs.error) return <p className={ui.errorState} role="alert">{jobs.error.message}</p>;
-  if (jobs.data === undefined || jobs.data.length === 0) return <p className={ui.emptyState}>Noch keine Workflows gestartet.</p>;
-  return <div className={ui.tableWrap}><table><thead><tr><th>Workflow</th><th>Ziel</th><th>Modus</th><th>Status</th><th>Fehlerursache</th><th>Bearbeitung</th><th>Gestartet</th></tr></thead><tbody>{jobs.data.map((job) => <tr key={job.id}><td><Link className={ui.textLink} to={`/workflows/${job.id}`}>{job.operation.replaceAll("_", " ")}</Link></td><td>{workflowTarget(job)}</td><td>{job.mode}</td><td><span className={cn(ui.statusBadge, workflowStatusClass(job.status) === "success" ? ui.statusSuccess : workflowStatusClass(job.status) === "neutral" ? ui.statusNeutral : ui.statusPending)}>{job.status}</span></td><td>{failureSummary(job.status, job.id)}</td><td>{jobProcessingLabel(job.status)}</td><td>{new Date(job.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>;
+  if (visibleJobs === undefined || visibleJobs.length === 0) return <p className={ui.emptyState}>Noch keine Workflows gestartet.</p>;
+  return <div className={ui.tableWrap}><table><thead><tr><th>Workflow</th><th>Ziel</th><th>Modus</th><th>Status</th><th>Fehlerursache</th><th>Bearbeitung</th><th>Gestartet</th></tr></thead><tbody>{visibleJobs.map((job) => <tr key={job.id}><td><Link className={ui.textLink} to={`/workflows/${job.id}`}>{job.operation.replaceAll("_", " ")}</Link></td><td>{workflowTarget(job)}</td><td>{job.mode}</td><td><span className={cn(ui.statusBadge, workflowStatusClass(job.status) === "success" ? ui.statusSuccess : workflowStatusClass(job.status) === "neutral" ? ui.statusNeutral : ui.statusPending)}>{job.status}</span></td><td>{failureSummary(job.status, job.id)}</td><td>{jobProcessingLabel(job.status)}</td><td>{new Date(job.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>;
 }
 
 function workflowStatusClass(status: string) {

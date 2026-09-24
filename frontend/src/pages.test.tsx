@@ -108,6 +108,7 @@ beforeEach(() => {
   mocks.enrollment.isLoading = false;
   mocks.enrollment.error = null;
   mocks.workloads.data = [];
+  mocks.dockerDiscovery.data = null;
   mocks.workerAvailability.data = { available: true, last_seen_at: "2026-01-01T00:00:00Z" };
   mocks.workloads.isLoading = false;
   mocks.workloads.error = null;
@@ -168,17 +169,22 @@ describe("inventory pages", () => {
 
   it("renders target detail with inventory, telemetry and stale heartbeat state", () => {
     mocks.targets.data = [target];
+    mocks.containers.data = [{ ...container, name: target.name }];
+    mocks.workloads.data = [{ host_container_id: 101, id: "docker-1", name: "web", image: "nginx:latest", state: "running", status: "Up", ports: [], started_at: null, labels: [], presence: "present", change_state: "unchanged", management_state: "managed", discovered_at: "2026-01-01T00:00:00Z" }];
     mocks.jobs.data = [{ id: "job-1", operation: "health_check", target: { target: "target-1" }, status: "succeeded", updated_at: "2026-01-01T00:00:00Z" }];
     mocks.packageInventory.data = { target_id: "target-1", status: "complete", collected_at: "2026-01-01T00:00:00Z", packages: [{ name: "curl", installed_version: "8.5", architecture: "amd64", source: "apt" }] };
     mocks.telemetry.data = { target_id: "target-1", collected_at: "2026-01-01T00:00:00Z", samples: [{ collected_at: "2026-01-01T00:00:00Z", cpu_basis_points: 2500, memory_basis_points: 5000, storage_basis_points: 7500, load_1_milli: 1000, network_rx_bytes: null, network_tx_bytes: null, process_count: null }] };
     renderPage(<TargetDetailPage />, "/targets/target-1");
     expect(screen.getByRole("heading", { name: "test-target" })).toBeInTheDocument();
-    expect(screen.getByText(/Nicht aktuell/)).toBeInTheDocument();
-    expect(screen.getByText("1 Pakete")).toBeInTheDocument();
+    expect(screen.getByText("Veraltet")).toBeInTheDocument();
+    expect(screen.getByText(/1 Pakete/)).toBeInTheDocument();
     expect(screen.getByText("health check")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: /CPU-Auslastung im Verlauf/ })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: /RAM-Auslastung im Verlauf/ })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: /Speicher-Auslastung im Verlauf/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Docker-Inventar dieses Hosts" })).toHaveAttribute("href", "/docker?host=101");
+    expect(screen.getByRole("link", { name: "Workflows dieses Ziels" })).toHaveAttribute("href", "/workflows?target=target-1");
+    expect(screen.getByText("web")).toBeInTheDocument();
   });
 
   it("covers target detail loading, missing, empty and dependency errors", () => {
@@ -201,6 +207,23 @@ describe("inventory pages", () => {
     expect(screen.getByText("Keine Workflows vorhanden.")).toBeInTheDocument();
   });
 
+  it("shows Docker inventory loading, empty, and error states on a target", () => {
+    mocks.targets.data = [target];
+    mocks.containers.data = [{ ...container, name: target.name }];
+    mocks.workloads.isLoading = true;
+    renderPage(<TargetDetailPage />, "/targets/target-1");
+    expect(screen.getByText("Docker-Inventar wird geladen…")).toBeInTheDocument();
+    cleanup();
+    mocks.workloads.isLoading = false;
+    mocks.workloads.data = [];
+    renderPage(<TargetDetailPage />, "/targets/target-1");
+    expect(screen.getByText("Noch kein Docker-Inventar für diesen Host.")).toBeInTheDocument();
+    cleanup();
+    mocks.workloads.error = new Error("docker inventory unavailable");
+    renderPage(<TargetDetailPage />, "/targets/target-1");
+    expect(screen.getByText("docker inventory unavailable")).toBeInTheDocument();
+  });
+
   it("renders windows and disabled target branches with a failed workflow", () => {
     mocks.targets.data = [{ ...target, kind: "windows_server", transport: "winrm", state: "disabled", agent_version: null, updated_at: new Date().toISOString() }];
     mocks.jobs.data = [{ id: "job-failed", operation: "deploy_agent", target: { target: "target-1" }, status: "failed", updated_at: "2026-01-01" }];
@@ -209,6 +232,18 @@ describe("inventory pages", () => {
     expect(screen.getByText("Windows")).toBeInTheDocument();
     expect(screen.getByText("Noch nicht erhoben")).toBeInTheDocument();
     expect(screen.getByText("deploy agent")).toBeInTheDocument();
+  });
+
+  it("filters workflow detail links to the selected target", () => {
+    mocks.targets.data = [target];
+    mocks.jobs.data = [
+      { id: "job-target", operation: "health_check", target: { target: "target-1" }, status: "succeeded", created_at: "2026-01-01", updated_at: "2026-01-01" },
+      { id: "job-other", operation: "deploy_agent", target: { target: "target-2" }, status: "failed", created_at: "2026-01-01", updated_at: "2026-01-01" },
+    ];
+    renderPage(<WorkflowsPage />, "/workflows?target=target-1");
+    expect(screen.getByRole("link", { name: "health check" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "deploy agent" })).not.toBeInTheDocument();
+    expect(screen.getByText("Jobs für test-target.")).toBeInTheDocument();
   });
 
   it("searches and sorts package inventory while rendering telemetry", () => {
@@ -340,6 +375,13 @@ describe("inventory pages", () => {
     expect(screen.getByText("web-lxc")).toBeInTheDocument();
     expect(screen.getByText(/exited · Exited/)).toBeInTheDocument();
     expect(screen.getByText(/geändert · entdeckt/)).toBeInTheDocument();
+  });
+
+  it("opens Docker inventory with the selected host from a target deep link", () => {
+    mocks.containers.data = [container];
+    renderPage(<DockerPage />, "/docker?host=101");
+    expect(screen.getByRole("combobox")).toHaveValue("101");
+    expect(screen.getByText(/Für diesen Host gibt es noch keinen protokollierten Discovery-Lauf/)).toBeInTheDocument();
   });
 });
 
