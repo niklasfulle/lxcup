@@ -7,3 +7,5 @@
 **/coverage/
 /.scannerwork/
 /.sonar/
+/debug
+/node_modules
