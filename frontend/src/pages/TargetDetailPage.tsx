@@ -16,8 +16,11 @@ export function TargetDetailPage() {
   const telemetry = useTargetTelemetry(targetId);
   const target = targets.data?.find((item) => item.id === targetId);
   const targetJobs = (jobs.data ?? []).filter((job) => "target" in job.target && job.target.target === targetId).slice(0, 8);
-  const latest = telemetry.data?.samples.at(-1);
-  const stale = latest ? Date.now() - new Date(latest.collected_at).getTime() > 15_000 : false;
+  const samples = telemetry.data?.samples ?? [];
+  const latest = samples.at(-1);
+  const stale = latest
+    ? Date.now() - new Date(latest.collected_at).getTime() > 15_000
+    : target ? Date.now() - new Date(target.updated_at).getTime() > 15_000 : false;
 
   if (targets.isLoading) return <section className={ui.panel}><p className={ui.muted}>Ziel wird geladen…</p></section>;
   if (!target) return <section className={ui.panel}><p className={ui.errorState}>Ziel nicht gefunden.</p><Link className={ui.textLink} to="/targets">Zur Zielübersicht</Link></section>;
@@ -35,9 +38,56 @@ export function TargetDetailPage() {
     {stale ? <div className={cn(ui.callout, ui.calloutDanger)} role="status">Der letzte Heartbeat ist älter als 15 Sekunden. Telemetrie und Agentstatus können veraltet sein.</div> : null}
     <section className={ui.panelGrid}>
       <article className={ui.panel}><div className={ui.sectionHeading}><div><h2>Paketinventar</h2><p className={ui.muted}>{inventory.isLoading ? "Wird geladen…" : inventory.data?.status === "complete" ? `${inventory.data.packages.length} Pakete` : "Noch nicht erhoben"}</p></div><Link className={ui.button} to={`/targets/${target.id}/packages`}>Inventar öffnen</Link></div>{inventory.error ? <p className={ui.errorState} role="alert">{inventory.error.message}</p> : null}</article>
-      <article className={ui.panel}><div className={ui.sectionHeading}><div><h2>Systemauslastung</h2><p className={ui.muted}>{telemetry.isLoading ? "Wird geladen…" : `${telemetry.data?.samples.length ?? 0} Samples im 30-Sekunden-Fenster`}</p></div><Link className={ui.button} to={`/targets/${target.id}/packages`}>Telemetrie öffnen</Link></div>{telemetry.error ? <p className={ui.errorState} role="alert">{telemetry.error.message}</p> : latest ? <p>CPU {latest.cpu_basis_points == null ? "—" : `${(latest.cpu_basis_points / 100).toFixed(1)}%`} · RAM {latest.memory_basis_points == null ? "—" : `${(latest.memory_basis_points / 100).toFixed(1)}%`} · Speicher {latest.storage_basis_points == null ? "—" : `${(latest.storage_basis_points / 100).toFixed(1)}%`}</p> : <p className={ui.emptyState}>Noch keine Telemetrie verfügbar.</p>}</article>
+      <article className={ui.panel}>
+        <div className={ui.sectionHeading}>
+          <div><h2>Systemauslastung</h2><p className={ui.muted}>{telemetry.isLoading ? "Wird geladen…" : `${samples.length} Samples im 30-Sekunden-Fenster`}</p></div>
+          <span className={ui.muted} title="Die Telemetrieansicht aktualisiert sich automatisch alle fünf Sekunden.">Live · 5 s</span>
+        </div>
+        {telemetry.error ? <p className={ui.errorState} role="alert">{telemetry.error.message}</p> : telemetry.isLoading && samples.length === 0 ? <p className={ui.muted}>Telemetrie wird geladen…</p> : samples.length === 0 ? <p className={ui.emptyState}>Noch keine Telemetrie verfügbar.</p> : <>
+          <p className="mb-3 text-sm text-[var(--muted)]">Letzter Messpunkt: {new Date(latest!.collected_at).toLocaleString()} · CPU {formatPercent(latest!.cpu_basis_points)} · RAM {formatPercent(latest!.memory_basis_points)} · Speicher {formatPercent(latest!.storage_basis_points)}</p>
+          <div className="grid gap-4 md:grid-cols-3">
+            <TelemetryChart label="CPU" field="cpu_basis_points" samples={samples} />
+            <TelemetryChart label="RAM" field="memory_basis_points" samples={samples} />
+            <TelemetryChart label="Speicher" field="storage_basis_points" samples={samples} />
+          </div>
+        </>}
+      </article>
       {target.kind === "lxc" ? <article className={ui.panel}><div className={ui.sectionHeading}><div><h2>Docker-Inventar</h2><p className={ui.muted}>Docker-Container werden getrennt vom LXC-Inventar geführt.</p></div><Link className={ui.button} to="/docker">Docker öffnen</Link></div></article> : null}
     </section>
     <section className={ui.panel}><div className={ui.sectionHeading}><div><h2>Letzte Workflows</h2><p className={ui.muted}>Nur Jobs dieses Ziels</p></div><Link className={ui.button} to="/workflows">Alle Workflows</Link></div>{targetJobs.length === 0 ? <p className={ui.emptyState}>Keine Workflows vorhanden.</p> : <ul className={ui.activityList}>{targetJobs.map((job) => <li className="flex items-center justify-between gap-3 border-b border-[var(--line)] py-2 last:border-0" key={job.id}><Link className={ui.textLink} to={`/workflows/${job.id}`}>{job.operation.replaceAll("_", " ")}</Link><span className={cn(ui.statusBadge, job.status === "succeeded" ? ui.statusSuccess : job.status === "failed" ? ui.calloutDanger : ui.statusPending)}>{job.status}</span></li>)}</ul>}</section>
   </>;
+}
+
+type TelemetryField = "cpu_basis_points" | "memory_basis_points" | "storage_basis_points";
+type TelemetrySample = NonNullable<ReturnType<typeof useTargetTelemetry>["data"]>["samples"][number];
+
+function formatPercent(value: number | null | undefined) {
+  return value == null ? "—" : `${(value / 100).toFixed(1)}%`;
+}
+
+function TelemetryChart({ label, field, samples }: Readonly<{ label: string; field: TelemetryField; samples: TelemetrySample[] }>) {
+  const points = samples.map((sample, index) => ({
+    x: samples.length <= 1 ? 10 : 10 + (index / (samples.length - 1)) * 580,
+    y: sample[field] == null ? null : 140 - (Math.max(0, Math.min(10_000, sample[field]!)) / 10_000) * 120,
+    sample,
+  }));
+  const description = `${label}-Auslastung im Verlauf der letzten 30 Sekunden; ${samples.length} Messpunkte.`;
+  return <figure className="min-w-0 rounded border border-[var(--line)] p-3">
+    <figcaption className="mb-2 flex justify-between gap-2"><strong>{label}</strong><span className="text-sm text-[var(--muted)]">{formatPercent(samples.at(-1)?.[field])}</span></figcaption>
+    <svg className="h-28 w-full" viewBox="0 0 600 160" role="img" aria-label={description}>
+      <title>{description}</title>
+      <line x1="10" y1="20" x2="590" y2="20" stroke="currentColor" opacity="0.15" />
+      <line x1="10" y1="80" x2="590" y2="80" stroke="currentColor" opacity="0.15" />
+      <line x1="10" y1="140" x2="590" y2="140" stroke="currentColor" opacity="0.15" />
+      <text x="10" y="14" fill="currentColor" fontSize="11">100%</text>
+      <text x="10" y="155" fill="currentColor" fontSize="11">0%</text>
+      {points.map((point, index) => {
+        const previous = points[index - 1];
+        return previous?.y != null && point.y != null ? <line key={`line-${point.sample.collected_at}`} x1={previous.x} y1={previous.y} x2={point.x} y2={point.y} stroke="var(--accent)" strokeWidth="3" /> : null;
+      })}
+      {points.map((point) => point.y == null ? null : <circle key={point.sample.collected_at} cx={point.x} cy={point.y} r="3.5" fill="var(--accent)"><title>{new Date(point.sample.collected_at).toLocaleTimeString()}: {formatPercent(point.sample[field])}</title></circle>)}
+    </svg>
+    <div className="flex justify-between text-xs text-[var(--muted)]" aria-hidden="true"><span>{new Date(samples[0].collected_at).toLocaleTimeString()}</span><span>{new Date(samples.at(-1)!.collected_at).toLocaleTimeString()}</span></div>
+    <ul className="sr-only">{samples.map((sample) => <li key={sample.collected_at}>{new Date(sample.collected_at).toLocaleString()}: {formatPercent(sample[field])}</li>)}</ul>
+  </figure>;
 }

@@ -174,6 +174,9 @@ describe("inventory pages", () => {
     expect(screen.getByText(/Nicht aktuell/)).toBeInTheDocument();
     expect(screen.getByText("1 Pakete")).toBeInTheDocument();
     expect(screen.getByText("health check")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /CPU-Auslastung im Verlauf/ })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /RAM-Auslastung im Verlauf/ })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /Speicher-Auslastung im Verlauf/ })).toBeInTheDocument();
   });
 
   it("covers target detail loading, missing, empty and dependency errors", () => {
