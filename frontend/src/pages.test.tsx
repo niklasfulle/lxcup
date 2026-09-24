@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   createEnrollment: vi.fn(async () => ({ id: "enrollment-1" })),
   createContainerAction: vi.fn(async () => ({ id: "task-1", status: "queued" })),
   createSchedule: vi.fn(async (request: any) => ({ ...request, last_run_at: null, next_run_at: "2026-01-01T01:00:00Z", last_error: null })),
+  createUpdatePolicy: vi.fn(async (request: any) => request),
   getAgentHealth: vi.fn(async () => ({ healthy: true, info: { agent_id: "agent-1", platform: "linux", hostname: "host", version: "0.2.0", protocol_version: "1" }, metrics: { collected_at: "2026-01-01", commands_total: 2, commands_failed: 0, last_command_at: null } })),
   getAgentMetrics: vi.fn(async () => ({ commands_total: 2, commands_failed: 0, last_command_at: null })),
   discoverDockerWorkloads: vi.fn(async () => undefined),
@@ -68,7 +69,7 @@ vi.mock("./queries", () => ({
 
 vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
-  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe, setCredentials: mocks.setCredentials, setUnauthorizedHandler: mocks.setUnauthorizedHandler, getSession: mocks.getSession, logout: mocks.logout } };
+  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, createUpdatePolicy: mocks.createUpdatePolicy, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe, setCredentials: mocks.setCredentials, setUnauthorizedHandler: mocks.setUnauthorizedHandler, getSession: mocks.getSession, logout: mocks.logout } };
 });
 
 import { Dashboard } from "./pages/Dashboard";
@@ -84,6 +85,7 @@ import { ResourceTree } from "./components/ResourceTree";
 import { TargetDetailPage } from "./pages/TargetDetailPage";
 import { PackageInventoryPage } from "./pages/PackageInventoryPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
+import { ContainersPage } from "./pages/ContainersPage";
 
 function renderPage(element: React.ReactElement, route = "/") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -293,16 +295,49 @@ describe("inventory pages", () => {
     expect(screen.getByText("telemetry error")).toBeInTheDocument();
   });
 
+  it("renders LXC inventory, node filtering and loading/error states", () => {
+    mocks.containers.data = [container, { ...container, id: 102, node_id: "node-2", name: "db-lxc" }];
+    renderPage(<ContainersPage />, "/containers?node=node-1");
+    expect(screen.getByText("Gefiltert nach ausgewähltem Node")).toBeInTheDocument();
+    expect(screen.getByText("web-lxc")).toBeInTheDocument();
+    expect(screen.queryByText("db-lxc")).not.toBeInTheDocument();
+    cleanup();
+    mocks.containers.data = [];
+    renderPage(<ContainersPage />);
+    expect(screen.getByText(/Keine LXC-Container entdeckt/)).toBeInTheDocument();
+    cleanup();
+    mocks.containers.isLoading = true;
+    renderPage(<ContainersPage />);
+    expect(screen.getByText("Container werden geladen…")).toBeInTheDocument();
+    cleanup();
+    mocks.containers.isLoading = false;
+    mocks.containers.error = new Error("container failure");
+    renderPage(<ContainersPage />);
+    expect(screen.getByText("container failure")).toBeInTheDocument();
+  });
+
   it("renders schedule empty and populated states", () => {
     mocks.targets.data = [target];
+    mocks.updatePolicies.data = [
+      { id: "safe", enabled: true, maximum_risk: "low", allowed_packages: ["curl"] },
+      { id: "paused", enabled: false, maximum_risk: "high", allowed_packages: [] },
+    ];
     renderPage(<SchedulesPage />);
     expect(screen.getByRole("heading", { name: "Zeitpläne" })).toBeInTheDocument();
     expect(screen.getByText("Noch keine Zeitpläne angelegt.")).toBeInTheDocument();
+    expect(screen.getByText(/safe/)).toBeInTheDocument();
+    expect(screen.getByText(/paused/)).toBeInTheDocument();
+    expect(screen.getByText(/alle Pakete/)).toBeInTheDocument();
     cleanup();
-    mocks.schedules.data = [{ id: "nightly", operation: "collect_package_inventory", timezone: "Europe/Berlin", target_ids: [target.id], every_minutes: 60, enabled: true, last_run_at: null, next_run_at: "2026-01-01T01:00:00Z", last_error: null }];
+    mocks.schedules.data = [
+      { id: "nightly", operation: "collect_package_inventory", timezone: "Europe/Berlin", target_ids: [target.id], every_minutes: 60, enabled: true, last_run_at: null, next_run_at: "2026-01-01T01:00:00Z", last_error: null },
+      { id: "weekly", operation: "health_check", timezone: "UTC", target_ids: [target.id], every_minutes: 120, enabled: false, last_run_at: "2026-01-01T00:00:00Z", next_run_at: "2026-01-01T02:00:00Z", last_error: "worker offline" },
+    ];
     renderPage(<SchedulesPage />);
     expect(screen.getByText("nightly")).toBeInTheDocument();
     expect(screen.getByText("aktiv")).toBeInTheDocument();
+    expect(screen.getByText("worker offline")).toBeInTheDocument();
+    expect(screen.getByText("pausiert")).toBeInTheDocument();
   });
 
   it("validates, submits and reports schedule form states", async () => {
@@ -325,6 +360,26 @@ describe("inventory pages", () => {
     mocks.schedules.error = new Error("schedule failure");
     renderPage(<SchedulesPage />);
     expect(screen.getByText("schedule failure")).toBeInTheDocument();
+  });
+
+  it("creates an update policy and converts its maintenance window to minutes", async () => {
+    mocks.targets.data = [target];
+    renderPage(<SchedulesPage />);
+    await userEvent.type(screen.getByPlaceholderText("security-updates"), "security");
+    await userEvent.selectOptions(screen.getAllByRole("combobox", { name: "Ziel" })[0], target.id);
+    await userEvent.type(screen.getByPlaceholderText("curl, openssl"), "curl, openssl");
+    fireEvent.change(screen.getByDisplayValue("00:00"), { target: { value: "01:00" } });
+    fireEvent.change(screen.getByDisplayValue("23:59"), { target: { value: "02:00" } });
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Maximales Risiko" }), "medium");
+    await userEvent.click(screen.getByRole("button", { name: "Policy speichern" }));
+    await waitFor(() => expect(mocks.createUpdatePolicy).toHaveBeenCalledWith(expect.objectContaining({
+      id: "security",
+      allowed_targets: [target.id],
+      allowed_packages: ["curl", "openssl"],
+      maintenance_start_minute: 60,
+      maintenance_end_minute: 120,
+      maximum_risk: "medium",
+    })));
   });
 
   it("discovers and manages docker workloads", async () => {
@@ -379,6 +434,21 @@ describe("inventory pages", () => {
     expect(screen.getByText("web-lxc")).toBeInTheDocument();
     expect(screen.getByText(/exited · Exited/)).toBeInTheDocument();
     expect(screen.getByText(/geändert · entdeckt/)).toBeInTheDocument();
+  });
+
+  it("renders a successful discovery and unchanged or missing managed workloads", () => {
+    mocks.containers.data = [container];
+    mocks.dockerDiscovery.data = { id: "run-ok", host_container_id: 101, status: "succeeded", started_at: "2026-01-01T00:00:00Z", finished_at: "2026-01-01T00:00:01Z", container_count: 2, error_code: null };
+    mocks.workloads.data = [
+      { host_container_id: 101, id: "docker-managed", name: "managed-web", image: "nginx:1", state: "running", status: "Up", ports: [], started_at: null, labels: [], presence: "present", change_state: "unchanged", management_state: "managed", discovered_at: "2026-01-01T00:00:00Z" },
+      { host_container_id: 101, id: "docker-missing", name: "old-web", image: "nginx:1", state: "exited", status: "Exited", ports: [], started_at: null, labels: [], presence: "missing", change_state: "missing", management_state: "discovered", discovered_at: "2026-01-01T00:00:00Z" },
+    ];
+    renderPage(<DockerPage />, "/docker?host=101");
+
+    expect(screen.getByText(/Status:/)).toHaveTextContent("succeeded");
+    expect(screen.getByText("unverändert · aufgenommen")).toBeInTheDocument();
+    expect(screen.getByText("verschwunden · nicht mehr vorhanden")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Aufnehmen" })).not.toBeInTheDocument();
   });
 
   it("opens Docker inventory with the selected host from a target deep link", () => {
