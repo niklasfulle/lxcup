@@ -35,3 +35,27 @@ Die lokale Negativtest-Suite prüft falsche Keys, fehlende Werte, Widerruf, Reda
 ```
 
 Die Tests verwenden ausschließlich synthetische Werte.
+
+## Gemeinsamer Backup- und Restore-Test
+
+Ein verschlüsseltes Stack-Backup enthält den PostgreSQL-Custom-Dump und den
+bereits verschlüsselten Secret-Store. Der Age-Empfänger wird nur als
+Kommandozeilenargument verwendet; der private Schlüssel wird nie ausgegeben
+oder im Repository gespeichert:
+
+```powershell
+.\scripts\backup-stack.ps1 -AgeRecipient $env:LXCUP_BACKUP_AGE_RECIPIENT
+```
+
+Die Aufbewahrung beträgt standardmäßig 30 Tage und kann mit
+`-RetentionDays` angepasst werden. Für einen regelmäßigen isolierten
+Restore-Test muss `DATABASE_TEST_URL` auf eine dedizierte Testdatenbank zeigen:
+
+```powershell
+.\scripts\restore-backup-test.ps1 -BackupFile .\backups\lxcup-<timestamp>.tar.age -AgeIdentity $env:LXCUP_BACKUP_AGE_IDENTITY
+```
+
+Das Wiederherstellungsziel führt anschließend die SQLx-Migrationen und die
+Persistence-Integrationstests aus. Das Recovery-Ziel (RPO 24 Stunden, RTO 1
+Stunde) und die getrennte Aufbewahrung von Age-Identität und Backup müssen im
+externen Secret-/KMS-System dokumentiert werden.

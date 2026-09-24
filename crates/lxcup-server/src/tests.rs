@@ -3,9 +3,127 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use lxcup_core::{JobSchedule, Node, NodeId, ScheduleFrequency};
 use lxcup_secrets::CreateSecret;
-use lxcup_core::{Node, NodeId};
 use tower::ServiceExt;
+
+#[tokio::test]
+async fn logout_has_a_stable_stateless_contract() {
+    let response = router(ApiState::new())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/auth/logout")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn schedules_validate_registered_targets_and_intervals() {
+    let state = ApiState::new();
+    let target = Target::new(
+        "scheduled-target",
+        TargetKind::LinuxServer,
+        "192.0.2.80",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    let target_id = target.id;
+    state.store.write().await.targets.push(target);
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/schedules")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "id": "nightly-inventory",
+                "operation": "collect_package_inventory",
+                "timezone": "Europe/Berlin",
+                "target_ids": [target_id],
+                "every_minutes": 60,
+                "enabled": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    let list = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/schedules")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let duplicate = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/schedules")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "id": "nightly-inventory", "operation": "health_check", "timezone": "UTC",
+                "target_ids": [target_id], "every_minutes": 0
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        router(state).oneshot(duplicate).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn scheduler_dispatches_due_inventory_once_and_advances_slot() {
+    let state = ApiState::new();
+    let mut target = Target::new(
+        "scheduled-target",
+        TargetKind::LinuxServer,
+        "192.0.2.81",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    target.mark_managed();
+    let target_id = target.id;
+    state.store.write().await.targets.push(target);
+    state.store.write().await.schedules.push(JobSchedule {
+        id: "hourly-inventory".to_owned(),
+        operation: "collect_package_inventory".to_owned(),
+        timezone: "Europe/Berlin".to_owned(),
+        target_ids: vec![target_id],
+        frequency: ScheduleFrequency::EveryMinutes(60),
+        enabled: true,
+        threshold: None,
+        policy_id: None,
+        last_run_at: None,
+        next_run_at: chrono::Utc::now() - chrono::Duration::minutes(1),
+        last_error: None,
+    });
+
+    assert_eq!(state.dispatch_due_schedules().await, 1);
+    assert_eq!(state.ansible.read().await.jobs().len(), 1);
+    assert_eq!(state.dispatch_due_schedules().await, 0);
+    let schedule = state.store.read().await.schedules[0].clone();
+    assert!(schedule.last_run_at.is_some());
+    assert!(schedule.next_run_at > chrono::Utc::now());
+}
 
 #[tokio::test]
 async fn removed_nodes_endpoint_is_not_available() {
@@ -41,12 +159,11 @@ async fn inventory_endpoints_list_containers_start_scans_and_render_metrics() {
     state.replace_nodes(vec![node]).await;
     state.replace_containers(vec![container]).await;
 
-    for request in [
-        Request::builder()
-            .uri("/api/v1/containers")
-            .body(Body::empty())
-            .unwrap(),
-    ] {
+    for request in [Request::builder()
+        .uri("/api/v1/containers")
+        .body(Body::empty())
+        .unwrap()]
+    {
         assert_eq!(
             router(state.clone())
                 .oneshot(request)
@@ -443,7 +560,7 @@ async fn execution_endpoints_confirm_run_reconcile_and_abort() {
             agent_id: "execution-agent".to_owned(),
             platform: lxcup_agent::AgentPlatform::Windows,
             hostname: "execution-host".to_owned(),
-            version: "0.1.0".to_owned(),
+            version: "0.2.0".to_owned(),
             protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
         };
         axum::serve(
@@ -530,6 +647,10 @@ async fn docker_inventory_endpoints_manage_in_memory_workloads() {
             image: "nginx:latest".to_owned(),
             state: "running".to_owned(),
             status: "Up".to_owned(),
+            ports: vec!["80/tcp".to_owned()],
+            started_at: None,
+            labels: vec!["app=web".to_owned()],
+            presence: "present".to_owned(),
             management_state: "discovered".to_owned(),
             discovered_at: chrono::Utc::now(),
         },
@@ -855,7 +976,7 @@ async fn agent_registration_exposes_health_and_metrics() {
         agent_id: "test-agent".to_owned(),
         platform: lxcup_agent::AgentPlatform::Linux,
         hostname: "test-lxc".to_owned(),
-        version: "0.1.0".to_owned(),
+        version: "0.2.0".to_owned(),
         protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -988,7 +1109,7 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
             agent_id: "heartbeat-agent".to_owned(),
             platform: lxcup_agent::AgentPlatform::Linux,
             hostname: "heartbeat-host".to_owned(),
-            version: "0.1.0".to_owned(),
+            version: "0.2.0".to_owned(),
             protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
         },
         metrics: lxcup_agent::AgentMetrics {
@@ -998,6 +1119,7 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
             last_command_at: None,
         },
         sent_at: chrono::Utc::now(),
+        telemetry: lxcup_agent::SystemTelemetryWindow::default(),
     };
     let response = router(state.clone())
         .oneshot(
@@ -1031,12 +1153,49 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
         .await
         .unwrap();
     let targets_json: serde_json::Value = serde_json::from_slice(&targets_body).unwrap();
-    assert_eq!(targets_json["data"][0]["agent_version"], "0.1.0");
+    assert_eq!(targets_json["data"][0]["agent_version"], "0.2.0");
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), events.recv())
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn package_inventory_endpoint_reports_an_uncollected_target_without_packages() {
+    let target = Target::new(
+        "inventory-target",
+        TargetKind::LinuxServer,
+        "192.0.2.99",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    let target_id = target.id;
+    let state = ApiState::new();
+    state.store.write().await.targets.push(target);
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/targets/{}/package-inventory",
+                    target_id.as_uuid()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["status"], "not_collected");
+    assert_eq!(json["data"]["packages"], serde_json::json!([]));
+    assert!(json["data"]["collected_at"].is_null());
 }
 
 #[tokio::test]

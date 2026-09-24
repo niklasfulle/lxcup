@@ -22,13 +22,16 @@ use axum::{
 use lxcup_agent::{
     AgentClient, AgentClientConfig, AgentHealth, AgentHeartbeat, AgentMetrics, DockerContainerInfo,
 };
-use lxcup_ansible::AnsibleJobCoordinator;
+use lxcup_ansible::{
+    AnsibleJobCoordinator, AnsibleJobRequest, AnsibleOperation, AnsibleParameters, ExecutionMode,
+    JobSubmission,
+};
 use lxcup_core::{
     ActorRole, AgentRegistration, Container, ContainerId, DockerWorkload,
     DockerWorkloadManagementState, Enrollment, EnrollmentId, EnrollmentState, Execution,
-    ExecutionId, Permission, Scan,
-    ScanId, SecretId, SecretKind, SecretScope, SecretValue, Target, TargetId, TargetKind,
-    TargetState, TargetTransport, UpdatePlan, UpdatePlanId,
+    ExecutionId, Permission, ResourceLifecycle, ResourceTarget, Scan, ScanId, SecretId, SecretKind,
+    SecretScope, SecretValue, Target, TargetId, TargetKind, TargetState, TargetTransport,
+    ThresholdMetric, ThresholdRule, UpdatePlan, UpdatePlanId, UpdateRisk,
 };
 use lxcup_execution::ExecutionCoordinator;
 use lxcup_persistence::Repositories;
@@ -37,7 +40,7 @@ use lxcup_secrets::{
     CreateSecret, InMemorySecretStore, SecretStore, SecretStoreError, StoredSecretMetadata,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use uuid::Uuid;
 
@@ -52,12 +55,20 @@ pub(crate) use workflows::{
 };
 mod worker;
 pub(crate) use worker::get_worker_availability;
+mod package_inventory;
+pub(crate) use package_inventory::get_package_inventory;
+mod telemetry;
+pub(crate) use telemetry::get_target_telemetry;
+mod schedules;
+pub(crate) use schedules::{create_schedule, list_schedules};
+mod policies;
+pub(crate) use policies::{create_update_policy, list_update_policies};
 mod inventory;
+pub use inventory::AuthConfig;
 pub(crate) use inventory::{
-    ApiMetrics, AuthConfig, abort_execution, confirm_plan, create_plan, get_execution_result,
-    get_plan, list_container_plans, list_containers, list_scans, live_health,
-    metrics, ready_health, reconcile_execution, request_middleware, run_execution, run_scan,
-    start_scan,
+    ApiMetrics, abort_execution, confirm_plan, create_plan, get_execution_result, get_plan,
+    list_container_plans, list_containers, list_scans, live_health, logout, metrics, ready_health,
+    reconcile_execution, request_middleware, run_execution, run_scan, start_scan,
 };
 mod agent;
 pub(crate) use agent::{
@@ -78,6 +89,7 @@ pub struct ApiState {
     repositories: Option<Repositories>,
     ansible: Arc<RwLock<AnsibleJobCoordinator>>,
     secrets: Arc<dyn SecretStore>,
+    scheduler_lock: Arc<Mutex<()>>,
 }
 
 impl ApiState {
@@ -93,6 +105,7 @@ impl ApiState {
             repositories: None,
             ansible: Arc::new(RwLock::new(AnsibleJobCoordinator::default())),
             secrets: Arc::new(InMemorySecretStore::default()),
+            scheduler_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -122,6 +135,216 @@ impl ApiState {
         let restored = targets.len();
         self.store.write().await.targets = targets;
         restored
+    }
+
+    /// Restores persisted schedules so a restart cannot silently disable
+    /// recurring maintenance jobs.
+    pub async fn restore_schedules(&self) -> usize {
+        let Some(repositories) = self.repositories.as_ref() else {
+            return 0;
+        };
+        let Ok(schedules) = repositories.schedules.list().await else {
+            return 0;
+        };
+        let restored = schedules.len();
+        self.store.write().await.schedules = schedules;
+        restored
+    }
+
+    /// Claims due schedules and turns each target run into the same validated
+    /// Ansible job contract used by the interactive API. The lock makes the
+    /// poller safe when more than one tick overlaps during a slow database or
+    /// worker operation.
+    pub async fn dispatch_due_schedules(&self) -> usize {
+        let _guard = self.scheduler_lock.lock().await;
+        if let Some(repositories) = self.repositories.clone() {
+            let cutoff = chrono::Utc::now() - chrono::Duration::seconds(10);
+            let worker_available = repositories
+                .worker_heartbeats
+                .latest_since(cutoff)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            if !worker_available {
+                return 0;
+            }
+        }
+        let now = chrono::Utc::now();
+        let due = self
+            .store
+            .read()
+            .await
+            .schedules
+            .iter()
+            .filter(|schedule| schedule.is_due(now))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut dispatched = 0;
+        for schedule in due {
+            let mut failure = None;
+            for target_id in &schedule.target_ids {
+                let target = self
+                    .store
+                    .read()
+                    .await
+                    .targets
+                    .iter()
+                    .find(|target| target.id == *target_id && target.state == TargetState::Managed)
+                    .cloned();
+                let Some(target) = target else {
+                    failure = Some(format!("target {} is not managed", target_id.as_uuid()));
+                    continue;
+                };
+                if let Some(repositories) = self.repositories.clone() {
+                    if repositories
+                        .ansible_jobs
+                        .has_active_target(ResourceTarget::Target(*target_id))
+                        .await
+                        .unwrap_or(false)
+                    {
+                        failure = Some(format!(
+                            "target {} already has an active job",
+                            target_id.as_uuid()
+                        ));
+                        continue;
+                    }
+                }
+                if let Some(rule) = schedule.threshold {
+                    let actual = self
+                        .store
+                        .read()
+                        .await
+                        .agent_reports
+                        .get(target_id)
+                        .and_then(|heartbeat| threshold_value(rule, heartbeat));
+                    if !rule.triggered(actual) {
+                        let message = format!(
+                            "schedule {} threshold not met for target {}",
+                            schedule.id,
+                            target_id.as_uuid()
+                        );
+                        failure = Some(message.clone());
+                        self.publish(ApiEvent::Error {
+                            code: "schedule_threshold_not_met".to_owned(),
+                            message,
+                            request_id: schedule.id.clone(),
+                        });
+                        continue;
+                    }
+                }
+                let update_policy = if schedule.operation == "update_packages" {
+                    if let Some(policy_id) = schedule.policy_id.as_deref() {
+                        self.store
+                            .read()
+                            .await
+                            .update_policies
+                            .iter()
+                            .find(|policy| policy.id == policy_id)
+                            .cloned()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let (operation, parameters, mode, secret_refs) = match schedule.operation.as_str() {
+                    "health_check" => (
+                        AnsibleOperation::HealthCheck,
+                        AnsibleParameters::HealthCheck,
+                        ExecutionMode::Check,
+                        Vec::new(),
+                    ),
+                    "collect_package_inventory" => (
+                        AnsibleOperation::CollectPackageInventory,
+                        AnsibleParameters::CollectPackageInventory,
+                        ExecutionMode::Check,
+                        vec![target.credential_secret_ref],
+                    ),
+                    "update_packages" => {
+                        let Some(policy) = update_policy else {
+                            failure =
+                                Some("scheduled package update has no valid policy".to_owned());
+                            continue;
+                        };
+                        let packages = if policy.allowed_packages.is_empty() {
+                            vec!["*".to_owned()]
+                        } else {
+                            policy.allowed_packages.clone()
+                        };
+                        if !policy.enabled
+                            || !policy.allowed_targets.contains(target_id)
+                            || packages.iter().any(|package| {
+                                !policy.allows(*target_id, package, UpdateRisk::Low, now)
+                            })
+                        {
+                            failure =
+                                Some("scheduled package update is outside its policy".to_owned());
+                            continue;
+                        }
+                        (
+                            AnsibleOperation::UpdatePackages,
+                            AnsibleParameters::UpdatePackages { packages },
+                            ExecutionMode::Plan,
+                            vec![target.credential_secret_ref],
+                        )
+                    }
+                    _ => {
+                        failure = Some("schedule operation is no longer registered".to_owned());
+                        continue;
+                    }
+                };
+                let idempotency_key = format!(
+                    "schedule-{}-{}-{}",
+                    schedule.id,
+                    target_id.as_uuid(),
+                    schedule.next_run_at.timestamp()
+                );
+                let submission = self.ansible.write().await.submit(AnsibleJobRequest {
+                    operation,
+                    target: ResourceTarget::Target(*target_id),
+                    lifecycle: ResourceLifecycle::Managed,
+                    mode,
+                    parameters,
+                    secret_refs,
+                    idempotency_key,
+                    confirmed: true,
+                    actor_role: ActorRole::Operator,
+                });
+                match submission {
+                    Ok(JobSubmission::Created(job)) => {
+                        if let Err(_error) = workflows::persist_created_job(self, &job).await {
+                            failure = Some("scheduled job persistence failed".to_owned());
+                        } else {
+                            self.publish(ApiEvent::status(
+                                "ansible_job",
+                                job.id.as_uuid().to_string(),
+                                "queued",
+                            ));
+                            dispatched += 1;
+                        }
+                    }
+                    Ok(JobSubmission::Duplicate(_)) => {}
+                    Err(error) => failure = Some(error.to_string()),
+                }
+            }
+            let updated = {
+                let mut store = self.store.write().await;
+                let Some(current) = store
+                    .schedules
+                    .iter_mut()
+                    .find(|item| item.id == schedule.id)
+                else {
+                    continue;
+                };
+                current.advance_after_run(now, failure);
+                current.clone()
+            };
+            if let Some(repositories) = self.repositories.clone() {
+                let _ = repositories.schedules.update(&updated).await;
+            }
+        }
+        dispatched
     }
 
     #[cfg(test)]
@@ -174,21 +397,59 @@ impl ApiState {
     /// Drops in-memory clients when their credential is rotated or revoked so
     /// the previous credential cannot be used through the lxcup API anymore.
     pub async fn invalidate_agents_for_secret(&self, secret_id: SecretId) {
-        let Some(repositories) = self.repositories.as_ref() else {
-            return;
+        if let Some(repositories) = self.repositories.as_ref() {
+            if let Ok(registrations) = repositories.agent_registrations.list().await {
+                for registration in registrations
+                    .into_iter()
+                    .filter(|item| item.secret_ref == secret_id)
+                {
+                    self.agents.write().await.remove(&registration.container_id);
+                    self.publish(ApiEvent::status(
+                        "agent",
+                        registration.container_id.value().to_string(),
+                        "credential_invalidated",
+                    ));
+                }
+            }
+        }
+        let affected_targets = self
+            .store
+            .read()
+            .await
+            .targets
+            .iter()
+            .filter(|target| {
+                target.credential_secret_ref == secret_id || target.agent_secret_ref == secret_id
+            })
+            .map(|target| target.id)
+            .collect::<Vec<_>>();
+        let disabled = {
+            let mut store = self.store.write().await;
+            let mut changed = Vec::new();
+            for schedule in &mut store.schedules {
+                if schedule
+                    .target_ids
+                    .iter()
+                    .any(|target_id| affected_targets.contains(target_id))
+                    && schedule.enabled
+                {
+                    schedule.enabled = false;
+                    schedule.last_error = Some(
+                        "disabled because a referenced secret was revoked or rotated".to_owned(),
+                    );
+                    changed.push(schedule.clone());
+                }
+            }
+            changed
         };
-        let Ok(registrations) = repositories.agent_registrations.list().await else {
-            return;
-        };
-        for registration in registrations
-            .into_iter()
-            .filter(|item| item.secret_ref == secret_id)
-        {
-            self.agents.write().await.remove(&registration.container_id);
+        for schedule in disabled {
+            if let Some(repositories) = self.repositories.clone() {
+                let _ = repositories.schedules.update(&schedule).await;
+            }
             self.publish(ApiEvent::status(
-                "agent",
-                registration.container_id.value().to_string(),
-                "credential_invalidated",
+                "schedule",
+                schedule.id,
+                "disabled_secret_invalidated",
             ));
         }
     }
@@ -216,6 +477,27 @@ impl Default for ApiState {
     }
 }
 
+fn threshold_value(rule: ThresholdRule, heartbeat: &AgentHeartbeat) -> Option<u64> {
+    let sample = heartbeat.telemetry.samples.last();
+    match rule.metric {
+        ThresholdMetric::CpuBasisPoints => {
+            sample.and_then(|item| item.cpu_basis_points.map(u64::from))
+        }
+        ThresholdMetric::MemoryBasisPoints => {
+            sample.and_then(|item| item.memory_basis_points.map(u64::from))
+        }
+        ThresholdMetric::StorageBasisPoints => {
+            sample.and_then(|item| item.storage_basis_points.map(u64::from))
+        }
+        ThresholdMetric::HeartbeatAgeSeconds => Some(
+            chrono::Utc::now()
+                .signed_duration_since(heartbeat.sent_at)
+                .num_seconds()
+                .max(0) as u64,
+        ),
+    }
+}
+
 #[derive(Default)]
 struct ApiStore {
     targets: Vec<Target>,
@@ -230,6 +512,8 @@ struct ApiStore {
     results: HashMap<ExecutionId, ExecutionResultDto>,
     secret_audit: Vec<SecretAuditEvent>,
     docker_workloads: HashMap<(ContainerId, String), DockerWorkloadDto>,
+    schedules: Vec<lxcup_core::JobSchedule>,
+    update_policies: Vec<lxcup_core::UpdatePolicy>,
 }
 
 #[derive(Clone)]
@@ -279,8 +563,25 @@ pub fn router(state: ApiState) -> Router {
         .route("/health/live", get(live_health))
         .route("/health/ready", get(ready_health))
         .route("/metrics", get(metrics))
+        .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/targets", get(list_targets).post(create_target))
+        .route(
+            "/api/v1/targets/{target_id}/package-inventory",
+            get(get_package_inventory),
+        )
+        .route(
+            "/api/v1/targets/{target_id}/telemetry",
+            get(get_target_telemetry),
+        )
         .route("/api/v1/targets/{target_id}", get(get_target))
+        .route(
+            "/api/v1/schedules",
+            get(list_schedules).post(create_schedule),
+        )
+        .route(
+            "/api/v1/update-policies",
+            get(list_update_policies).post(create_update_policy),
+        )
         .route("/api/v1/agents/heartbeat", post(receive_agent_heartbeat))
         .route("/api/v1/secrets", get(list_secrets).post(create_secret))
         .route("/api/v1/secrets/audit", get(list_secret_audit))

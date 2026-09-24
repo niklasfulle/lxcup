@@ -1,0 +1,26 @@
+---
+- name: Collect a complete Linux package inventory
+  hosts: lxcup_targets
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Gather installed packages from the registered package manager
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Stage normalized package inventory for the worker
+      ansible.builtin.copy:
+        content: "{{ {'packages': ansible_facts.packages} | to_json }}"
+        dest: "{{ lxcup_package_inventory_remote_file }}"
+        mode: '0600'
+
+    - name: Fetch package inventory into the worker's temporary directory
+      ansible.builtin.fetch:
+        src: "{{ lxcup_package_inventory_remote_file }}"
+        dest: "{{ lxcup_package_inventory_output }}"
+        flat: true
+
+    - name: Remove the temporary package inventory from the target
+      ansible.builtin.file:
+        path: "{{ lxcup_package_inventory_remote_file }}"
+        state: absent

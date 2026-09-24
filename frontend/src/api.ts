@@ -65,7 +65,7 @@ export type ExecutionSafetyDto = {
   automatic_rollback: boolean;
 };
 
-export type AnsibleOperation = "deploy_agent" | "update_agent" | "repair_agent" | "update_packages" | "configure_target" | "health_check";
+export type AnsibleOperation = "deploy_agent" | "update_agent" | "repair_agent" | "update_packages" | "configure_target" | "health_check" | "collect_package_inventory";
 export type AnsibleExecutionMode = "check" | "plan" | "apply" | "reconcile";
 export type AnsibleJobDto = {
   id: string;
@@ -102,9 +102,23 @@ export type DockerWorkloadDto = {
   image: string;
   state: string;
   status: string;
+  ports: string[];
+  started_at: string | null;
+  labels: string[];
+  presence: "present" | "missing";
   management_state: "discovered" | "managed";
   discovered_at: string;
 };
+export type PackageInventoryDto = {
+  target_id: string;
+  status: "complete" | "not_collected";
+  collected_at: string | null;
+  packages: Array<{ name: string; installed_version: string; architecture: string | null; source: string | null }>;
+};
+export type TelemetryDto = { target_id: string; collected_at: string | null; samples: Array<{ collected_at: string; cpu_basis_points: number | null; memory_basis_points: number | null; storage_basis_points: number | null; load_1_milli: number | null; network_rx_bytes: number | null; network_tx_bytes: number | null; process_count: number | null }> };
+export type ThresholdRuleDto = { metric: "cpu_basis_points" | "memory_basis_points" | "storage_basis_points" | "heartbeat_age_seconds"; operator: "greater_than_or_equal" | "less_than_or_equal"; value: number };
+export type ScheduleDto = { id: string; operation: string; timezone: string; target_ids: string[]; every_minutes: number; enabled: boolean; threshold: ThresholdRuleDto | null; policy_id: string | null; last_run_at: string | null; next_run_at: string; last_error: string | null };
+export type UpdatePolicyDto = { id: string; allowed_targets: string[]; allowed_packages: string[]; maintenance_start_minute: number; maintenance_end_minute: number; timezone: string; maximum_risk: "low" | "medium" | "high"; enabled: boolean };
 
 export type CreateAnsibleJobRequest = {
   operation: AnsibleOperation;
@@ -259,6 +273,11 @@ export const apiClient = new ApiClient();
 
 export function listTargets(signal?: AbortSignal) { return apiClient.get<TargetDto[]>("/api/v1/targets", signal); }
 export function createTarget(request: CreateTargetRequest, signal?: AbortSignal) { return apiClient.post<TargetDto>("/api/v1/targets", request, signal); }
+export function getPackageInventory(targetId: string, signal?: AbortSignal) { return apiClient.get<PackageInventoryDto>(`/api/v1/targets/${targetId}/package-inventory`, signal); }
+export function getTargetTelemetry(targetId: string, signal?: AbortSignal) { return apiClient.get<TelemetryDto>(`/api/v1/targets/${targetId}/telemetry`, signal); }
+export function listSchedules(signal?: AbortSignal) { return apiClient.get<ScheduleDto[]>("/api/v1/schedules", signal); }
+export function createSchedule(request: Omit<ScheduleDto, "last_run_at" | "next_run_at" | "last_error">, signal?: AbortSignal) { return apiClient.post<ScheduleDto>("/api/v1/schedules", request, signal); }
+export function listUpdatePolicies(signal?: AbortSignal) { return apiClient.get<UpdatePolicyDto[]>("/api/v1/update-policies", signal); }
 
 export function createAnsibleJob(request: CreateAnsibleJobRequest, signal?: AbortSignal) {
   return apiClient.post<AnsibleJobDto>("/api/v1/ansible/jobs", request, signal);

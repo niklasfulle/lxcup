@@ -17,8 +17,13 @@ use uuid::Uuid;
 use crate::Database;
 
 mod docker;
+mod package_inventory;
+pub use package_inventory::{PackageInventoryStatus, PersistedPackageInventory};
+mod schedules;
 mod targets;
+mod telemetry;
 mod worker_heartbeats;
+pub use ansible_jobs::AnsibleQueueMetrics;
 
 mod environment;
 
@@ -64,6 +69,10 @@ pub struct AnsibleJobRepository {
 pub struct WorkerHeartbeatRepository {
     pool: PgPool,
 }
+#[derive(Clone)]
+pub struct TelemetryRepository {
+    pool: PgPool,
+}
 
 /// Persistiert Agent-Registrierungen ohne Secret-Werte.
 #[derive(Clone)]
@@ -79,6 +88,16 @@ pub struct TargetRepository {
 
 #[derive(Clone)]
 pub struct DockerWorkloadRepository {
+    pool: PgPool,
+}
+
+#[derive(Clone)]
+pub struct PackageInventoryRepository {
+    pool: PgPool,
+}
+
+#[derive(Clone)]
+pub struct ScheduleRepository {
     pool: PgPool,
 }
 
@@ -144,10 +163,13 @@ pub struct AuditEventRepository {
 #[derive(Clone)]
 pub struct Repositories {
     pub docker_workloads: DockerWorkloadRepository,
+    pub package_inventory: PackageInventoryRepository,
+    pub schedules: ScheduleRepository,
     pub targets: TargetRepository,
     pub agent_registrations: AgentRegistrationRepository,
     pub ansible_jobs: AnsibleJobRepository,
     pub worker_heartbeats: WorkerHeartbeatRepository,
+    pub telemetry: TelemetryRepository,
     pub environments: EnvironmentRepository,
     pub nodes: NodeRepository,
     pub containers: ContainerRepository,
@@ -161,10 +183,13 @@ impl Repositories {
     pub fn new(database: &Database) -> Self {
         Self {
             docker_workloads: DockerWorkloadRepository::new(database),
+            package_inventory: PackageInventoryRepository::new(database),
+            schedules: ScheduleRepository::new(database),
             targets: TargetRepository::new(database),
             agent_registrations: AgentRegistrationRepository::new(database),
             ansible_jobs: AnsibleJobRepository::new(database),
             worker_heartbeats: WorkerHeartbeatRepository::new(database),
+            telemetry: TelemetryRepository::new(database),
             environments: EnvironmentRepository::new(database),
             nodes: NodeRepository::new(database),
             containers: ContainerRepository::new(database),
@@ -310,6 +335,20 @@ fn docker_workload_from_row(row: PgRow) -> Result<DockerWorkload, RepositoryErro
         image: row.try_get("image")?,
         state: row.try_get("state")?,
         status: row.try_get("status")?,
+        ports: serde_json::from_value(row.try_get("ports")?)
+            .map_err(RepositoryError::Serialization)?,
+        started_at: row.try_get("started_at")?,
+        labels: serde_json::from_value(row.try_get("labels")?)
+            .map_err(RepositoryError::Serialization)?,
+        presence: match row.try_get::<String, _>("presence")?.as_str() {
+            "present" => lxcup_core::DockerWorkloadPresence::Present,
+            "missing" => lxcup_core::DockerWorkloadPresence::Missing,
+            _ => {
+                return Err(RepositoryError::InvalidValue {
+                    field: "docker workload presence",
+                });
+            }
+        },
         management_state: match row.try_get::<String, _>("management_state")?.as_str() {
             "discovered" => DockerWorkloadManagementState::Discovered,
             "managed" => DockerWorkloadManagementState::Managed,

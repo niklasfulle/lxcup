@@ -19,7 +19,7 @@ Der Worker akzeptiert nur die im Manifest genannte Datei und SHA-256-Summe.
 
 ```json
 {
-  "version": "0.1.0",
+  "version": "0.2.0",
   "artifacts": [{
     "platform": "linux-amd64",
     "file": "linux-amd64",

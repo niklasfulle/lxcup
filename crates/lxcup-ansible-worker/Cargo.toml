@@ -20,3 +20,6 @@ tracing.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true

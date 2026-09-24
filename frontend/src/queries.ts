@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { apiClient, getAnsibleJob, getAnsibleJobEvents, getEnrollment, getWorkerAvailability, listAnsibleJobs, listDockerWorkloads, listTargets, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type TargetDto, type WorkerAvailabilityDto } from "./api";
+import { apiClient, getAnsibleJob, getAnsibleJobEvents, getEnrollment, getPackageInventory, getTargetTelemetry, getWorkerAvailability, listAnsibleJobs, listDockerWorkloads, listSchedules, listTargets, listUpdatePolicies, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type PackageInventoryDto, type ScheduleDto, type TargetDto, type TelemetryDto, type UpdatePolicyDto, type WorkerAvailabilityDto } from "./api";
 
 export const queryKeys = {
   targets: ["targets"] as const,
@@ -10,6 +10,10 @@ export const queryKeys = {
   ansibleJobEvents: (jobId: string) => ["ansible-jobs", jobId, "events"] as const,
   workerAvailability: ["ansible-worker-availability"] as const,
   dockerWorkloads: (containerId: number) => ["containers", containerId, "docker-workloads"] as const,
+  packageInventory: (targetId: string) => ["targets", targetId, "package-inventory"] as const,
+  telemetry: (targetId: string) => ["targets", targetId, "telemetry"] as const,
+  schedules: ["schedules"] as const,
+  updatePolicies: ["update-policies"] as const,
 };
 
 export function useTargets() {
@@ -93,4 +97,25 @@ export function useDockerWorkloads(containerId: number | undefined) {
     enabled: Boolean(containerId),
     staleTime: 10_000,
   });
+}
+
+export function usePackageInventory(targetId: string | undefined) {
+  return useQuery<PackageInventoryDto>({
+    queryKey: targetId ? queryKeys.packageInventory(targetId) : ["targets", "none", "package-inventory"],
+    queryFn: ({ signal }) => getPackageInventory(targetId!, signal),
+    enabled: Boolean(targetId),
+    staleTime: 10_000,
+  });
+}
+
+export function useTargetTelemetry(targetId: string | undefined) {
+  return useQuery<TelemetryDto>({ queryKey: targetId ? queryKeys.telemetry(targetId) : ["targets", "none", "telemetry"], queryFn: ({ signal }) => getTargetTelemetry(targetId!, signal), enabled: Boolean(targetId), staleTime: 2_000, refetchInterval: 5_000 });
+}
+
+export function useSchedules() {
+  return useQuery<ScheduleDto[]>({ queryKey: queryKeys.schedules, queryFn: ({ signal }) => listSchedules(signal), staleTime: 10_000 });
+}
+
+export function useUpdatePolicies() {
+  return useQuery<UpdatePolicyDto[]>({ queryKey: queryKeys.updatePolicies, queryFn: ({ signal }) => listUpdatePolicies(signal), staleTime: 10_000 });
 }

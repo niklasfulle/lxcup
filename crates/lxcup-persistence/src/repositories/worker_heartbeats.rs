@@ -36,4 +36,11 @@ impl WorkerHeartbeatRepository {
         .await?;
         row.try_get("last_seen_at").map_err(Into::into)
     }
+
+    pub async fn latest(&self) -> Result<Option<DateTime<Utc>>, RepositoryError> {
+        let row = sqlx::query("SELECT MAX(last_seen_at) AS last_seen_at FROM worker_heartbeats")
+            .fetch_one(&self.pool)
+            .await?;
+        row.try_get("last_seen_at").map_err(Into::into)
+    }
 }

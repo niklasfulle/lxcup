@@ -1,10 +1,10 @@
 use super::{
     ActorRole, AgentClient, AgentClientConfig, AgentHealth, AgentMetrics, AgentRegistration,
-    ApiEnvelope, ApiError, ApiEvent, ApiState, ContainerId, CreateSecret,
-    Deserialize, DockerContainerInfo, DockerWorkload, DockerWorkloadManagementState, Extension,
-    Json, JsonBody, Path, Permission, RegisteredAgent, SecretId, SecretKind, SecretScope,
-    SecretStoreError, SecretValue, Serialize, State, StatusCode, StoredSecretMetadata, envelope,
-    parse_container_id, parse_uuid, require_permission,
+    ApiEnvelope, ApiError, ApiEvent, ApiState, ContainerId, CreateSecret, Deserialize,
+    DockerContainerInfo, DockerWorkload, DockerWorkloadManagementState, Extension, Json, JsonBody,
+    Path, Permission, RegisteredAgent, SecretId, SecretKind, SecretScope, SecretStoreError,
+    SecretValue, Serialize, State, StatusCode, StoredSecretMetadata, envelope, parse_container_id,
+    parse_uuid, require_permission,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -436,6 +436,10 @@ pub struct DockerWorkloadDto {
     pub image: String,
     pub state: String,
     pub status: String,
+    pub ports: Vec<String>,
+    pub started_at: Option<String>,
+    pub labels: Vec<String>,
+    pub presence: String,
     pub management_state: String,
     pub discovered_at: chrono::DateTime<chrono::Utc>,
 }
@@ -449,6 +453,10 @@ impl DockerWorkloadDto {
             image: container.image,
             state: container.state,
             status: container.status,
+            ports: container.ports,
+            started_at: container.started_at,
+            labels: container.labels,
+            presence: "present".to_owned(),
             management_state: "discovered".to_owned(),
             discovered_at: chrono::Utc::now(),
         }
@@ -464,6 +472,13 @@ impl From<DockerWorkload> for DockerWorkloadDto {
             image: item.image,
             state: item.state,
             status: item.status,
+            ports: item.ports,
+            started_at: item.started_at,
+            labels: item.labels,
+            presence: match item.presence {
+                lxcup_core::DockerWorkloadPresence::Present => "present".to_owned(),
+                lxcup_core::DockerWorkloadPresence::Missing => "missing".to_owned(),
+            },
             management_state: match item.management_state {
                 DockerWorkloadManagementState::Discovered => "discovered".to_owned(),
                 DockerWorkloadManagementState::Managed => "managed".to_owned(),
@@ -525,7 +540,7 @@ pub(super) async fn discover_docker_containers(
         )
     })?;
     if let Some(repositories) = state.repositories.as_ref() {
-        for container in &discovered {
+        for container in &discovered.containers {
             let workload = DockerWorkload {
                 host_container_id: container_id,
                 id: container.id.clone(),
@@ -533,6 +548,10 @@ pub(super) async fn discover_docker_containers(
                 image: container.image.clone(),
                 state: container.state.clone(),
                 status: container.status.clone(),
+                ports: container.ports.clone(),
+                started_at: container.started_at.clone(),
+                labels: container.labels.clone(),
+                presence: lxcup_core::DockerWorkloadPresence::Present,
                 management_state: DockerWorkloadManagementState::Discovered,
                 discovered_at: chrono::Utc::now(),
             };
@@ -547,6 +566,23 @@ pub(super) async fn discover_docker_containers(
                     )
                 })?;
         }
+        repositories
+            .docker_workloads
+            .mark_missing_except(
+                container_id,
+                &discovered
+                    .containers
+                    .iter()
+                    .map(|item| item.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .map_err(|_| {
+                ApiError::dependency(
+                    "docker_inventory_unavailable",
+                    "Docker-Inventar konnte nicht abgeglichen werden",
+                )
+            })?;
         let workloads = repositories
             .docker_workloads
             .list(container_id)
@@ -568,7 +604,7 @@ pub(super) async fn discover_docker_containers(
         return Ok(Json(envelope(workloads)));
     }
     let mut store = state.store.write().await;
-    for container in discovered {
+    for container in discovered.containers {
         let key = (container_id, container.id.clone());
         let management_state = store
             .docker_workloads
@@ -746,6 +782,9 @@ mod tests {
                 image: "nginx:latest".to_owned(),
                 state: "running".to_owned(),
                 status: "Up".to_owned(),
+                ports: vec!["80/tcp".to_owned()],
+                started_at: Some("2026-01-01T00:00:00Z".to_owned()),
+                labels: vec!["app=web".to_owned()],
             },
         );
         assert_eq!(discovered.management_state, "discovered");
@@ -756,6 +795,10 @@ mod tests {
             image: discovered.image.clone(),
             state: discovered.state.clone(),
             status: discovered.status.clone(),
+            ports: discovered.ports.clone(),
+            started_at: discovered.started_at.clone(),
+            labels: discovered.labels.clone(),
+            presence: lxcup_core::DockerWorkloadPresence::Present,
             management_state: DockerWorkloadManagementState::Managed,
             discovered_at: discovered.discovered_at,
         };

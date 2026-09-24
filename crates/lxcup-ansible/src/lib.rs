@@ -25,6 +25,7 @@ pub enum AnsibleOperation {
     RepairAgent,
     ConfigureTarget,
     HealthCheck,
+    CollectPackageInventory,
 }
 
 /// Execution phase requested by the caller.
@@ -78,6 +79,7 @@ pub enum AnsibleParameters {
     RepairAgent,
     ConfigureTarget { desired_hostname: Option<String> },
     HealthCheck,
+    CollectPackageInventory,
 }
 
 impl AnsibleParameters {
@@ -89,6 +91,7 @@ impl AnsibleParameters {
             Self::RepairAgent => AnsibleOperation::RepairAgent,
             Self::ConfigureTarget { .. } => AnsibleOperation::ConfigureTarget,
             Self::HealthCheck => AnsibleOperation::HealthCheck,
+            Self::CollectPackageInventory => AnsibleOperation::CollectPackageInventory,
         }
     }
 
@@ -176,6 +179,13 @@ impl PlaybookRegistry {
                 version: "1",
                 action: ResourceAction::HealthCheck,
                 requires_secret: false,
+            },
+            AnsibleOperation::CollectPackageInventory => PlaybookSpec {
+                operation,
+                playbook: "inventory/packages.yml",
+                version: "1",
+                action: ResourceAction::CollectPackageInventory,
+                requires_secret: true,
             },
         }
     }
@@ -339,6 +349,7 @@ pub enum JobEventKind {
 pub enum JobFailureCode {
     WorkerUnavailable,
     InvalidCredentials,
+    HostKeyChanged,
     Unreachable,
     Timeout,
     PlaybookFailed,
@@ -550,6 +561,10 @@ mod tests {
         assert_eq!(spec.playbook, "agent/deploy.yml");
         assert_eq!(spec.version, "1");
         assert!(spec.requires_secret);
+        let inventory = PlaybookRegistry.resolve(AnsibleOperation::CollectPackageInventory);
+        assert_eq!(inventory.playbook, "inventory/packages.yml");
+        assert_eq!(inventory.version, "1");
+        assert!(inventory.requires_secret);
     }
 
     #[test]
@@ -575,7 +590,7 @@ mod tests {
         let mut invalid = request(
             AnsibleOperation::UpdateAgent,
             AnsibleParameters::DeployAgent {
-                agent_version: "0.1.0".to_owned(),
+                agent_version: "0.2.0".to_owned(),
             },
         );
         assert_eq!(
@@ -586,7 +601,7 @@ mod tests {
         invalid = request(
             AnsibleOperation::DeployAgent,
             AnsibleParameters::DeployAgent {
-                agent_version: "0.1.0".to_owned(),
+                agent_version: "0.2.0".to_owned(),
             },
         );
         invalid.actor_role = ActorRole::Viewer;
@@ -598,7 +613,7 @@ mod tests {
         let mut missing_secret = request(
             AnsibleOperation::DeployAgent,
             AnsibleParameters::DeployAgent {
-                agent_version: "0.1.0".to_owned(),
+                agent_version: "0.2.0".to_owned(),
             },
         );
         missing_secret.secret_refs.clear();

@@ -14,7 +14,7 @@ pub fn apt_machine_output() -> &'static str {
 
 /// Deterministic Windows-agent metrics fixture for future Windows coverage.
 pub fn windows_agent_metrics_output() -> &'static str {
-    r#"{"agent":"windows","version":"0.1.0","reboot_required":false,"updates":0}"#
+    r#"{"agent":"windows","version":"0.2.0","reboot_required":false,"updates":0}"#
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -9,6 +9,8 @@ import {
   useEnrollment,
   useExecutionSafety,
   useTargets,
+  useSchedules,
+  useUpdatePolicies,
 } from "./queries";
 import * as api from "./api";
 
@@ -20,7 +22,9 @@ function Probe() {
   const events = useAnsibleJobEvents("job-1", false);
   const enrollment = useEnrollment("enrollment-1");
   const workloads = useDockerWorkloads(101);
-  return <output>{[targets, safety, jobs, job, events, enrollment, workloads].filter((query) => query.isSuccess).length}</output>;
+  const schedules = useSchedules();
+  const policies = useUpdatePolicies();
+  return <output>{[targets, safety, jobs, job, events, enrollment, workloads, schedules, policies].filter((query) => query.isSuccess).length}</output>;
 }
 
 function DisabledProbe() {
@@ -40,9 +44,11 @@ describe("query hooks", () => {
     vi.spyOn(api, "getAnsibleJobEvents").mockResolvedValue([]);
     vi.spyOn(api, "getEnrollment").mockResolvedValue({ id: "enrollment-1", state: "connected" } as never);
     vi.spyOn(api, "listDockerWorkloads").mockResolvedValue([]);
+    vi.spyOn(api, "listSchedules").mockResolvedValue([]);
+    vi.spyOn(api, "listUpdatePolicies").mockResolvedValue([]);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><Probe /></QueryClientProvider>);
-    await waitFor(() => expect(screen.getByText("7")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("9")).toBeInTheDocument());
   });
 
   it("keeps disabled queries idle and polls active target/job states", async () => {

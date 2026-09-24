@@ -2,17 +2,21 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ContainerDto, DockerWorkloadDto, SecretMetadata, TargetDto } from "./api";
+import type { ContainerDto, DockerWorkloadDto, SecretMetadata, TargetDto, WorkerAvailabilityDto } from "./api";
 
 const mocks = vi.hoisted(() => ({
   targets: { data: [] as TargetDto[], isLoading: false, error: null as Error | null },
   containers: { data: [] as ContainerDto[], isLoading: false, error: null as Error | null },
-  jobs: { data: [], isLoading: false, error: null as Error | null },
+  jobs: { data: [] as any[], isLoading: false, error: null as Error | null },
   job: { data: undefined as any, isLoading: false, error: null as Error | null },
   events: { data: [], isLoading: false, error: null as Error | null },
   enrollment: { data: undefined as any, isLoading: false, error: null as Error | null },
   workloads: { data: [] as DockerWorkloadDto[], isLoading: false, error: null as Error | null },
-  workerAvailability: { data: { available: true, last_seen_at: "2026-01-01T00:00:00Z" }, isLoading: false, error: null as Error | null },
+  workerAvailability: { data: { available: true, last_seen_at: "2026-01-01T00:00:00Z" } as WorkerAvailabilityDto, isLoading: false, error: null as Error | null },
+  packageInventory: { data: undefined as any, isLoading: false, error: null as Error | null },
+  telemetry: { data: undefined as any, isLoading: false, error: null as Error | null },
+  schedules: { data: [] as any[], isLoading: false, error: null as Error | null },
+  updatePolicies: { data: [] as any[], isLoading: false, error: null as Error | null },
   listSecrets: vi.fn(async () => [] as SecretMetadata[]),
   listSecretAudit: vi.fn(async () => []),
   createSecret: vi.fn(async (request: any) => ({ metadata: { metadata: { id: "secret-new", name: request.name, kind: request.kind, scope: request.scope, created_at: "2026-01-01", updated_at: "2026-01-01" }, status: "active" } })),
@@ -20,7 +24,8 @@ const mocks = vi.hoisted(() => ({
   createAnsibleJob: vi.fn(async (request: any) => ({ id: request.operation === "health_check" ? "job-health" : "job-deploy", operation: request.operation, playbook: "agent/deploy.yml", playbook_version: "v1", target: { target: "target-1" }, mode: request.mode, status: "queued", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" })),
   createEnrollment: vi.fn(async () => ({ id: "enrollment-1" })),
   createContainerAction: vi.fn(async () => ({ id: "task-1", status: "queued" })),
-  getAgentHealth: vi.fn(async () => ({ healthy: true, info: { agent_id: "agent-1", platform: "linux", hostname: "host", version: "0.1.0", protocol_version: "1" }, metrics: { collected_at: "2026-01-01", commands_total: 2, commands_failed: 0, last_command_at: null } })),
+  createSchedule: vi.fn(async (request: any) => ({ ...request, last_run_at: null, next_run_at: "2026-01-01T01:00:00Z", last_error: null })),
+  getAgentHealth: vi.fn(async () => ({ healthy: true, info: { agent_id: "agent-1", platform: "linux", hostname: "host", version: "0.2.0", protocol_version: "1" }, metrics: { collected_at: "2026-01-01", commands_total: 2, commands_failed: 0, last_command_at: null } })),
   getAgentMetrics: vi.fn(async () => ({ commands_total: 2, commands_failed: 0, last_command_at: null })),
   discoverDockerWorkloads: vi.fn(async () => undefined),
   adoptDockerWorkload: vi.fn(async () => undefined),
@@ -39,7 +44,7 @@ const container: ContainerDto = { id: 101, node_id: "node-1", name: "web-lxc", o
 const secret = (id: string, name: string, kind: "ssh_password" | "ssh_known_hosts" | "agent_token" = "ssh_password") => ({ metadata: { metadata: { id, name, kind, scope: { type: "global" as const }, created_at: "2026-01-01", updated_at: "2026-01-01" }, status: "active" as const } });
 
 vi.mock("./queries", () => ({
-  queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id] },
+  queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id], schedules: ["schedules"], updatePolicies: ["update-policies"] },
   useTargets: () => mocks.targets,
   useContainers: () => mocks.containers,
   useAnsibleJobs: () => mocks.jobs,
@@ -48,11 +53,15 @@ vi.mock("./queries", () => ({
   useEnrollment: () => mocks.enrollment,
   useDockerWorkloads: () => mocks.workloads,
   useWorkerAvailability: () => mocks.workerAvailability,
+  usePackageInventory: () => mocks.packageInventory,
+  useTargetTelemetry: () => mocks.telemetry,
+  useSchedules: () => mocks.schedules,
+  useUpdatePolicies: () => mocks.updatePolicies,
 }));
 
 vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
-  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe } };
+  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe } };
 });
 
 import { Dashboard } from "./pages/Dashboard";
@@ -65,10 +74,13 @@ import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { WorkflowDetailPage } from "./pages/WorkflowDetailPage";
 import App from "./App";
 import { ResourceTree } from "./components/ResourceTree";
+import { TargetDetailPage } from "./pages/TargetDetailPage";
+import { PackageInventoryPage } from "./pages/PackageInventoryPage";
+import { SchedulesPage } from "./pages/SchedulesPage";
 
 function renderPage(element: React.ReactElement, route = "/") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[route]}><Routes><Route path="/containers/:containerId/*" element={element} /><Route path="/workflows/:jobId/*" element={element} /><Route path="*" element={element} /></Routes></MemoryRouter></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[route]}><Routes><Route path="/containers/:containerId/*" element={element} /><Route path="/workflows/:jobId/*" element={element} /><Route path="/targets/:targetId/*" element={element} /><Route path="*" element={element} /></Routes></MemoryRouter></QueryClientProvider>);
 }
 
 afterEach(() => cleanup());
@@ -96,6 +108,18 @@ beforeEach(() => {
   mocks.workerAvailability.data = { available: true, last_seen_at: "2026-01-01T00:00:00Z" };
   mocks.workloads.isLoading = false;
   mocks.workloads.error = null;
+  mocks.packageInventory.data = undefined;
+  mocks.packageInventory.isLoading = false;
+  mocks.packageInventory.error = null;
+  mocks.telemetry.data = undefined;
+  mocks.telemetry.isLoading = false;
+  mocks.telemetry.error = null;
+  mocks.schedules.data = [];
+  mocks.schedules.isLoading = false;
+  mocks.schedules.error = null;
+  mocks.updatePolicies.data = [];
+  mocks.updatePolicies.isLoading = false;
+  mocks.updatePolicies.error = null;
   mocks.listSecrets.mockResolvedValue([secret("cred", "ssh-password"), secret("known", "known-hosts", "ssh_known_hosts"), secret("agent", "agent-token", "agent_token")] as any);
   mocks.listSecretAudit.mockResolvedValue([{ secret_id: "cred", action: "created", role: "admin", occurred_at: "2026-01-01T00:00:00Z" }] as any);
   vi.clearAllMocks();
@@ -139,12 +163,129 @@ describe("inventory pages", () => {
     expect(mocks.createContainerAction).toHaveBeenCalledWith(101, "refresh", true);
   });
 
+  it("renders target detail with inventory, telemetry and stale heartbeat state", () => {
+    mocks.targets.data = [target];
+    mocks.jobs.data = [{ id: "job-1", operation: "health_check", target: { target: "target-1" }, status: "succeeded", updated_at: "2026-01-01T00:00:00Z" }];
+    mocks.packageInventory.data = { target_id: "target-1", status: "complete", collected_at: "2026-01-01T00:00:00Z", packages: [{ name: "curl", installed_version: "8.5", architecture: "amd64", source: "apt" }] };
+    mocks.telemetry.data = { target_id: "target-1", collected_at: "2026-01-01T00:00:00Z", samples: [{ collected_at: "2026-01-01T00:00:00Z", cpu_basis_points: 2500, memory_basis_points: 5000, storage_basis_points: 7500, load_1_milli: 1000, network_rx_bytes: null, network_tx_bytes: null, process_count: null }] };
+    renderPage(<TargetDetailPage />, "/targets/target-1");
+    expect(screen.getByRole("heading", { name: "test-target" })).toBeInTheDocument();
+    expect(screen.getByText(/Nicht aktuell/)).toBeInTheDocument();
+    expect(screen.getByText("1 Pakete")).toBeInTheDocument();
+    expect(screen.getByText("health check")).toBeInTheDocument();
+  });
+
+  it("covers target detail loading, missing, empty and dependency errors", () => {
+    mocks.targets.isLoading = true;
+    renderPage(<TargetDetailPage />, "/targets/target-1");
+    expect(screen.getByText("Ziel wird geladen…")).toBeInTheDocument();
+    cleanup();
+    mocks.targets.isLoading = false;
+    mocks.targets.data = [];
+    renderPage(<TargetDetailPage />, "/targets/target-1");
+    expect(screen.getByText("Ziel nicht gefunden.")).toBeInTheDocument();
+    cleanup();
+    mocks.targets.data = [{ ...target, state: "pending" }];
+    mocks.packageInventory.error = new Error("inventory failure");
+    mocks.telemetry.error = new Error("telemetry failure");
+    mocks.jobs.data = [{ id: "job-node", operation: "health_check", target: { node: "node-1" }, status: "failed", updated_at: "2026-01-01" }];
+    renderPage(<TargetDetailPage />, "/targets/target-1");
+    expect(screen.getByText("inventory failure")).toBeInTheDocument();
+    expect(screen.getByText("telemetry failure")).toBeInTheDocument();
+    expect(screen.getByText("Keine Workflows vorhanden.")).toBeInTheDocument();
+  });
+
+  it("renders windows and disabled target branches with a failed workflow", () => {
+    mocks.targets.data = [{ ...target, kind: "windows_server", transport: "winrm", state: "disabled", agent_version: null, updated_at: new Date().toISOString() }];
+    mocks.jobs.data = [{ id: "job-failed", operation: "deploy_agent", target: { target: "target-1" }, status: "failed", updated_at: "2026-01-01" }];
+    renderPage(<TargetDetailPage />, "/targets/target-1");
+    expect(screen.getByText("Deaktiviert")).toBeInTheDocument();
+    expect(screen.getByText("Windows")).toBeInTheDocument();
+    expect(screen.getByText("Noch nicht erhoben")).toBeInTheDocument();
+    expect(screen.getByText("deploy agent")).toBeInTheDocument();
+  });
+
+  it("searches and sorts package inventory while rendering telemetry", () => {
+    mocks.targets.data = [target];
+    mocks.packageInventory.data = { target_id: "target-1", status: "complete", collected_at: "2026-01-01T00:00:00Z", packages: [
+      { name: "curl", installed_version: "8.5", architecture: "amd64", source: "apt" },
+      { name: "zlib", installed_version: "1.2", architecture: null, source: null },
+    ] };
+    mocks.telemetry.data = { target_id: "target-1", collected_at: "2026-01-01T00:00:00Z", samples: [
+      { collected_at: "2026-01-01T00:00:00Z", cpu_basis_points: 1200, memory_basis_points: 3400, storage_basis_points: 5600, load_1_milli: 100, network_rx_bytes: null, network_tx_bytes: null, process_count: null },
+    ] };
+    renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
+    expect(screen.getByRole("img", { name: /CPU-, RAM/ })).toBeInTheDocument();
+    expect(screen.getByText("2 installierte Pakete")).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("z. B. curl oder 8.5"), { target: { value: "zlib" } });
+    expect(screen.getByText("zlib")).toBeInTheDocument();
+    expect(screen.queryByText("curl")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Sortierung"), { target: { value: "version" } });
+  });
+
+  it("shows inventory and telemetry loading, empty and error states", () => {
+    mocks.targets.data = [target];
+    mocks.packageInventory.isLoading = true;
+    mocks.telemetry.isLoading = true;
+    renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
+    expect(screen.getByText("Paketinventar wird geladen…")).toBeInTheDocument();
+    expect(screen.getByText("Telemetrie wird geladen…")).toBeInTheDocument();
+    cleanup();
+    mocks.packageInventory.isLoading = false;
+    mocks.packageInventory.data = { target_id: "target-1", status: "not_collected", collected_at: null, packages: [] };
+    mocks.telemetry.isLoading = false;
+    renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
+    expect(screen.getByText("Noch kein Paketinventar")).toBeInTheDocument();
+    expect(screen.getByText("Noch keine Telemetrie verfügbar.")).toBeInTheDocument();
+    cleanup();
+    mocks.packageInventory.data = undefined;
+    mocks.packageInventory.error = new Error("inventory error");
+    mocks.telemetry.error = new Error("telemetry error");
+    renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
+    expect(screen.getByText("inventory error")).toBeInTheDocument();
+    expect(screen.getByText("telemetry error")).toBeInTheDocument();
+  });
+
+  it("renders schedule empty and populated states", () => {
+    mocks.targets.data = [target];
+    renderPage(<SchedulesPage />);
+    expect(screen.getByRole("heading", { name: "Zeitpläne" })).toBeInTheDocument();
+    expect(screen.getByText("Noch keine Zeitpläne angelegt.")).toBeInTheDocument();
+    cleanup();
+    mocks.schedules.data = [{ id: "nightly", operation: "collect_package_inventory", timezone: "Europe/Berlin", target_ids: [target.id], every_minutes: 60, enabled: true, last_run_at: null, next_run_at: "2026-01-01T01:00:00Z", last_error: null }];
+    renderPage(<SchedulesPage />);
+    expect(screen.getByText("nightly")).toBeInTheDocument();
+    expect(screen.getByText("aktiv")).toBeInTheDocument();
+  });
+
+  it("validates, submits and reports schedule form states", async () => {
+    mocks.targets.data = [target];
+    renderPage(<SchedulesPage />);
+    const submit = screen.getByRole("button", { name: "Zeitplan anlegen" });
+    expect(submit).toBeDisabled();
+    await userEvent.type(screen.getByPlaceholderText("nightly-inventory"), "nightly");
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Ziel" }), target.id);
+    expect(submit).toBeEnabled();
+    fireEvent.click(screen.getByLabelText("Schwellwert aktivieren"));
+    await userEvent.click(submit);
+    await waitFor(() => expect(mocks.createSchedule).toHaveBeenCalledWith(expect.objectContaining({ id: "nightly", target_ids: [target.id], every_minutes: 60, threshold: { metric: "cpu_basis_points", operator: "greater_than_or_equal", value: 8000 } })));
+    cleanup();
+    mocks.schedules.isLoading = true;
+    renderPage(<SchedulesPage />);
+    expect(screen.getByText("Zeitpläne werden geladen…")).toBeInTheDocument();
+    cleanup();
+    mocks.schedules.isLoading = false;
+    mocks.schedules.error = new Error("schedule failure");
+    renderPage(<SchedulesPage />);
+    expect(screen.getByText("schedule failure")).toBeInTheDocument();
+  });
+
   it("discovers and manages docker workloads", async () => {
     mocks.containers.data = [container];
     renderPage(<DockerPage />);
     await userEvent.selectOptions(screen.getByRole("combobox"), "101");
     expect(screen.getByText(/Noch keine Docker-Container/)).toBeInTheDocument();
-    mocks.workloads.data = [{ host_container_id: 101, id: "docker-1", name: "web", image: "nginx", state: "running", status: "Up", management_state: "discovered", discovered_at: "2026-01-01" }];
+    mocks.workloads.data = [{ host_container_id: 101, id: "docker-1", name: "web", image: "nginx", state: "running", status: "Up", ports: ["80/tcp"], started_at: null, labels: ["app=web"], presence: "present", management_state: "discovered", discovered_at: "2026-01-01" }];
     cleanup();
     renderPage(<DockerPage />);
     await userEvent.selectOptions(screen.getByRole("combobox"), "101");
@@ -237,9 +378,9 @@ describe("onboarding and secret pages", () => {
   });
 
   it("shows the version reported by a connected target agent", () => {
-    mocks.targets.data = [{ ...target, agent_version: "0.1.0" }];
+    mocks.targets.data = [{ ...target, agent_version: "0.2.0" }];
     renderPage(<TargetsPage />);
-    expect(screen.getByText("v0.1.0")).toBeInTheDocument();
+    expect(screen.getByText("v0.2.0")).toBeInTheDocument();
   });
 
   it("starts enrollment and displays a failed state", async () => {
@@ -272,6 +413,24 @@ describe("onboarding and secret pages", () => {
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: "LXC aufnehmen" }));
     expect(await screen.findByText(/Agent verbunden/)).toBeInTheDocument();
+  });
+
+  it("chains health success into an idempotent package inventory workflow", async () => {
+    mocks.containers.data = [container];
+    mocks.targets.data = [target];
+    mocks.job.data = { id: "job-health", operation: "health_check", status: "succeeded", target: { target: "target-1" } };
+    mocks.createEnrollment.mockImplementation(async () => {
+      mocks.enrollment.data = { id: "enrollment-1", container_id: 101, state: "connected", failure_reason: null, created_at: "2026-01-01", updated_at: "2026-01-01" };
+      return { id: "enrollment-1" };
+    });
+    renderPage(<EnrollmentPage />);
+    const selects = screen.getAllByRole("combobox");
+    await userEvent.selectOptions(selects[0], "101");
+    await userEvent.selectOptions(selects[1], "target-1");
+    await userEvent.click(screen.getByRole("button", { name: "LXC aufnehmen" }));
+    await waitFor(() => expect(mocks.createAnsibleJob).toHaveBeenCalledWith(expect.objectContaining({ operation: "health_check" })));
+    await waitFor(() => expect(mocks.createAnsibleJob).toHaveBeenCalledWith(expect.objectContaining({ operation: "collect_package_inventory", idempotency_key: "enrollment-packages-enrollment-1" })));
+    expect(await screen.findByText("Protokoll öffnen")).toBeInTheDocument();
   });
 
   it("shows enrollment empty and submission error paths", async () => {

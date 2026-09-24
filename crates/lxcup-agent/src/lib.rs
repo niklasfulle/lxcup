@@ -3,7 +3,12 @@
 //! Agenten laufen innerhalb der verwalteten LXC/Windows-Systeme. Der Server
 //! kennt nur diesen Vertrag und niemals lokale Shell-Details oder Secrets.
 
-use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -72,6 +77,64 @@ pub struct AgentMetrics {
     pub last_command_at: Option<DateTime<Utc>>,
 }
 
+/// A compact, platform-neutral sample. Percentages are basis points to avoid
+/// floating point ambiguity on the wire; absent values explicitly mean a
+/// platform collector was unavailable.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SystemTelemetrySample {
+    pub collected_at: DateTime<Utc>,
+    pub cpu_basis_points: Option<u16>,
+    pub memory_basis_points: Option<u16>,
+    pub storage_basis_points: Option<u16>,
+    pub load_1_milli: Option<u32>,
+    pub network_rx_bytes: Option<u64>,
+    pub network_tx_bytes: Option<u64>,
+    pub process_count: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SystemTelemetryWindow {
+    pub samples: Vec<SystemTelemetrySample>,
+    pub partial: bool,
+}
+
+#[derive(Default)]
+pub struct TelemetryBuffer {
+    samples: VecDeque<SystemTelemetrySample>,
+}
+
+impl TelemetryBuffer {
+    pub const WINDOW_SECONDS: i64 = 30;
+    pub const MAX_SAMPLES: usize = 32;
+    pub fn record(&mut self, sample: SystemTelemetrySample) {
+        self.samples.push_back(sample);
+        while self.samples.len() > Self::MAX_SAMPLES {
+            self.samples.pop_front();
+        }
+        self.remove_expired();
+    }
+    pub fn window(&mut self) -> SystemTelemetryWindow {
+        self.remove_expired();
+        let samples = self.samples.iter().cloned().collect::<Vec<_>>();
+        let partial = samples.iter().any(|sample| {
+            sample.cpu_basis_points.is_none()
+                || sample.memory_basis_points.is_none()
+                || sample.storage_basis_points.is_none()
+        });
+        SystemTelemetryWindow { samples, partial }
+    }
+    fn remove_expired(&mut self) {
+        let threshold = Utc::now() - chrono::Duration::seconds(Self::WINDOW_SECONDS);
+        while self
+            .samples
+            .front()
+            .is_some_and(|sample| sample.collected_at < threshold)
+        {
+            self.samples.pop_front();
+        }
+    }
+}
+
 /// Nicht-sensitive Docker-Inventardaten, die ein Linux-Agent melden darf.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DockerContainerInfo {
@@ -80,6 +143,34 @@ pub struct DockerContainerInfo {
     pub image: String,
     pub state: String,
     pub status: String,
+    pub ports: Vec<String>,
+    pub started_at: Option<String>,
+    pub labels: Vec<String>,
+}
+
+/// Stable, read-only discovery result. A host without Docker is not unhealthy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DockerDiscovery {
+    pub available: bool,
+    pub reason: Option<String>,
+    pub collected_at: DateTime<Utc>,
+    pub containers: Vec<DockerContainerInfo>,
+}
+
+/// Sanitized package inventory returned by an agent. It intentionally contains
+/// only package metadata, never command lines, repository credentials or logs.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentPackageInventory {
+    pub collected_at: DateTime<Utc>,
+    pub packages: Vec<AgentInstalledPackage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentInstalledPackage {
+    pub name: String,
+    pub installed_version: String,
+    pub architecture: Option<String>,
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -98,6 +189,7 @@ pub struct AgentHeartbeat {
     pub info: AgentInfo,
     pub metrics: AgentMetrics,
     pub sent_at: DateTime<Utc>,
+    pub telemetry: SystemTelemetryWindow,
 }
 
 #[derive(Clone)]
@@ -207,8 +299,11 @@ impl AgentClient {
         self.get("/metrics").await
     }
 
-    pub async fn docker_containers(&self) -> Result<Vec<DockerContainerInfo>, AgentError> {
+    pub async fn docker_containers(&self) -> Result<DockerDiscovery, AgentError> {
         self.get("/docker/containers").await
+    }
+    pub async fn package_inventory(&self) -> Result<AgentPackageInventory, AgentError> {
+        self.get("/packages").await
     }
 
     pub async fn command(
@@ -338,6 +433,7 @@ pub struct LocalAgentState {
     pub info: AgentInfo,
     token: Arc<str>,
     metrics: Arc<tokio::sync::Mutex<AgentMetrics>>,
+    telemetry: Arc<tokio::sync::Mutex<TelemetryBuffer>>,
     results: Arc<tokio::sync::Mutex<HashMap<String, AgentCommandResponse>>>,
 }
 
@@ -352,12 +448,19 @@ impl LocalAgentState {
                 commands_failed: 0,
                 last_command_at: None,
             })),
+            telemetry: Arc::new(tokio::sync::Mutex::new(TelemetryBuffer::default())),
             results: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
     pub async fn metrics_snapshot(&self) -> AgentMetrics {
         self.metrics.lock().await.clone()
+    }
+    pub async fn record_telemetry(&self, sample: SystemTelemetrySample) {
+        self.telemetry.lock().await.record(sample);
+    }
+    pub async fn telemetry_window(&self) -> SystemTelemetryWindow {
+        self.telemetry.lock().await.window()
     }
 }
 
@@ -366,8 +469,120 @@ pub fn agent_router(state: LocalAgentState) -> Router {
         .route("/health", get(agent_health))
         .route("/metrics", get(agent_metrics))
         .route("/docker/containers", get(agent_docker_containers))
+        .route("/packages", get(agent_package_inventory))
         .route("/command", post(agent_command))
         .with_state(state)
+}
+
+async fn agent_package_inventory(
+    State(state): State<LocalAgentState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if !authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error":"unauthorized"})),
+        )
+            .into_response();
+    }
+    let mut command = if state.info.platform == AgentPlatform::Windows {
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", "Get-Package | Select-Object -Property Name,Version,ProviderName | ConvertTo-Json -Compress"]);
+        command
+    } else {
+        let mut command = Command::new("dpkg-query");
+        command.args([
+            "-W",
+            "-f=${binary:Package}\\t${Version}\\t${Architecture}\\n",
+        ]);
+        command
+    };
+    let output = match tokio::time::timeout(Duration::from_secs(30), command.output()).await {
+        Ok(Ok(output)) if output.status.success() => output.stdout,
+        Ok(Ok(_)) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"package_manager_unavailable"})),
+            )
+                .into_response();
+        }
+        Ok(Err(_)) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"package_manager_unavailable"})),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(serde_json::json!({"error":"package_inventory_timeout"})),
+            )
+                .into_response();
+        }
+    };
+    let packages = if state.info.platform == AgentPlatform::Windows {
+        parse_windows_packages(&String::from_utf8_lossy(&output))
+    } else {
+        parse_dpkg_packages(&String::from_utf8_lossy(&output))
+    };
+    if packages.len() > 50_000 {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error":"package_inventory_too_large"})),
+        )
+            .into_response();
+    }
+    Json(AgentPackageInventory {
+        collected_at: Utc::now(),
+        packages,
+    })
+    .into_response()
+}
+
+fn parse_dpkg_packages(output: &str) -> Vec<AgentInstalledPackage> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            Some(AgentInstalledPackage {
+                name: fields.next()?.trim().to_owned(),
+                installed_version: fields.next()?.trim().to_owned(),
+                architecture: fields
+                    .next()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+                source: Some("dpkg".to_owned()),
+            })
+            .filter(|package| !package.name.is_empty() && !package.installed_version.is_empty())
+        })
+        .collect()
+}
+
+fn parse_windows_packages(output: &str) -> Vec<AgentInstalledPackage> {
+    let value: serde_json::Value = match serde_json::from_str(output) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let entries = match value {
+        serde_json::Value::Array(entries) => entries,
+        entry => vec![entry],
+    };
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            Some(AgentInstalledPackage {
+                name: entry.get("Name")?.as_str()?.to_owned(),
+                installed_version: entry.get("Version")?.as_str()?.to_owned(),
+                architecture: None,
+                source: entry
+                    .get("ProviderName")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
 }
 
 async fn agent_docker_containers(
@@ -382,11 +597,13 @@ async fn agent_docker_containers(
             .into_response();
     }
     if state.info.platform == AgentPlatform::Windows {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":"docker discovery is only supported on Linux agents"})),
-        )
-            .into_response();
+        return Json(DockerDiscovery {
+            available: false,
+            reason: Some("unsupported_platform".to_owned()),
+            collected_at: Utc::now(),
+            containers: Vec::new(),
+        })
+        .into_response();
     }
     let output = match Command::new("docker")
         .args([
@@ -394,37 +611,67 @@ async fn agent_docker_containers(
             "--all",
             "--no-trunc",
             "--format",
-            "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.State}}\\t{{.Status}}",
+            "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.State}}\\t{{.Status}}\\t{{.Ports}}\\t{{.CreatedAt}}\\t{{.Labels}}",
         ])
         .output()
         .await
     {
         Ok(output) if output.status.success() => output.stdout,
-        _ => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error":"docker is unavailable on this agent"})),
-            )
-                .into_response();
-        }
+        _ => return Json(DockerDiscovery { available: false, reason: Some("docker_unavailable".to_owned()), collected_at: Utc::now(), containers: Vec::new() }).into_response(),
     };
     let containers = parse_docker_containers(&String::from_utf8_lossy(&output));
-    Json(containers).into_response()
+    Json(DockerDiscovery {
+        available: true,
+        reason: None,
+        collected_at: Utc::now(),
+        containers,
+    })
+    .into_response()
 }
 
 fn parse_docker_containers(output: &str) -> Vec<DockerContainerInfo> {
     output
         .lines()
         .filter_map(|line| {
-            let mut fields = line.splitn(5, '\t');
+            let mut fields = line.splitn(8, '\t');
             Some(DockerContainerInfo {
                 id: fields.next()?.to_owned(),
                 name: fields.next()?.to_owned(),
                 image: fields.next()?.to_owned(),
                 state: fields.next()?.to_owned(),
                 status: fields.next()?.to_owned(),
+                ports: fields
+                    .next()
+                    .unwrap_or_default()
+                    .split(", ")
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                started_at: fields
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+                labels: sanitize_docker_labels(fields.next().unwrap_or_default()),
             })
         })
+        .collect()
+}
+
+fn sanitize_docker_labels(labels: &str) -> Vec<String> {
+    labels
+        .split(',')
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .filter(|label| {
+            let name = label
+                .split_once('=')
+                .map_or(*label, |(name, _)| name)
+                .to_ascii_lowercase();
+            !["secret", "token", "password", "credential", "private_key"]
+                .iter()
+                .any(|term| name.contains(term))
+        })
+        .map(str::to_owned)
         .collect()
 }
 
@@ -653,10 +900,51 @@ mod tests {
 
     #[test]
     fn docker_inventory_parser_keeps_only_complete_rows() {
-        let containers =
-            parse_docker_containers("a1\tapi\tghcr.io/acme/api:1\trunning\tUp 2 hours\ninvalid");
+        let containers = parse_docker_containers(
+            "a1\tapi\tghcr.io/acme/api:1\trunning\tUp 2 hours\t80/tcp\t2026-01-01\tapp=api,secret=value\ninvalid",
+        );
         assert_eq!(containers.len(), 1);
         assert_eq!(containers[0].name, "api");
+        assert_eq!(containers[0].ports, ["80/tcp"]);
+        assert_eq!(containers[0].labels, ["app=api"]);
+    }
+
+    #[test]
+    fn package_inventory_parsers_normalize_linux_and_windows_fixtures() {
+        let linux = parse_dpkg_packages("curl\t8.5.0-2\tamd64\ninvalid");
+        assert_eq!(linux.len(), 1);
+        assert_eq!(linux[0].source.as_deref(), Some("dpkg"));
+        let windows = parse_windows_packages(
+            r#"[{"Name":"7zip","Version":"24.0","ProviderName":"Programs"}]"#,
+        );
+        assert_eq!(windows[0].name, "7zip");
+        assert_eq!(windows[0].source.as_deref(), Some("Programs"));
+    }
+
+    #[test]
+    fn telemetry_buffer_keeps_a_bounded_recent_partial_window() {
+        let mut buffer = TelemetryBuffer::default();
+        for offset in 0..40 {
+            buffer.record(SystemTelemetrySample {
+                collected_at: Utc::now() - chrono::Duration::seconds(29 - (offset % 30) as i64),
+                cpu_basis_points: Some(5000),
+                memory_basis_points: Some(4000),
+                storage_basis_points: None,
+                load_1_milli: None,
+                network_rx_bytes: None,
+                network_tx_bytes: None,
+                process_count: None,
+            });
+        }
+        let window = buffer.window();
+        assert!(window.samples.len() <= TelemetryBuffer::MAX_SAMPLES);
+        assert!(window.partial);
+        assert!(
+            window
+                .samples
+                .iter()
+                .all(|sample| sample.collected_at >= Utc::now() - chrono::Duration::seconds(30))
+        );
     }
 
     #[tokio::test]
@@ -670,7 +958,7 @@ mod tests {
                     AgentPlatform::Linux
                 },
                 hostname: "test-host".to_owned(),
-                version: "0.1.0".to_owned(),
+                version: "0.2.0".to_owned(),
                 protocol_version: PROTOCOL_VERSION.to_owned(),
             },
             "agent-token",

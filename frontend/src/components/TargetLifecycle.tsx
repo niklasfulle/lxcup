@@ -1,3 +1,4 @@
+import { cn, ui } from "../ui";
 import { Link } from "react-router-dom";
 import type { TargetDto } from "../api";
 
@@ -24,22 +25,22 @@ export function TargetLifecycle({ target }: Readonly<{ target: TargetDto }>) {
   const statusClass = lifecycleStatusClass(target.state);
 
   return (
-    <section className="panel lifecycle-panel" aria-label={`Onboarding-Status für ${target.name}`}>
-      <div className="section-heading lifecycle-heading">
+    <section className={cn(ui.panel, ui.lifecyclePanel)} aria-label={`Onboarding-Status für ${target.name}`}>
+      <div className={ui.sectionHeading}>
         <div>
-          <p className="eyebrow">Onboarding-Fortschritt</p>
+          <p className={ui.eyebrow}>Onboarding-Fortschritt</p>
           <h2>{target.name}</h2>
-          <p className="muted">{target.kind.toUpperCase()} · {target.address}{target.agent_version ? ` · Agent v${target.agent_version}` : " · Noch keine Agent-Version gemeldet"}</p>
+          <p className={ui.muted}>{target.kind.toUpperCase()} · {target.address}{target.agent_version ? ` · Agent v${target.agent_version}` : " · Noch keine Agent-Version gemeldet"}</p>
         </div>
-        <span className={`status-badge ${statusClass}`}>{statusLabel}</span>
+        <span className={cn(ui.statusBadge, statusClass === "success" ? ui.statusSuccess : statusClass === "neutral" ? ui.statusNeutral : ui.statusPending)}>{statusLabel}</span>
       </div>
 
-      <ol className="lifecycle-steps">
+      <ol className={ui.lifecycleSteps}>
         {steps.map((step, index) => {
           const status = stepStatus(target, step.key);
           return (
-            <li className={`lifecycle-step ${status}`} key={step.key}>
-              <span className="lifecycle-marker" aria-hidden="true">
+            <li className={cn(ui.lifecycleStep, status === "complete" && ui.lifecycleComplete, status === "current" && ui.lifecycleCurrent)} key={step.key}>
+              <span className={ui.lifecycleMarker} aria-hidden="true">
                 {stepMarker(status, index)}
               </span>
               <div>
@@ -77,10 +78,10 @@ function stepMarker(status: ReturnType<typeof stepStatus>, index: number) {
 
 function lifecycleCallout(target: TargetDto, isManaged: boolean, isDisabled: boolean) {
   if (isManaged) {
-    return <div className="callout success"><strong>Der LXC ist bereit.</strong><p>Der Agent{target.agent_version ? ` v${target.agent_version}` : ""} ist verbunden. Healthchecks und Workflows können jetzt ausgeführt werden.</p><Link className="text-link" to="/workflows">Workflows öffnen →</Link></div>;
+    return <div className={cn(ui.callout, ui.calloutSuccess)}><strong>Der LXC ist bereit.</strong><p>Der Agent{target.agent_version ? ` v${target.agent_version}` : ""} ist verbunden. Healthchecks und Workflows können jetzt ausgeführt werden.</p><Link className={ui.textLink} to="/workflows">Workflows öffnen →</Link></div>;
   }
   if (isDisabled) {
-    return <div className="callout"><strong>Das Ziel ist deaktiviert.</strong><p>Es werden keine Agenten- oder Workflow-Aktionen ausgeführt.</p></div>;
+    return <div className={ui.callout}><strong>Das Ziel ist deaktiviert.</strong><p>Es werden keine Agenten- oder Workflow-Aktionen ausgeführt.</p></div>;
   }
-  return <div className="callout info"><strong>Warum steht der Status auf „pending“?</strong><p>Das Ziel ist angelegt. Es wird erst als verbunden markiert, wenn der Agent bereitgestellt wurde und den ersten Heartbeat sendet.</p><div className="callout-actions"><Link className="primary-button" to={`/workflows?target=${encodeURIComponent(target.id)}`}>Agent-Workflow öffnen</Link>{target.kind === "lxc" && <Link className="text-link" to="/enrollments/new">LXC-Auswahl öffnen</Link>}</div></div>;
+  return <div className={cn(ui.callout, ui.calloutInfo)}><strong>Warum steht der Status auf „pending“?</strong><p>Das Ziel ist angelegt. Es wird erst als verbunden markiert, wenn der Agent bereitgestellt wurde und den ersten Heartbeat sendet.</p><div className={ui.actionRow}><Link className={ui.primaryButton} to={`/workflows?target=${encodeURIComponent(target.id)}`}>Agent-Workflow öffnen</Link>{target.kind === "lxc" && <Link className={ui.textLink} to="/enrollments/new">LXC-Auswahl öffnen</Link>}</div></div>;
 }

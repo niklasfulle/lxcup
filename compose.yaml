@@ -69,6 +69,11 @@ services:
       - /var/run
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider --quiet http://127.0.0.1/agent/0.2.0/manifest.json"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   lxcup-worker:
     build:
@@ -93,7 +98,12 @@ services:
       lxcup-server:
         condition: service_healthy
       artifacts:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   postgres-test:
     image: postgres:17-alpine

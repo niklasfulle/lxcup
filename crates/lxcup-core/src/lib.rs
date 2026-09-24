@@ -12,9 +12,12 @@ pub mod error;
 pub mod execution;
 pub mod ids;
 pub mod node;
+pub mod package_inventory;
 pub mod plan;
+pub mod policy;
 pub mod resource;
 pub mod scan;
+pub mod schedule;
 pub mod secret;
 pub mod target;
 pub mod update;
@@ -23,7 +26,7 @@ pub use agent::{AgentConnectionState, AgentRegistration};
 pub use container::{
     Container, ContainerAction, ContainerManagementState, ContainerStatus, OperatingSystem,
 };
-pub use docker::{DockerWorkload, DockerWorkloadManagementState};
+pub use docker::{DockerWorkload, DockerWorkloadManagementState, DockerWorkloadPresence};
 pub use enrollment::{Enrollment, EnrollmentState};
 pub use environment::{EnvironmentStatus, ProxmoxEnvironment};
 pub use error::{
@@ -35,11 +38,16 @@ pub use ids::{
     NodeId, ScanId, SecretId, TargetId, UpdatePlanId,
 };
 pub use node::{Node, NodeStatus};
+pub use package_inventory::{InstalledPackage, PackageInventorySnapshot};
 pub use plan::{PackageChangeKind, PlanStatus, ResolvedPackageChange, UpdatePlan};
+pub use policy::{UpdatePolicy, UpdateRisk};
 pub use resource::{
     ActorRole, Permission, ResourceAction, ResourceLifecycle, ResourceTarget, validate_action,
 };
 pub use scan::{Scan, ScanStatus};
+pub use schedule::{
+    JobSchedule, ScheduleFrequency, ThresholdMetric, ThresholdOperator, ThresholdRule,
+};
 pub use secret::{SecretKind, SecretMetadata, SecretScope, SecretValue};
 pub use target::{Target, TargetKind, TargetState, TargetTransport};
 pub use update::{AvailableUpdate, PackageName, PackageVersion, UpdateClassification};
@@ -53,6 +61,6 @@ mod tests {
 
     #[test]
     fn exposes_package_version() {
-        assert_eq!(VERSION, "0.1.0");
+        assert_eq!(VERSION, "0.2.0");
     }
 }

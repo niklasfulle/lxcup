@@ -1,21 +1,31 @@
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{Timelike, Utc};
+use lxcup_agent::{
+    AgentHeartbeat, AgentInfo, AgentMetrics, AgentPlatform, SystemTelemetrySample,
+    SystemTelemetryWindow,
+};
 use lxcup_ansible::{
     AnsibleJob, AnsibleJobRequest, AnsibleJobStatus, AnsibleOperation, AnsibleParameters,
     ExecutionMode, JobEvent, JobEventKind,
 };
 use lxcup_core::{
     ActorRole, AgentRegistration, Container, ContainerId, ContainerStatus, DockerWorkload,
-    DockerWorkloadManagementState, EnvironmentId, Execution, ExecutionStatus, Node,
-    OperatingSystem, ProxmoxEnvironment, ResourceLifecycle, ResourceTarget, SecretId, Target,
-    TargetKind, TargetTransport,
+    DockerWorkloadManagementState, Execution, ExecutionStatus, InstalledPackage, JobSchedule, Node,
+    OperatingSystem, PackageInventorySnapshot, PackageName, PackageVersion, ResourceLifecycle,
+    ResourceTarget, ScheduleFrequency, SecretId, Target, TargetKind, TargetTransport,
 };
 use lxcup_persistence::{
     AuditEvent, Database, DatabaseConfig, ExecutionEvent, Repositories, seeds::seed_development,
 };
 use serde_json::json;
 use uuid::Uuid;
+
+fn postgres_now() -> chrono::DateTime<Utc> {
+    let now = Utc::now();
+    now.with_nanosecond((now.nanosecond() / 1_000) * 1_000)
+        .expect("valid microsecond timestamp")
+}
 
 #[tokio::test]
 async fn postgres_round_trip_uses_only_the_explicit_test_database() {
@@ -133,7 +143,7 @@ async fn postgres_round_trip_uses_only_the_explicit_test_database() {
     assert!(plan.has_same_content_as(&loaded_plan));
 
     let mut execution = Execution::new(plan.id);
-    let now = Utc::now();
+    let now = postgres_now();
     execution
         .transition_to(ExecutionStatus::Running, now)
         .unwrap();
@@ -188,7 +198,7 @@ async fn postgres_round_trip_uses_only_the_explicit_test_database() {
 }
 
 #[tokio::test]
-async fn postgres_repositories_cover_target_agent_environment_and_inventory_crud() {
+async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
     let Ok(database_url) = std::env::var("DATABASE_TEST_URL") else {
         eprintln!("skipped: DATABASE_TEST_URL is not configured");
         return;
@@ -205,7 +215,7 @@ async fn postgres_repositories_cover_target_agent_environment_and_inventory_crud
     let database = Database::connect(&config).await.unwrap();
     database.migrate().await.unwrap();
     let repositories = Repositories::new(&database);
-    let now = Utc::now();
+    let now = postgres_now();
     let suffix = Uuid::new_v4().simple().to_string();
     let container_id = ContainerId::new((Uuid::new_v4().as_u128() as u64 % 900_000_000) + 10_000);
     let node = Node::new(
@@ -267,6 +277,10 @@ async fn postgres_repositories_cover_target_agent_environment_and_inventory_crud
         image: "nginx:latest".to_owned(),
         state: "running".to_owned(),
         status: "Up".to_owned(),
+        ports: vec!["80/tcp".to_owned()],
+        started_at: Some("2026-01-01T00:00:00Z".to_owned()),
+        labels: vec!["app=web".to_owned()],
+        presence: lxcup_core::DockerWorkloadPresence::Present,
         management_state: DockerWorkloadManagementState::Discovered,
         discovered_at: now,
     };
@@ -298,39 +312,6 @@ async fn postgres_repositories_cover_target_agent_environment_and_inventory_crud
             .await
             .unwrap()
     );
-
-    let environment = ProxmoxEnvironment::new(
-        EnvironmentId::new(),
-        format!("crud-env-{suffix}"),
-        "https://pve.example.test",
-        SecretId::new(),
-        Some(SecretId::new()),
-        now,
-    )
-    .unwrap();
-    repositories.environments.save(&environment).await.unwrap();
-    assert!(
-        repositories
-            .environments
-            .find_by_id(environment.id)
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert!(
-        repositories
-            .environments
-            .list()
-            .await
-            .unwrap()
-            .iter()
-            .any(|item| item.id == environment.id)
-    );
-    repositories
-        .environments
-        .delete(environment.id)
-        .await
-        .unwrap();
 
     let registration = AgentRegistration::new(
         container_id,
@@ -374,6 +355,57 @@ async fn postgres_repositories_cover_target_agent_environment_and_inventory_crud
     )
     .unwrap();
     repositories.targets.save(&target).await.unwrap();
+    let telemetry_now = postgres_now();
+    let heartbeat = AgentHeartbeat {
+        target_id: target.id.as_uuid(),
+        info: AgentInfo {
+            agent_id: "integration-agent".to_owned(),
+            platform: AgentPlatform::Linux,
+            hostname: "integration-host".to_owned(),
+            version: "0.2.0".to_owned(),
+            protocol_version: "v1".to_owned(),
+        },
+        metrics: AgentMetrics {
+            collected_at: telemetry_now,
+            commands_total: 0,
+            commands_failed: 0,
+            last_command_at: None,
+        },
+        sent_at: telemetry_now,
+        telemetry: SystemTelemetryWindow {
+            samples: vec![
+                SystemTelemetrySample {
+                    collected_at: telemetry_now,
+                    cpu_basis_points: Some(1000),
+                    memory_basis_points: Some(2000),
+                    storage_basis_points: Some(3000),
+                    load_1_milli: Some(100),
+                    network_rx_bytes: None,
+                    network_tx_bytes: None,
+                    process_count: Some(4),
+                },
+                SystemTelemetrySample {
+                    collected_at: telemetry_now - chrono::Duration::seconds(31),
+                    cpu_basis_points: Some(9000),
+                    memory_basis_points: Some(9000),
+                    storage_basis_points: Some(9000),
+                    load_1_milli: Some(900),
+                    network_rx_bytes: None,
+                    network_tx_bytes: None,
+                    process_count: Some(9),
+                },
+            ],
+            partial: false,
+        },
+    };
+    repositories
+        .telemetry
+        .append_heartbeat(&heartbeat)
+        .await
+        .unwrap();
+    let samples = repositories.telemetry.list_recent(target.id).await.unwrap();
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].cpu_basis_points, Some(1000));
     assert!(
         repositories
             .targets
@@ -403,6 +435,73 @@ async fn postgres_repositories_cover_target_agent_environment_and_inventory_crud
             .unwrap()
             .state,
         lxcup_core::TargetState::Managed
+    );
+
+    let schedule = JobSchedule {
+        id: format!("inventory-{suffix}"),
+        operation: "collect_package_inventory".to_owned(),
+        timezone: "Europe/Berlin".to_owned(),
+        target_ids: vec![target.id],
+        frequency: ScheduleFrequency::EveryMinutes(60),
+        enabled: true,
+        threshold: None,
+        policy_id: None,
+        last_run_at: None,
+        next_run_at: now + chrono::Duration::hours(1),
+        last_error: None,
+    };
+    repositories.schedules.save(&schedule).await.unwrap();
+    assert!(
+        repositories
+            .schedules
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|persisted| persisted == &schedule)
+    );
+
+    let inventory = PackageInventorySnapshot {
+        target_id: target.id,
+        collected_at: now,
+        packages: vec![InstalledPackage {
+            name: PackageName::new("curl").unwrap(),
+            version: PackageVersion::new("8.5.0-2").unwrap(),
+            architecture: Some("amd64".to_owned()),
+            source: Some("apt".to_owned()),
+        }],
+    };
+    repositories
+        .package_inventory
+        .replace(&inventory)
+        .await
+        .unwrap();
+    let loaded_inventory = repositories
+        .package_inventory
+        .find_latest(target.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded_inventory.snapshot, inventory);
+    let empty_inventory = PackageInventorySnapshot {
+        packages: Vec::new(),
+        ..inventory
+    };
+    repositories
+        .package_inventory
+        .replace(&empty_inventory)
+        .await
+        .unwrap();
+    assert!(
+        repositories
+            .package_inventory
+            .find_latest(target.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .packages
+            .is_empty()
     );
 
     let pool = database.pool();
@@ -471,6 +570,22 @@ async fn postgres_ansible_job_repository_claims_jobs_and_persists_events() {
     .unwrap();
     let job_id = job.id;
     repositories.ansible_jobs.save(&job).await.unwrap();
+    let queue_metrics = repositories.ansible_jobs.queue_metrics().await.unwrap();
+    assert!(queue_metrics.queued_jobs >= 1);
+    assert!(queue_metrics.oldest_queued_at.is_some());
+    repositories
+        .worker_heartbeats
+        .record("integration-worker")
+        .await
+        .unwrap();
+    assert!(
+        repositories
+            .worker_heartbeats
+            .latest()
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(
         repositories
             .ansible_jobs

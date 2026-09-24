@@ -20,8 +20,10 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
+use tracing::Instrument;
+use uuid::Uuid;
 
 pub(super) async fn list_containers(
     State(state): State<ApiState>,
@@ -35,6 +37,13 @@ pub(super) async fn list_containers(
         .map(ContainerDto::from)
         .collect();
     Json(envelope(containers))
+}
+
+/// Stateless bearer tokens are discarded by the client on logout. The
+/// endpoint gives clients a stable audit-safe contract without echoing the
+/// token; immediate server-side invalidation is provided by rotation/revoke.
+pub(super) async fn logout(axum::Extension(_actor_role): axum::Extension<ActorRole>) -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
 pub(super) async fn list_scans(
@@ -115,6 +124,45 @@ mod tests {
     }
 
     #[test]
+    fn production_auth_requires_distinct_long_lived_role_tokens() {
+        let valid = AuthConfig::disabled().required(true).with_tokens(
+            Some("viewer-token-123456".to_owned()),
+            Some("operator-token-123456".to_owned()),
+            Some("admin-token-123456".to_owned()),
+        );
+        assert!(valid.is_production_ready());
+        assert!(!AuthConfig::disabled().is_production_ready());
+        assert!(
+            !AuthConfig::disabled()
+                .required(true)
+                .with_tokens(
+                    Some("same-token-123456".to_owned()),
+                    Some("same-token-123456".to_owned()),
+                    Some("same-token-123456".to_owned()),
+                )
+                .is_production_ready()
+        );
+    }
+
+    #[test]
+    fn expired_role_tokens_fail_closed() {
+        let config = AuthConfig::disabled()
+            .required(true)
+            .with_tokens(
+                Some("viewer-token-123456".to_owned()),
+                Some("operator-token-123456".to_owned()),
+                Some("admin-token-123456".to_owned()),
+            )
+            .with_token_ttl(Duration::ZERO);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "Bearer admin-token-123456".parse().unwrap(),
+        );
+        assert_eq!(config.role(&headers), None);
+    }
+
+    #[test]
     fn metrics_render_exposes_all_counters() {
         let metrics = ApiMetrics::default();
         metrics.requests_total.fetch_add(2, Ordering::Relaxed);
@@ -139,6 +187,7 @@ pub struct AuthConfig {
     operator_token: Option<Arc<str>>,
     admin_token: Option<Arc<str>>,
     required: bool,
+    token_expires_at: Option<Instant>,
 }
 
 impl AuthConfig {
@@ -160,16 +209,44 @@ impl AuthConfig {
         let required = std::env::var("LXCUP_AUTH_REQUIRED")
             .map(|value| value.eq_ignore_ascii_case("true"))
             .unwrap_or(operator_token.is_some() || viewer_token.is_some());
+        let token_ttl = std::env::var("LXCUP_AUTH_TOKEN_TTL_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(8 * 60 * 60));
         Self {
             viewer_token,
             operator_token,
             admin_token,
             required,
+            token_expires_at: Some(Instant::now() + token_ttl),
         }
     }
 
     pub fn disabled() -> Self {
         Self::default()
+    }
+
+    /// Production must have an explicit, non-empty token for every role.
+    /// Development keeps the deliberately permissive default for local UI work.
+    pub fn is_production_ready(&self) -> bool {
+        let Some(viewer) = self.viewer_token.as_deref() else {
+            return false;
+        };
+        let Some(operator) = self.operator_token.as_deref() else {
+            return false;
+        };
+        let Some(admin) = self.admin_token.as_deref() else {
+            return false;
+        };
+        self.required
+            && viewer.len() >= 16
+            && operator.len() >= 16
+            && admin.len() >= 16
+            && viewer != operator
+            && viewer != admin
+            && operator != admin
     }
 
     pub fn required(mut self, required: bool) -> Self {
@@ -189,6 +266,13 @@ impl AuthConfig {
         self
     }
 
+    /// Sets the lifetime of the currently loaded role tokens. Rotation or a
+    /// fresh process creates a new lifetime; expired tokens fail closed.
+    pub fn with_token_ttl(mut self, ttl: Duration) -> Self {
+        self.token_expires_at = Some(Instant::now() + ttl);
+        self
+    }
+
     fn allows(&self, method: &Method, headers: &HeaderMap) -> bool {
         if !self.required {
             return true;
@@ -203,6 +287,12 @@ impl AuthConfig {
     fn role(&self, headers: &HeaderMap) -> Option<ActorRole> {
         if !self.required {
             return Some(ActorRole::Admin);
+        }
+        if self
+            .token_expires_at
+            .is_some_and(|expires_at| Instant::now() >= expires_at)
+        {
+            return None;
         }
         let Some(token) = headers
             .get("authorization")
@@ -263,6 +353,12 @@ pub(super) async fn request_middleware(
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_owned();
+    let request_id = request
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .unwrap_or_else(Uuid::new_v4);
     let public = path == "/health/live" || path == "/health/ready" || path == "/metrics";
     if !public && !state.auth.allows(request.method(), request.headers()) {
         return ApiError::unauthorized().into_response();
@@ -270,8 +366,13 @@ pub(super) async fn request_middleware(
     if let Some(role) = state.auth.role(request.headers()) {
         request.extensions_mut().insert(role);
     }
+    request.extensions_mut().insert(request_id);
     state.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
-    let response = next.run(request).await;
+    let span = tracing::info_span!("http_request", request_id = %request_id, method = %request.method(), path = %path);
+    let mut response = next.run(request).instrument(span).await;
+    if let Ok(value) = request_id.to_string().parse() {
+        response.headers_mut().insert("x-request-id", value);
+    }
     if response.status().is_client_error() || response.status().is_server_error() {
         state
             .metrics
@@ -286,13 +387,18 @@ pub(super) async fn live_health() -> impl IntoResponse {
 }
 
 pub(super) async fn ready_health(State(state): State<ApiState>) -> impl IntoResponse {
-    let ready = state
+    let targets_ready = state
         .store
         .read()
         .await
         .targets
         .iter()
         .all(|target| target.state != lxcup_core::TargetState::Disabled);
+    let database_ready = match state.repositories.as_ref() {
+        Some(repositories) => repositories.ansible_jobs.ping().await.is_ok(),
+        None => true,
+    };
+    let ready = targets_ready && database_ready;
     let status = if ready {
         StatusCode::OK
     } else {
@@ -300,17 +406,45 @@ pub(super) async fn ready_health(State(state): State<ApiState>) -> impl IntoResp
     };
     (
         status,
-        Json(serde_json::json!({ "status": if ready { "ready" } else { "degraded" } })),
+        Json(serde_json::json!({
+            "status": if ready { "ready" } else { "degraded" },
+            "checks": {
+                "database": if database_ready { "ready" } else { "not_ready" },
+                "targets": if targets_ready { "ready" } else { "degraded" },
+            }
+        })),
     )
 }
 
 pub(super) async fn metrics(State(state): State<ApiState>) -> impl IntoResponse {
+    let mut rendered = state.metrics.render();
+    if let Some(repositories) = state.repositories.as_ref() {
+        if let Ok(queue) = repositories.ansible_jobs.queue_metrics().await {
+            let queue_age = queue
+                .oldest_queued_at
+                .map(|created| (chrono::Utc::now() - created).num_seconds().max(0))
+                .unwrap_or(0);
+            rendered.push_str(&format!(
+                "# TYPE lxcup_ansible_jobs_queued gauge\nlxcup_ansible_jobs_queued {}\n# TYPE lxcup_ansible_jobs_failed gauge\nlxcup_ansible_jobs_failed {}\n# TYPE lxcup_ansible_queue_age_seconds gauge\nlxcup_ansible_queue_age_seconds {}\n",
+                queue.queued_jobs, queue.failed_jobs, queue_age
+            ));
+        }
+        if let Ok(last_seen) = repositories.worker_heartbeats.latest().await {
+            let heartbeat_age = last_seen
+                .map(|seen| (chrono::Utc::now() - seen).num_seconds().max(0))
+                .unwrap_or(-1);
+            rendered.push_str(&format!(
+                "# TYPE lxcup_worker_heartbeat_age_seconds gauge\nlxcup_worker_heartbeat_age_seconds {}\n",
+                heartbeat_age
+            ));
+        }
+    }
     (
         [(
             axum::http::header::CONTENT_TYPE,
             "text/plain; version=0.0.4",
         )],
-        state.metrics.render(),
+        rendered,
     )
 }
 

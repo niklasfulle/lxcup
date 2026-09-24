@@ -1,6 +1,6 @@
 use super::{
-    ApiEnvelope, ApiError, ApiEvent, ApiState, Permission, SecretId, Target, TargetId,
-    TargetKind, TargetState, TargetTransport, envelope, map_secret_error, parse_uuid,
+    ApiEnvelope, ApiError, ApiEvent, ApiState, Permission, SecretId, Target, TargetId, TargetKind,
+    TargetState, TargetTransport, envelope, map_secret_error, parse_uuid,
 };
 use axum::{
     Json,
@@ -91,43 +91,105 @@ pub(super) async fn create_target(
     JsonBody(request): JsonBody<CreateTargetRequest>,
 ) -> Result<(StatusCode, Json<ApiEnvelope<TargetDto>>), ApiError> {
     require_permission(actor_role, Permission::Configure)?;
-    let mut target = Target::new(request.name, request.kind, request.address, request.transport, request.credential_secret_ref, request.agent_secret_ref)
-        .map_err(|_| ApiError::bad_request("invalid_target", "target fields or transport are invalid"))?;
+    let mut target = Target::new(
+        request.name,
+        request.kind,
+        request.address,
+        request.transport,
+        request.credential_secret_ref,
+        request.agent_secret_ref,
+    )
+    .map_err(|_| {
+        ApiError::bad_request("invalid_target", "target fields or transport are invalid")
+    })?;
     target.ssh_user = request.ssh_user.filter(|value| !value.trim().is_empty());
     target.ssh_known_hosts_secret_ref = request.ssh_known_hosts_secret_ref;
     let dto = TargetDto::from(&target);
     if let Some(repositories) = state.repositories.clone() {
-        repositories.targets.save(&target).await.map_err(|_| ApiError::storage())?;
+        repositories
+            .targets
+            .save(&target)
+            .await
+            .map_err(|_| ApiError::storage())?;
     }
     state.store.write().await.targets.push(target);
-    state.publish(ApiEvent::status("target", dto.id.as_uuid().to_string(), "pending"));
+    state.publish(ApiEvent::status(
+        "target",
+        dto.id.as_uuid().to_string(),
+        "pending",
+    ));
     Ok((StatusCode::CREATED, Json(envelope(dto))))
 }
 
-pub(super) async fn get_target(State(state): State<ApiState>, Path(target_id): Path<String>) -> Result<Json<ApiEnvelope<TargetDto>>, ApiError> {
+pub(super) async fn get_target(
+    State(state): State<ApiState>,
+    Path(target_id): Path<String>,
+) -> Result<Json<ApiEnvelope<TargetDto>>, ApiError> {
     let target_id = TargetId::from_uuid(parse_uuid(&target_id, "target id")?);
     let store = state.store.read().await;
-    let target = store.targets.iter().find(|target| target.id == target_id).ok_or_else(|| ApiError::not_found("target not found"))?;
+    let target = store
+        .targets
+        .iter()
+        .find(|target| target.id == target_id)
+        .ok_or_else(|| ApiError::not_found("target not found"))?;
     Ok(Json(envelope(TargetDto::with_agent_report(
         target,
         store.agent_reports.get(&target.id),
     ))))
 }
 
-pub(super) async fn receive_agent_heartbeat(State(state): State<ApiState>, headers: HeaderMap, JsonBody(heartbeat): JsonBody<AgentHeartbeat>) -> Result<StatusCode, ApiError> {
-    let token = headers.get("authorization").and_then(|value| value.to_str().ok()).and_then(|value| value.strip_prefix("Bearer ")).ok_or_else(ApiError::unauthorized)?;
+pub(super) async fn receive_agent_heartbeat(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    JsonBody(heartbeat): JsonBody<AgentHeartbeat>,
+) -> Result<StatusCode, ApiError> {
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(ApiError::unauthorized)?;
     let mut store = state.store.write().await;
-    let target = store.targets.iter_mut().find(|target| target.id.as_uuid() == heartbeat.target_id).ok_or_else(|| ApiError::not_found("target not found"))?;
-    let expected = state.secrets.read(target.agent_secret_ref).map_err(map_secret_error)?;
-    if expected.expose() != token { return Err(ApiError::unauthorized()); }
+    let target = store
+        .targets
+        .iter_mut()
+        .find(|target| target.id.as_uuid() == heartbeat.target_id)
+        .ok_or_else(|| ApiError::not_found("target not found"))?;
+    let expected = state
+        .secrets
+        .read(target.agent_secret_ref)
+        .map_err(map_secret_error)?;
+    if expected.expose() != token {
+        return Err(ApiError::unauthorized());
+    }
     target.mark_managed();
     let persisted = target.clone();
     store.agent_reports.insert(persisted.id, heartbeat);
+    let heartbeat_for_persistence = store.agent_reports.get(&persisted.id).cloned();
     drop(store);
-    if let Some(repositories) = state.repositories.clone() { repositories.targets.update(&persisted).await.map_err(|_| ApiError::storage())?; }
+    if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .targets
+            .update(&persisted)
+            .await
+            .map_err(|_| ApiError::storage())?;
+        if let Some(heartbeat) = heartbeat_for_persistence.as_ref() {
+            repositories
+                .telemetry
+                .append_heartbeat(heartbeat)
+                .await
+                .map_err(|_| ApiError::storage())?;
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(super) fn require_permission(role: ActorRole, permission: Permission) -> Result<(), ApiError> {
-    if role.grants(permission) { Ok(()) } else { Err(ApiError::forbidden("permission_denied", "the role cannot change this resource")) }
+    if role.grants(permission) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(
+            "permission_denied",
+            "the role cannot change this resource",
+        ))
+    }
 }

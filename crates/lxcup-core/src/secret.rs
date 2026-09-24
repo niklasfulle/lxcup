@@ -108,12 +108,9 @@ mod tests {
 
     #[test]
     fn metadata_is_safe_to_serialize_without_secret_material() {
-        let metadata = SecretMetadata::new(
-            "connection-test",
-            SecretKind::Generic,
-            SecretScope::Global,
-        )
-        .unwrap();
+        let metadata =
+            SecretMetadata::new("connection-test", SecretKind::Generic, SecretScope::Global)
+                .unwrap();
         let json = serde_json::to_string(&metadata).unwrap();
 
         assert!(json.contains("connection-test"));

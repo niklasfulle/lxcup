@@ -154,6 +154,7 @@ pub(super) async fn get_enrollment(
                 _ => {}
             }
         }
+        ensure_enrollment_followups(&state, enrollment_id, job).await?;
     }
     let store = state.store.read().await;
     let enrollment = store
@@ -162,6 +163,107 @@ pub(super) async fn get_enrollment(
         .find(|enrollment| enrollment.id == enrollment_id)
         .ok_or_else(|| ApiError::not_found("enrollment not found"))?;
     Ok(Json(envelope(EnrollmentDto::from(enrollment))))
+}
+
+/// The controller owns the onboarding sequence so a browser reload or a
+/// stopped UI cannot prevent the healthcheck and first inventory from being
+/// queued. Idempotency keys make this safe to call on every enrollment poll.
+async fn ensure_enrollment_followups(
+    state: &ApiState,
+    enrollment_id: EnrollmentId,
+    deployment: &AnsibleJob,
+) -> Result<(), ApiError> {
+    if deployment.status != AnsibleJobStatus::Succeeded {
+        return Ok(());
+    }
+    let ResourceTarget::Target(target_id) = deployment.target else {
+        return Ok(());
+    };
+    let target = state
+        .store
+        .read()
+        .await
+        .targets
+        .iter()
+        .find(|target| target.id == target_id && target.state == TargetState::Managed)
+        .cloned();
+    let Some(target) = target else { return Ok(()) };
+    let jobs = if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .ansible_jobs
+            .list()
+            .await
+            .map_err(|_| ApiError::storage())?
+    } else {
+        state.ansible.read().await.jobs()
+    };
+    let health_key = format!("enrollment-health-{}", enrollment_id.as_uuid());
+    let health = jobs
+        .iter()
+        .find(|job| job.idempotency_key == health_key)
+        .cloned();
+    if health.is_none() {
+        let health = state
+            .ansible
+            .write()
+            .await
+            .submit(AnsibleJobRequest {
+                operation: AnsibleOperation::HealthCheck,
+                target: ResourceTarget::Target(target_id),
+                lifecycle: ResourceLifecycle::Managed,
+                mode: ExecutionMode::Check,
+                parameters: AnsibleParameters::HealthCheck,
+                secret_refs: Vec::new(),
+                idempotency_key: health_key,
+                confirmed: true,
+                actor_role: ActorRole::Operator,
+            })
+            .map_err(map_ansible_error)?;
+        if let JobSubmission::Created(job) = health {
+            persist_created_job(state, &job).await?;
+            state.publish(ApiEvent::status(
+                "ansible_job",
+                job.id.as_uuid().to_string(),
+                "queued",
+            ));
+        }
+        return Ok(());
+    }
+    if health
+        .as_ref()
+        .is_some_and(|job| job.status != AnsibleJobStatus::Succeeded)
+    {
+        return Ok(());
+    }
+    let inventory_key = format!("enrollment-packages-{}", enrollment_id.as_uuid());
+    if jobs.iter().any(|job| job.idempotency_key == inventory_key) {
+        return Ok(());
+    }
+    let submission = state
+        .ansible
+        .write()
+        .await
+        .submit(AnsibleJobRequest {
+            operation: AnsibleOperation::CollectPackageInventory,
+            target: ResourceTarget::Target(target_id),
+            lifecycle: ResourceLifecycle::Managed,
+            mode: ExecutionMode::Check,
+            parameters: AnsibleParameters::CollectPackageInventory,
+            secret_refs: vec![target.credential_secret_ref],
+            idempotency_key: inventory_key,
+            confirmed: true,
+            actor_role: ActorRole::Operator,
+        })
+        .map_err(map_ansible_error)?;
+    if let JobSubmission::Created(job) = submission {
+        persist_created_job(state, &job).await?;
+        state.publish(ApiEvent::status(
+            "ansible_job",
+            job.id.as_uuid().to_string(),
+            "queued",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -257,7 +359,7 @@ async fn queue_enrollment_job(
             lifecycle,
             mode: ExecutionMode::Apply,
             parameters: AnsibleParameters::DeployAgent {
-                agent_version: "0.1.0".to_owned(),
+                agent_version: "0.2.0".to_owned(),
             },
             secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
             idempotency_key: format!("enrollment-{}", dto.id.as_uuid()),
@@ -440,7 +542,10 @@ async fn find_existing_job(
     Ok(None)
 }
 
-async fn persist_created_job(state: &ApiState, job: &AnsibleJob) -> Result<(), ApiError> {
+pub(super) async fn persist_created_job(
+    state: &ApiState,
+    job: &AnsibleJob,
+) -> Result<(), ApiError> {
     let Some(repositories) = state.repositories.clone() else {
         return Ok(());
     };

@@ -88,6 +88,7 @@ pub enum ResourceAction {
     UpdateAgent,
     RepairAgent,
     UpdatePackages,
+    CollectPackageInventory,
     DisableResource,
     DeleteResource,
 }
@@ -95,7 +96,7 @@ pub enum ResourceAction {
 impl ResourceAction {
     pub const fn permission(self) -> Permission {
         match self {
-            Self::Discover | Self::HealthCheck => Permission::Read,
+            Self::Discover | Self::HealthCheck | Self::CollectPackageInventory => Permission::Read,
             Self::ConfigureTarget => Permission::Configure,
             Self::DeployAgent => Permission::DeployAgent,
             Self::UpdateAgent | Self::RepairAgent | Self::UpdatePackages => Permission::Update,

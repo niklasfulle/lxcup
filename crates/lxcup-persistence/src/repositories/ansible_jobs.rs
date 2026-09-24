@@ -3,11 +3,44 @@ use super::{
     Utc, ansible_status_to_db, is_active_ansible_job_status,
 };
 
+/// Aggregated queue values used by the operational metrics endpoint.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AnsibleQueueMetrics {
+    pub queued_jobs: u64,
+    pub failed_jobs: u64,
+    pub oldest_queued_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 impl AnsibleJobRepository {
     pub(crate) fn new(database: &Database) -> Self {
         Self {
             pool: database.pool().clone(),
         }
+    }
+
+    pub async fn ping(&self) -> Result<(), RepositoryError> {
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    pub async fn queue_metrics(&self) -> Result<AnsibleQueueMetrics, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT \
+                COUNT(*) FILTER (WHERE status = 'queued') AS queued_jobs, \
+                COUNT(*) FILTER (WHERE status = 'failed') AS failed_jobs, \
+                MIN(created_at) FILTER (WHERE status = 'queued') AS oldest_queued_at \
+             FROM ansible_jobs",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(AnsibleQueueMetrics {
+            queued_jobs: row.try_get::<i64, _>("queued_jobs")? as u64,
+            failed_jobs: row.try_get::<i64, _>("failed_jobs")? as u64,
+            oldest_queued_at: row.try_get("oldest_queued_at")?,
+        })
     }
 
     pub async fn save(&self, job: &AnsibleJob) -> Result<(), RepositoryError> {

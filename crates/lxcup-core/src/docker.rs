@@ -11,6 +11,10 @@ pub struct DockerWorkload {
     pub image: String,
     pub state: String,
     pub status: String,
+    pub ports: Vec<String>,
+    pub started_at: Option<String>,
+    pub labels: Vec<String>,
+    pub presence: DockerWorkloadPresence,
     pub management_state: DockerWorkloadManagementState,
     pub discovered_at: DateTime<Utc>,
 }
@@ -20,4 +24,11 @@ pub struct DockerWorkload {
 pub enum DockerWorkloadManagementState {
     Discovered,
     Managed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockerWorkloadPresence {
+    Present,
+    Missing,
 }

@@ -1,3 +1,4 @@
+import { cn, ui } from "../ui";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -49,39 +50,39 @@ export function SecretsPage() {
 
   return (
     <>
-      <header className="page-header"><div><p className="eyebrow">Sicherheit</p><h1>Secret Store</h1><p className="muted">Nur Metadaten werden angezeigt. Secret-Werte verlassen diese Seite nach dem Schreibvorgang.</p></div></header>
-      <section className="panel">
+      <header className={ui.pageHeader}><div><p className={ui.eyebrow}>Sicherheit</p><h1>Secret Store</h1><p className={ui.muted}>Nur Metadaten werden angezeigt. Secret-Werte verlassen diese Seite nach dem Schreibvorgang.</p></div></header>
+      <section className={ui.panel}>
         <h2>Secret hinzufügen</h2>
-        <form className="workflow-grid" onSubmit={submit}>
+        <form className={ui.workflowGrid} onSubmit={submit}>
           <label title="Interner Anzeigename. Der eigentliche Secret-Wert wird später nicht angezeigt.">Name<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" required /></label>
           <label title="Der Typ legt fest, für welchen Verbindungs- oder Authentifizierungszweck das Secret verwendet werden darf.">Typ<select value={kind} onChange={(event) => setKind(event.target.value as SecretKind)}>{secretKinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
           <label title="Der Wert wird verschlüsselt gespeichert und nach dem Speichern nicht mehr ausgegeben.">Wert<input type="password" value={value} onChange={(event) => setValue(event.target.value)} autoComplete="new-password" required /></label>
-          <button className="primary-button" type="submit" disabled={create.isPending}>{create.isPending ? "Speichert…" : "Secret speichern"}</button>
+          <button className={ui.primaryButton} type="submit" disabled={create.isPending}>{create.isPending ? "Speichert…" : "Secret speichern"}</button>
         </form>
-        {create.error ? <p className="error-state" role="alert">{formatSecretError(create.error)}</p> : null}
+        {create.error ? <p className={ui.errorState} role="alert">{formatSecretError(create.error)}</p> : null}
       </section>
-      <section className="panel">
-        <div className="section-heading"><h2>Verwendbare Secrets</h2><span className="muted">Werte sind nicht abrufbar</span></div>
-        {secrets.isLoading ? <p className="muted">Lade Secrets…</p> : <div className="secret-list">
+      <section className={ui.panel}>
+        <div className={ui.sectionHeading}><h2>Verwendbare Secrets</h2><span className={ui.muted}>Werte sind nicht abrufbar</span></div>
+        {secrets.isLoading ? <p className={ui.muted}>Lade Secrets…</p> : <div className={ui.secretList}>
           {(secrets.data ?? []).map((item) => {
             const metadata = item.metadata.metadata;
             const revoked = item.metadata.status === "revoked";
-            return <article className="secret-row" key={metadata.id}>
-              <div><strong>{metadata.name}</strong><span className="muted">{metadata.kind} · {item.metadata.status}</span></div>
-              <div className="secret-actions">
+            return <article className={ui.secretRow} key={metadata.id}>
+              <div><strong>{metadata.name}</strong><span className={ui.muted}>{metadata.kind} · {item.metadata.status}</span></div>
+              <div className={ui.secretActions}>
                 <button type="button" onClick={() => { setRotationId(metadata.id); setRotationValue(""); }} disabled={revoked}>Rotieren</button>
                 <button type="button" onClick={() => revoke.mutate(metadata.id)} disabled={revoked || revoke.isPending}>Widerrufen</button>
                 <button type="button" onClick={() => remove.mutate(metadata.id)} disabled={remove.isPending}>Löschen</button>
               </div>
-              {rotationId === metadata.id ? <form className="inline-form" onSubmit={(event) => { event.preventDefault(); if (rotationValue) rotate.mutate(); }}><input type="password" value={rotationValue} onChange={(event) => setRotationValue(event.target.value)} autoComplete="new-password" placeholder="Neuer Wert" required /><button type="submit" disabled={rotate.isPending}>Bestätigen</button></form> : null}
+              {rotationId === metadata.id ? <form className={ui.inlineForm} onSubmit={(event) => { event.preventDefault(); if (rotationValue) rotate.mutate(); }}><input type="password" value={rotationValue} onChange={(event) => setRotationValue(event.target.value)} autoComplete="new-password" placeholder="Neuer Wert" required /><button type="submit" disabled={rotate.isPending}>Bestätigen</button></form> : null}
             </article>;
           })}
-          {secrets.data?.length === 0 ? <p className="muted">Noch keine Secrets angelegt.</p> : null}
+          {secrets.data?.length === 0 ? <p className={ui.muted}>Noch keine Secrets angelegt.</p> : null}
         </div>}
       </section>
-      <section className="panel">
-        <div className="section-heading"><h2>Audit</h2><span className="muted">Lebenszyklus-Ereignisse</span></div>
-        <ul className="audit-list">{(audit.data ?? []).slice().reverse().map((event, index) => <li key={`${event.secret_id}-${event.occurred_at}-${index}`}><strong>{event.action}</strong><span className="muted">{event.secret_id} · {new Date(event.occurred_at).toLocaleString()}</span></li>)}</ul>
+      <section className={ui.panel}>
+        <div className={ui.sectionHeading}><h2>Audit</h2><span className={ui.muted}>Lebenszyklus-Ereignisse</span></div>
+        <ul className={ui.auditList}>{(audit.data ?? []).slice().reverse().map((event, index) => <li key={`${event.secret_id}-${event.occurred_at}-${index}`}><strong>{event.action}</strong><span className={ui.muted}>{event.secret_id} · {new Date(event.occurred_at).toLocaleString()}</span></li>)}</ul>
       </section>
     </>
   );
