@@ -924,9 +924,21 @@ mod tests {
     #[test]
     fn telemetry_buffer_keeps_a_bounded_recent_partial_window() {
         let mut buffer = TelemetryBuffer::default();
+        let now = Utc::now();
+        buffer.record(SystemTelemetrySample {
+            collected_at: now - chrono::Duration::seconds(31),
+            cpu_basis_points: None,
+            memory_basis_points: None,
+            storage_basis_points: None,
+            load_1_milli: None,
+            network_rx_bytes: None,
+            network_tx_bytes: None,
+            process_count: None,
+        });
         for offset in 0..40 {
             buffer.record(SystemTelemetrySample {
-                collected_at: Utc::now() - chrono::Duration::seconds(29 - (offset % 30) as i64),
+                collected_at: now - chrono::Duration::seconds(29)
+                    + chrono::Duration::milliseconds(offset * 500),
                 cpu_basis_points: Some(5000),
                 memory_basis_points: Some(4000),
                 storage_basis_points: None,
@@ -937,14 +949,22 @@ mod tests {
             });
         }
         let window = buffer.window();
-        assert!(window.samples.len() <= TelemetryBuffer::MAX_SAMPLES);
+        assert_eq!(window.samples.len(), TelemetryBuffer::MAX_SAMPLES);
         assert!(window.partial);
+        assert!(
+            window.samples.iter().all(|sample| {
+                sample.collected_at >= Utc::now() - chrono::Duration::seconds(30)
+            })
+        );
         assert!(
             window
                 .samples
-                .iter()
-                .all(|sample| sample.collected_at >= Utc::now() - chrono::Duration::seconds(30))
+                .windows(2)
+                .all(|pair| pair[0].collected_at <= pair[1].collected_at)
         );
+        let serialized = serde_json::to_vec(&window).unwrap();
+        let restored: SystemTelemetryWindow = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(restored, window);
     }
 
     #[tokio::test]

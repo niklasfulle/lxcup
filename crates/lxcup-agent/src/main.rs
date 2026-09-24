@@ -16,12 +16,21 @@ fn heartbeat_endpoint(controller_url: &str) -> String {
 }
 
 async fn collect_telemetry() -> SystemTelemetrySample {
+    collect_telemetry_with_cpu(None).await.0
+}
+
+async fn collect_telemetry_with_cpu(
+    previous_cpu: Option<(u64, u64)>,
+) -> (SystemTelemetrySample, Option<(u64, u64)>) {
     let now = chrono::Utc::now();
+    #[cfg(not(target_os = "linux"))]
+    let _ = previous_cpu;
     #[cfg(target_os = "linux")]
     {
         let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
         let loadavg = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
         let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
+        let network = std::fs::read_to_string("/proc/net/dev").unwrap_or_default();
         let storage_basis_points = tokio::process::Command::new("df")
             .args(["-Pk", "/"])
             .output()
@@ -54,21 +63,56 @@ async fn collect_telemetry() -> SystemTelemetrySample {
             &meminfo,
             &loadavg,
             &stat,
+            &network,
             storage_basis_points,
             process_count,
+            previous_cpu,
             now,
         );
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        (collect_windows_telemetry(now).await, None)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    (
+        SystemTelemetrySample {
+            collected_at: now,
+            cpu_basis_points: None,
+            memory_basis_points: None,
+            storage_basis_points: None,
+            load_1_milli: None,
+            network_rx_bytes: None,
+            network_tx_bytes: None,
+            process_count: None,
+        },
+        None,
+    )
+}
+
+#[cfg(target_os = "windows")]
+async fn collect_windows_telemetry(now: chrono::DateTime<chrono::Utc>) -> SystemTelemetrySample {
+    const COMMAND: &str = r#"$ErrorActionPreference='Stop'; $os=Get-CimInstance Win32_OperatingSystem; $processors=@(Get-CimInstance Win32_Processor); $disks=@(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Where-Object { $_.Size -gt 0 }); $diskTotal=($disks | Measure-Object -Property Size -Sum).Sum; $diskFree=($disks | Measure-Object -Property FreeSpace -Sum).Sum; $net=@(Get-NetAdapterStatistics -ErrorAction SilentlyContinue); [ordered]@{ cpu_percent=($processors | Measure-Object -Property LoadPercentage -Average).Average; memory_percent=100*($os.TotalVisibleMemorySize-$os.FreePhysicalMemory)/[math]::Max(1,$os.TotalVisibleMemorySize); storage_percent=100*($diskTotal-$diskFree)/[math]::Max(1,$diskTotal); rx_bytes=($net | Measure-Object -Property ReceivedBytes -Sum).Sum; tx_bytes=($net | Measure-Object -Property SentBytes -Sum).Sum; process_count=(Get-Process).Count } | ConvertTo-Json -Compress"#;
+    let output = tokio::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", COMMAND])
+        .output()
+        .await
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok());
+    let get = |name: &str| output.as_ref()?.get(name)?.as_f64();
+    let integer = |name: &str| output.as_ref()?.get(name)?.as_u64();
+    let percent =
+        |name: &str| get(name).map(|value| (value.clamp(0.0, 100.0) * 100.0).round() as u16);
     SystemTelemetrySample {
         collected_at: now,
-        cpu_basis_points: None,
-        memory_basis_points: None,
-        storage_basis_points: None,
+        cpu_basis_points: percent("cpu_percent"),
+        memory_basis_points: percent("memory_percent"),
+        storage_basis_points: percent("storage_percent"),
         load_1_milli: None,
-        network_rx_bytes: None,
-        network_tx_bytes: None,
-        process_count: None,
+        network_rx_bytes: integer("rx_bytes"),
+        network_tx_bytes: integer("tx_bytes"),
+        process_count: integer("process_count").map(|count| count.min(u32::MAX as u64) as u32),
     }
 }
 
@@ -76,10 +120,12 @@ fn telemetry_from_proc(
     meminfo: &str,
     loadavg: &str,
     stat: &str,
+    network: &str,
     storage_basis_points: Option<u16>,
     process_count: Option<u32>,
+    previous_cpu: Option<(u64, u64)>,
     collected_at: chrono::DateTime<chrono::Utc>,
-) -> SystemTelemetrySample {
+) -> (SystemTelemetrySample, Option<(u64, u64)>) {
     let value = |key: &str| {
         meminfo.lines().find_map(|line| {
             line.strip_prefix(key)?
@@ -101,7 +147,7 @@ fn telemetry_from_proc(
         .next()
         .and_then(|value| value.parse::<f32>().ok())
         .map(|value| (value * 1000.0) as u32);
-    let cpu_basis_points = stat
+    let cpu_snapshot = stat
         .lines()
         .find(|line| line.starts_with("cpu "))
         .and_then(|line| {
@@ -119,21 +165,58 @@ fn telemetry_from_proc(
                 .copied()
                 .unwrap_or_default()
                 .saturating_add(values.get(4).copied().unwrap_or_default());
-            Some(
-                (total.saturating_sub(idle).saturating_mul(10_000) / total.max(1)).min(10_000)
-                    as u16,
-            )
+            Some((total, idle))
         });
-    SystemTelemetrySample {
-        collected_at,
-        cpu_basis_points,
-        memory_basis_points,
-        storage_basis_points,
-        load_1_milli,
-        network_rx_bytes: None,
-        network_tx_bytes: None,
-        process_count,
-    }
+    let cpu_basis_points =
+        cpu_snapshot
+            .zip(previous_cpu)
+            .and_then(|((total, idle), (last_total, last_idle))| {
+                let total_delta = total.saturating_sub(last_total);
+                let idle_delta = idle.saturating_sub(last_idle);
+                (total_delta > 0).then(|| {
+                    (total_delta
+                        .saturating_sub(idle_delta)
+                        .saturating_mul(10_000)
+                        / total_delta)
+                        .min(10_000) as u16
+                })
+            });
+    let (network_rx_bytes, network_tx_bytes) = parse_network_counters(network);
+    (
+        SystemTelemetrySample {
+            collected_at,
+            cpu_basis_points,
+            memory_basis_points,
+            storage_basis_points,
+            load_1_milli,
+            network_rx_bytes,
+            network_tx_bytes,
+            process_count,
+        },
+        cpu_snapshot,
+    )
+}
+
+fn parse_network_counters(network: &str) -> (Option<u64>, Option<u64>) {
+    let counters = network.lines().skip(2).filter_map(|line| {
+        let (_, values) = line.split_once(':')?;
+        let values = values.split_whitespace().collect::<Vec<_>>();
+        Some((
+            values.first()?.parse::<u64>().ok()?,
+            values.get(8)?.parse::<u64>().ok()?,
+        ))
+    });
+    let (rx, tx, count) = counters.fold(
+        (0_u64, 0_u64, 0_u32),
+        |(rx, tx, count), (next_rx, next_tx)| {
+            (
+                rx.saturating_add(next_rx),
+                tx.saturating_add(next_tx),
+                count.saturating_add(1),
+            )
+        },
+    );
+    ((count > 0).then_some(rx), (count > 0).then_some(tx))
 }
 
 struct StartupConfig {
@@ -202,11 +285,12 @@ async fn run(
     let state = LocalAgentState::new(config.info.clone(), Arc::<str>::from(config.token.clone()));
     let telemetry_state = state.clone();
     tokio::spawn(async move {
+        let mut previous_cpu = None;
         loop {
-            telemetry_state
-                .record_telemetry(collect_telemetry().await)
-                .await;
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let (sample, current_cpu) = collect_telemetry_with_cpu(previous_cpu).await;
+            previous_cpu = current_cpu;
+            telemetry_state.record_telemetry(sample).await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
     let listener = tokio::net::TcpListener::bind(&config.bind)
@@ -318,12 +402,14 @@ mod tests {
     #[test]
     fn telemetry_parser_handles_valid_and_malformed_proc_samples() {
         let now = chrono::Utc::now();
-        let sample = telemetry_from_proc(
+        let (sample, _) = telemetry_from_proc(
             "MemTotal: 1000 kB\nMemAvailable: 250 kB\n",
             "1.25 0.50 0.25 1/10 20",
             "cpu 10 0 20 60 10 0 0 0",
+            "Inter-| Receive | Transmit\n face |bytes packets\neth0: 100 0 0 0 0 0 0 0 200 0 0 0 0 0 0 0\n",
             Some(7_500),
             Some(42),
+            Some((0, 0)),
             now,
         );
         assert_eq!(sample.collected_at, now);
@@ -332,12 +418,40 @@ mod tests {
         assert_eq!(sample.cpu_basis_points, Some(3_000));
         assert_eq!(sample.storage_basis_points, Some(7_500));
         assert_eq!(sample.process_count, Some(42));
+        assert_eq!(sample.network_rx_bytes, Some(100));
+        assert_eq!(sample.network_tx_bytes, Some(200));
 
-        let malformed = telemetry_from_proc("MemTotal: nope", "", "cpu invalid", None, None, now);
+        let (malformed, _) = telemetry_from_proc(
+            "MemTotal: nope",
+            "",
+            "cpu invalid",
+            "",
+            None,
+            None,
+            None,
+            now,
+        );
         assert_eq!(malformed.memory_basis_points, None);
         assert_eq!(malformed.load_1_milli, None);
         assert_eq!(malformed.cpu_basis_points, None);
         assert_eq!(malformed.storage_basis_points, None);
+    }
+
+    #[test]
+    fn linux_cpu_usage_uses_interval_deltas_not_time_since_boot() {
+        let now = chrono::Utc::now();
+        let (sample, current) = telemetry_from_proc(
+            "MemTotal: 1000 kB\nMemAvailable: 500 kB\n",
+            "0.00 0.00 0.00 1/1 1",
+            "cpu 20 0 20 130 0 0 0 0",
+            "",
+            None,
+            None,
+            Some((100, 70)),
+            now,
+        );
+        assert_eq!(sample.cpu_basis_points, Some(1_428));
+        assert_eq!(current, Some((170, 130)));
     }
 
     #[tokio::test]
