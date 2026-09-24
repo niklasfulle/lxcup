@@ -83,15 +83,27 @@ zusätzlich Secrets und destruktive Aktionen verwalten. Logout erfolgt durch
 Widerruf oder Rotation des verwendeten Tokens; Secret- und Tokenwerte werden
 nie geloggt oder in API-Antworten ausgegeben.
 
-## Isolierter Onboarding-E2E-Test
+## Compose-Onboarding-E2E-Test
 
-Mit laufendem Compose-Stack und einem dedizierten SSH-Testziel prüft das
-Skript den vollständigen Ablauf und verifiziert, dass Deployment, Healthcheck
-und Paketinventar jeweils als Workflows vorhanden sind:
+Der Test startet den Compose-Stack und ein eigenes Debian-/systemd-SSH-Ziel im
+Profil `onboarding-e2e`. Das Testziel ist nur im Compose-Netz erreichbar. Das
+Skript liest dessen SSH-Host-Key direkt aus dem Container, legt SSH-Passwort,
+Host-Key und Agent-Token als Secrets an und registriert ein separates
+Linux-Server-Ziel. Es wartet auf erfolgreiches Agent-Deployment, Heartbeat,
+Healthcheck und Paketinventar. Außerdem prüft es idempotente Einreihung und
+startet den Worker nach dem Deployment einmal neu.
 
 ```powershell
-.\scripts\test-onboarding-e2e.ps1 -ContainerId 101 -TargetId <target-uuid>
+.\scripts\test-onboarding-e2e.ps1
 ```
 
-Das Skript schreibt keine Zugangsdaten und bricht bei Timeout oder fehlendem
-Workflow ab. Der SSH-Testzugang bleibt ausschließlich im Secret-Store.
+Voraussetzung ist Docker Compose. Der Test erzeugt eine eigene zufällige
+Compose-Projekt-ID, temporäre Zugangsdaten, eine dedizierte Datenbank und ein
+dediziertes Postgres-Volume. Veröffentliche Ports sind standardmäßig nur an
+`127.0.0.1` gebunden und lassen sich über `-ControllerPort`, `-PostgresPort`,
+`-TestPostgresPort` und `-FrontendPort` ändern. Der SSH-Container läuft
+privilegiert, damit darin systemd getestet werden kann, und ist ausschließlich
+für lokale Tests gedacht. Bei Erfolg oder Fehler fährt das Skript nur sein
+eigenes Compose-Projekt herunter, entfernt dessen Volume und löscht die
+temporäre Umgebungsdatei. Mit `-SkipWorkerRestart` lässt sich der
+Worker-Neustart gezielt überspringen.
