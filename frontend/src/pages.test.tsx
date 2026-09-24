@@ -208,6 +208,7 @@ describe("inventory pages", () => {
 
   it("searches and sorts package inventory while rendering telemetry", () => {
     mocks.targets.data = [target];
+    mocks.jobs.data = [{ id: "inventory-job", operation: "collect_package_inventory", target: { target: "target-1" }, status: "succeeded", created_at: "2026-01-01T00:01:00Z" }];
     mocks.packageInventory.data = { target_id: "target-1", status: "complete", collected_at: "2026-01-01T00:00:00Z", packages: [
       { name: "curl", installed_version: "8.5", architecture: "amd64", source: "apt" },
       { name: "zlib", installed_version: "1.2", architecture: null, source: null },
@@ -217,6 +218,7 @@ describe("inventory pages", () => {
     ] };
     renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
     expect(screen.getByRole("img", { name: /CPU-, RAM/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Inventarisierungs-Workflow · succeeded" })).toHaveAttribute("href", "/workflows/inventory-job");
     expect(screen.getByText("2 installierte Pakete")).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("z. B. curl oder 8.5"), { target: { value: "zlib" } });
     expect(screen.getByText("zlib")).toBeInTheDocument();

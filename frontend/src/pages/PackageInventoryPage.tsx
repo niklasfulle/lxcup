@@ -1,7 +1,7 @@
 import { useDeferredValue, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { cn, ui } from "../ui";
-import { usePackageInventory, useTargetTelemetry, useTargets } from "../queries";
+import { useAnsibleJobs, usePackageInventory, useTargetTelemetry, useTargets } from "../queries";
 
 type TelemetrySample = NonNullable<ReturnType<typeof useTargetTelemetry>["data"]>["samples"][number];
 
@@ -34,10 +34,14 @@ export function PackageInventoryPage() {
   const inventory = usePackageInventory(targetId);
   const telemetry = useTargetTelemetry(targetId);
   const targets = useTargets();
+  const jobs = useAnsibleJobs();
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
   const [sortBy, setSortBy] = useState<"name" | "version">("name");
   const target = targets.data?.find((item) => item.id === targetId);
+  const inventoryJob = (jobs.data ?? [])
+    .filter((job) => job.operation === "collect_package_inventory" && "target" in job.target && job.target.target === targetId)
+    .sort((left, right) => right.created_at.localeCompare(left.created_at))[0];
   const latestSample = telemetry.data?.samples.at(-1);
   const telemetryStale = latestSample ? Date.now() - new Date(latestSample.collected_at).getTime() > 15_000 : false;
   const packages = useMemo(() => {
@@ -55,6 +59,10 @@ export function PackageInventoryPage() {
       {telemetry.isLoading ? <p className={ui.muted}>Telemetrie wird geladen…</p> : telemetry.error ? <p className={ui.errorState} role="alert">{telemetry.error.message}</p> : telemetry.data?.samples.length ? <><TelemetryChart samples={telemetry.data.samples} /><div className={ui.tableWrap}><table><thead><tr><th>Zeit</th><th>CPU</th><th>RAM</th><th>Speicher</th><th>Load</th></tr></thead><tbody>{telemetry.data.samples.map((sample) => <tr key={sample.collected_at}><td>{new Date(sample.collected_at).toLocaleTimeString()}</td><td>{sample.cpu_basis_points == null ? "—" : `${(sample.cpu_basis_points / 100).toFixed(1)}%`}</td><td>{sample.memory_basis_points == null ? "—" : `${(sample.memory_basis_points / 100).toFixed(1)}%`}</td><td>{sample.storage_basis_points == null ? "—" : `${(sample.storage_basis_points / 100).toFixed(1)}%`}</td><td>{sample.load_1_milli == null ? "—" : (sample.load_1_milli / 1000).toFixed(2)}</td></tr>)}</tbody></table></div></> : <p className={ui.emptyState}>Noch keine Telemetrie verfügbar.</p>}
     </section>
     <section className={ui.panel}>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <span className={ui.muted}>Erhebungsstatus: {inventory.data?.status === "complete" ? "Abgeschlossen" : inventory.data?.status === "not_collected" ? "Noch nicht erhoben" : inventory.isLoading ? "Wird geladen…" : "Unbekannt"}</span>
+        {inventoryJob ? <Link className={ui.textLink} to={`/workflows/${inventoryJob.id}`}>Inventarisierungs-Workflow · {inventoryJob.status}</Link> : <span className={ui.muted}>Kein Inventarisierungs-Workflow vorhanden</span>}
+      </div>
       {inventory.isLoading ? <p className={ui.muted}>Paketinventar wird geladen…</p> : null}
       {inventory.error ? <p className={ui.errorState} role="alert">{inventory.error.message}</p> : null}
       {inventory.data?.status === "not_collected" ? <div className={cn(ui.callout, ui.calloutInfo)}><strong>Noch kein Paketinventar</strong><p>Die erste Inventarisierung wird nach dem Onboarding eingereiht. Anschließend erscheint hier die vollständige, durchsuchbare Paketliste.</p></div> : null}
