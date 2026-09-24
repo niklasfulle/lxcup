@@ -1,12 +1,12 @@
+[CmdletBinding()]
 param(
-    [string]$DatabaseUrl = $env:DATABASE_URL,
-    [string]$BackupDirectory = ".\backups"
+    [Parameter(Mandatory = $true)]
+    [string]$AgeRecipient,
+    [string]$BackupDirectory = ".\backups",
+    [ValidateRange(1, 3650)]
+    [int]$RetentionDays = 30
 )
 
 $ErrorActionPreference = "Stop"
-if ([string]::IsNullOrWhiteSpace($DatabaseUrl)) { throw "DATABASE_URL must be configured outside the repository." }
-New-Item -ItemType Directory -Force -Path $BackupDirectory | Out-Null
-$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$output = Join-Path $BackupDirectory "lxcup-$timestamp.dump"
-pg_dump --format=custom --file=$output $DatabaseUrl
-Write-Host "PostgreSQL backup created: $output"
+Write-Warning "This compatibility command creates a full encrypted stack backup; standalone plaintext database dumps are no longer created."
+& (Join-Path $PSScriptRoot "backup-stack.ps1") -AgeRecipient $AgeRecipient -BackupDirectory $BackupDirectory -RetentionDays $RetentionDays

@@ -48,14 +48,26 @@ oder im Repository gespeichert:
 ```
 
 Die Aufbewahrung beträgt standardmäßig 30 Tage und kann mit
-`-RetentionDays` angepasst werden. Für einen regelmäßigen isolierten
-Restore-Test muss `DATABASE_TEST_URL` auf eine dedizierte Testdatenbank zeigen:
+`-RetentionDays` angepasst werden. Speichere das verschlüsselte Archiv nur auf
+einem zugriffsbeschränkten Backup-Ziel, möglichst zusätzlich außerhalb des
+Hosts. Der Age-Private-Key und `LXCUP_SECRET_MASTER_KEY` müssen getrennt vom
+Archiv in einem Passwortmanager, Secret Manager oder KMS liegen. Das lokale
+Verzeichnis `backups` ist kein Ersatz für ein externes/offsite Backup.
+
+Für einen regelmäßigen isolierten Restore-Test muss `DATABASE_TEST_URL` auf
+eine dedizierte, entbehrliche Testdatenbank zeigen. Das Skript verlangt eine
+explizite Bestätigung und akzeptiert nur Datenbanknamen mit `test` oder
+`restore`, da `pg_restore --clean` vorhandene Testdaten ersetzt:
 
 ```powershell
-.\scripts\restore-backup-test.ps1 -BackupFile .\backups\lxcup-<timestamp>.tar.age -AgeIdentity $env:LXCUP_BACKUP_AGE_IDENTITY
+.\scripts\restore-backup-test.ps1 -BackupFile .\backups\lxcup-<timestamp>.tar.age -AgeIdentity $env:LXCUP_BACKUP_AGE_IDENTITY -ConfirmIsolatedDatabase
 ```
 
-Das Wiederherstellungsziel führt anschließend die SQLx-Migrationen und die
-Persistence-Integrationstests aus. Das Recovery-Ziel (RPO 24 Stunden, RTO 1
-Stunde) und die getrennte Aufbewahrung von Age-Identität und Backup müssen im
-externen Secret-/KMS-System dokumentiert werden.
+Der Restore-Test spielt die Datenbank wieder ein, führt ausstehende SQLx-
+Migrationen aus, prüft die Ziel-/Agent-Secret-Referenzen gegen das
+wiederhergestellte Secret-Store-Verzeichnis, validiert die verschlüsselten
+aktiven Secret-Werte ohne sie auszugeben und liest Audit-Datensätze. Ein
+falscher Master-Key oder ein unvollständiges Archiv lässt den Test fehlschlagen.
+Automatisiere Backup und Restore-Test mindestens täglich bzw. wöchentlich; Ziel
+ist RPO 24 Stunden und RTO 1 Stunde. Bewahre Backups und beide Schlüssel in
+getrennten, zugriffsbeschränkten Systemen auf.
