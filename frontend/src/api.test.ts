@@ -66,6 +66,18 @@ describe("ApiClient", () => {
     expect(request).not.toHaveProperty("shell");
   });
 
+  it("sends bearer tokens only as authorization headers and rejects viewer mutations locally", async () => {
+    const client = new ApiClient();
+    client.setCredentials("opaque-test-token", "viewer");
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [], request_id: "req-auth" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await client.get("/api/v1/targets");
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(init.headers).get("authorization")).toBe("Bearer opaque-test-token");
+    await expect(client.post("/api/v1/targets", {})).rejects.toMatchObject({ status: 403, code: "permission_denied" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("exposes typed resource helpers with the expected endpoints and payloads", async () => {
     const get = vi.spyOn(apiClient, "get").mockResolvedValue([] as never);
     const post = vi.spyOn(apiClient, "post").mockResolvedValue({} as never);
@@ -99,19 +111,24 @@ describe("ApiClient", () => {
     del.mockRestore();
   });
 
-  it("closes SSE subscriptions and reports malformed events", () => {
-    const source = { addEventListener: vi.fn(), removeEventListener: vi.fn(), close: vi.fn(), onerror: null as (() => void) | null };
-    vi.stubGlobal("EventSource", vi.fn(() => source));
+  it("authenticates SSE streams, parses frames and closes subscriptions", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(encoder.encode('event: status\ndata: {"type":"Status","payload":{"resource":"target","resource_id":"t","state":"managed"}}\n\nevent: log\ndata: not-json\n\n'));
+      controller.close();
+    } });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(stream, { headers: { "content-type": "text/event-stream" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient();
+    client.setCredentials("event-token", "admin");
     const onEvent = vi.fn();
     const onError = vi.fn();
-    const unsubscribe = apiClient.subscribe(onEvent, onError);
-    const handler = source.addEventListener.mock.calls[0][1] as (event: MessageEvent<string>) => void;
-    handler({ data: JSON.stringify({ type: "Log", payload: { source: "worker", message: "ok" } }) } as MessageEvent<string>);
-    handler({ data: "not-json" } as MessageEvent<string>);
-    source.onerror?.();
+    const unsubscribe = client.subscribe(onEvent, onError);
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1));
     unsubscribe();
     expect(onEvent).toHaveBeenCalledTimes(1);
-    expect(onError).toHaveBeenCalledTimes(2);
-    expect(source.close).toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer event-token");
+    expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("event-token");
   });
 });

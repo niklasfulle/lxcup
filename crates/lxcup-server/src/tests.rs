@@ -1263,8 +1263,13 @@ async fn ansible_job_endpoint_accepts_healthcheck_and_is_idempotent() {
 async fn configured_auth_protects_api_but_not_health() {
     let state = ApiState::new().with_auth_config(
         AuthConfig::disabled()
-            .with_tokens(Some("viewer".to_owned()), Some("operator".to_owned()), None)
-            .required(true),
+            .with_tokens(
+                Some("viewer-secret".to_owned()),
+                Some("operator-secret".to_owned()),
+                None,
+            )
+            .required(true)
+            .with_token_ttl(std::time::Duration::from_secs(3600)),
     );
     let api_response = router(state.clone())
         .clone()
@@ -1277,6 +1282,78 @@ async fn configured_auth_protects_api_but_not_health() {
         .await
         .unwrap();
     assert_eq!(api_response.status(), StatusCode::UNAUTHORIZED);
+
+    let viewer_session = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/session")
+                .header("authorization", "Bearer viewer-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(viewer_session.status(), StatusCode::OK);
+    let session_body = axum::body::to_bytes(viewer_session.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let session: serde_json::Value = serde_json::from_slice(&session_body).unwrap();
+    assert_eq!(session["data"]["role"], "viewer");
+    assert!(session["data"]["expires_in_seconds"].is_number());
+    assert!(!session.to_string().contains("viewer-secret"));
+
+    let viewer_mutation = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/targets")
+                .header("authorization", "Bearer viewer-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(viewer_mutation.status(), StatusCode::FORBIDDEN);
+
+    let viewer_logout = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/auth/logout")
+                .header("authorization", "Bearer viewer-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(viewer_logout.status(), StatusCode::NO_CONTENT);
+
+    let unauthenticated_events = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated_events.status(), StatusCode::UNAUTHORIZED);
+
+    let operator_config_attempt = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/targets")
+                .header("authorization", "Bearer operator-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(!matches!(
+        operator_config_attempt.status(),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
 
     let health_response = router(state)
         .oneshot(

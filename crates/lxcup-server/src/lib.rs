@@ -66,17 +66,16 @@ pub(crate) use policies::{create_update_policy, list_update_policies};
 mod inventory;
 pub use inventory::AuthConfig;
 pub(crate) use inventory::{
-    ApiMetrics, abort_execution, confirm_plan, create_plan, get_execution_result, get_plan,
-    list_container_plans, list_containers, list_scans, live_health, logout, metrics, ready_health,
-    reconcile_execution, request_middleware, run_execution, run_scan, start_scan,
+    ApiMetrics, abort_execution, auth_session, confirm_plan, create_plan, get_execution_result,
+    get_plan, list_container_plans, list_containers, list_scans, live_health, logout, metrics,
+    ready_health, reconcile_execution, request_middleware, run_execution, run_scan, start_scan,
 };
 mod agent;
 pub(crate) use agent::{
-    DockerWorkloadDto, SecretAuditEvent, adopt_docker_container,
-    create_secret, delete_secret, discover_docker_containers, get_agent_health, get_agent_metrics,
-    get_docker_discovery, get_secret, list_docker_containers, list_secret_audit, list_secrets,
-    map_secret_error, register_agent, remove_docker_container, revoke_agent, revoke_secret,
-    rotate_secret,
+    DockerWorkloadDto, SecretAuditEvent, adopt_docker_container, create_secret, delete_secret,
+    discover_docker_containers, get_agent_health, get_agent_metrics, get_docker_discovery,
+    get_secret, list_docker_containers, list_secret_audit, list_secrets, map_secret_error,
+    register_agent, remove_docker_container, revoke_agent, revoke_secret, rotate_secret,
 };
 
 #[derive(Clone)]
@@ -578,6 +577,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/health/live", get(live_health))
         .route("/health/ready", get(ready_health))
         .route("/metrics", get(metrics))
+        .route("/api/v1/auth/session", get(auth_session))
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/targets", get(list_targets).post(create_target))
         .route(

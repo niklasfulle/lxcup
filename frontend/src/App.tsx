@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink, Route, Routes } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { apiClient, type ApiEvent } from "./api";
+import { ApiError, apiClient, type ApiEvent, type AuthRole, type AuthSession } from "./api";
 import { queryKeys, useAnsibleJobs, useTargets, useWorkerAvailability } from "./queries";
 import { Dashboard } from "./pages/Dashboard";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
@@ -18,6 +18,59 @@ import { TaskMonitor, type GlobalEvent } from "./components/TaskMonitor";
 import { cn, ui } from "./ui";
 
 export default function App() {
+  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiClient.setUnauthorizedHandler(() => {
+      apiClient.setCredentials(null);
+      setAuthSession(null);
+      setAuthError(null);
+    });
+    return () => apiClient.setUnauthorizedHandler(null);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void apiClient.getSession().then((session) => {
+      if (active) { apiClient.setCredentials(null, session.role); setAuthSession(session); setAuthReady(true); }
+    }).catch((error: unknown) => {
+      if (!active) return;
+      setAuthError(error instanceof ApiError && error.status === 401 ? null : "Die API-Sitzung konnte nicht geprüft werden.");
+      setAuthReady(true);
+    });
+    return () => { active = false; };
+  }, []);
+
+  const login = async (token: string) => {
+    apiClient.setCredentials(token);
+    try {
+      const session = await apiClient.getSession();
+      apiClient.setCredentials(token, session.role);
+      setAuthSession(session);
+      setAuthError(null);
+      return true;
+    } catch {
+      apiClient.setCredentials(null);
+      return false;
+    }
+  };
+
+  const logout = async () => {
+    try { await apiClient.logout(); } catch { /* Local logout still clears the credential. */ }
+    apiClient.setCredentials(null);
+    setAuthSession(null);
+    setAuthError(null);
+  };
+
+  if (!authReady) return <AuthMessage message="Sitzung wird geprüft …" />;
+  if (authError) return <AuthMessage message={authError} />;
+  if (!authSession) return <LoginScreen onLogin={login} />;
+  return <AuthenticatedApp session={authSession} onLogout={logout} />;
+}
+
+function AuthenticatedApp({ session, onLogout }: Readonly<{ session: AuthSession; onLogout: () => void }>) {
   const queryClient = useQueryClient();
   const [connectionState, setConnectionState] = useState("verbunden");
   const [streamError, setStreamError] = useState<string | null>(null);
@@ -72,9 +125,11 @@ export default function App() {
       <main className={ui.mainContent}>
         <header className={ui.topbar}>
           <div className={ui.topbarContext}><span className={ui.environmentLabel}>Datacenter</span><strong>lxcup-control</strong><span className={ui.muted}>/ Übersicht</span></div>
-          <div className={ui.topbarActions}><NotificationCenter /><span className={ui.userPill}>Admin</span><button className={ui.button} type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="Theme wechseln">{theme === "dark" ? "☼" : "☾"}</button></div>
+          <div className={ui.topbarActions}><NotificationCenter /><span className={ui.userPill} title={session.expires_in_seconds === null ? "Authentifizierung in dieser Umgebung deaktiviert" : `Token läuft in ${formatDuration(session.expires_in_seconds)} ab`}>{roleLabel(session.role)}</span><button className={ui.button} type="button" onClick={() => void onLogout()}>Abmelden</button><button className={ui.button} type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label="Theme wechseln">{theme === "dark" ? "☼" : "☾"}</button></div>
         </header>
         <div className={ui.contentArea}>
+          {session.role === "viewer" ? <div className={ui.callout}>Viewer-Zugriff: Änderungen und Workflow-Ausführungen sind deaktiviert.</div> : null}
+          {session.role === "operator" ? <div className={ui.callout}>Operator-Zugriff: Ziele und freigegebene Workflows verwalten; Secret-Verwaltung und destruktive Aktionen erfordern Admin.</div> : null}
           {streamError ? <div className={ui.apiAlert} role="alert">{streamError}</div> : null}
           <WorkerAvailabilityBanner />
           <TaskMonitor events={events} onClear={() => setEvents([])} />
@@ -100,6 +155,28 @@ export default function App() {
     </div>
   );
 }
+
+function LoginScreen({ onLogin }: Readonly<{ onLogin: (token: string) => Promise<boolean> }>) {
+  const [token, setToken] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setPending(true);
+    setError(null);
+    const accepted = await onLogin(token.trim());
+    setPending(false);
+    if (!accepted) { setToken(""); setError("Token ungültig oder abgelaufen. Bitte erneut versuchen."); }
+  };
+  return <main className="grid min-h-screen place-items-center bg-[var(--paper)] p-4 text-[var(--ink)]"><form className="grid w-full max-w-sm gap-3 border border-[var(--line)] bg-[var(--panel)] p-5 shadow-xl" onSubmit={(event) => void submit(event)}><div><h1 className="m-0 text-xl font-semibold">Bei lxcup anmelden</h1><p className="mt-1 text-sm text-[var(--muted)]">Gib das Viewer-, Operator- oder Admin-Token ein.</p></div><label className="grid gap-1 text-xs font-semibold">API-Token<input autoComplete="off" autoFocus className="border border-[var(--line)] bg-[var(--paper)] p-2 text-sm" type="password" value={token} onChange={(event) => setToken(event.target.value)} required /></label>{error ? <p className="m-0 text-sm text-[var(--error)]" role="alert">{error}</p> : null}<button className={ui.primaryButton} type="submit" disabled={pending || token.trim().length === 0}>{pending ? "Prüfe Token …" : "Anmelden"}</button><small className="text-[var(--muted)]">Das Token bleibt nur bis zum Schließen oder Neuladen dieses Tabs im Arbeitsspeicher.</small></form></main>;
+}
+
+function AuthMessage({ message }: Readonly<{ message: string }>) {
+  return <main className="grid min-h-screen place-items-center bg-[var(--paper)] p-4 text-sm text-[var(--ink)]" role="status">{message}</main>;
+}
+
+function roleLabel(role: AuthRole) { return role === "admin" ? "Admin" : role === "operator" ? "Operator" : "Viewer"; }
+function formatDuration(seconds: number) { return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`; }
 
 function WorkerAvailabilityBanner() {
   const availability = useWorkerAvailability();

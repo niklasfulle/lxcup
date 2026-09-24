@@ -97,13 +97,31 @@ geprüft, bevor erneut angewendet wird.
 Für einen produktiven Start muss `LXCUP_ENV=production` gesetzt sein. Der
 Server verweigert den Start, wenn `DATABASE_URL`, `LXCUP_SECRET_MASTER_KEY`
 oder drei unterschiedliche Rollen-Token fehlen. Die Viewer-, Operator- und
-Admin-Tokens müssen jeweils mindestens 16 Zeichen lang sein. Mit
-`LXCUP_AUTH_TOKEN_TTL_SECONDS` kann die Token-Lebensdauer begrenzt werden
-(Standard: 8 Stunden). Viewer dürfen nur
-lesen, Operatoren konfigurieren und Workflows ausführen, Administratoren
-zusätzlich Secrets und destruktive Aktionen verwalten. Logout erfolgt durch
-Widerruf oder Rotation des verwendeten Tokens; Secret- und Tokenwerte werden
-nie geloggt oder in API-Antworten ausgegeben.
+Admin-Tokens müssen jeweils mindestens 16 Zeichen lang sein. Der produktive
+Browserzugriff muss ausschließlich über TLS erfolgen, weil die Bearer-Tokens
+sonst im Klartext übertragen werden. Mit
+`LXCUP_AUTH_TOKEN_TTL_SECONDS` setzt die Token-Lebensdauer ab Serverstart
+(Standard: 8 Stunden). Bei Ablauf müssen Benutzer sich erneut anmelden; der
+Server verweigert dann alle Anfragen mit diesem Token bis zum Neustart mit
+neuen Tokens. Viewer dürfen lesen, Operatoren Ziele konfigurieren und
+freigegebene Workflows ausführen. Nur Administratoren dürfen Secrets anlegen,
+rotieren oder widerrufen sowie destruktive Aktionen ausführen. Sensible
+Workflow-Rechte werden zusätzlich anhand der registrierten Operation
+serverseitig geprüft.
+
+Das Frontend fragt `/api/v1/auth/session` ab und fordert bei aktivierter
+Authentifizierung ein Viewer-, Operator- oder Admin-Token an. Das Token wird
+nicht in Local Storage oder Cookies gespeichert, sondern nur im Speicher der
+aktuellen Browser-Registerkarte gehalten; Schließen oder Neuladen meldet den
+Benutzer lokal ab. Die Echtzeitverbindung verwendet denselben Bearer-Token über
+eine authentifizierte HTTP-Stream-Anfrage (das Token wird nicht in eine URL
+geschrieben). `/health/live`, `/health/ready` und `/metrics` bleiben öffentlich;
+der Agent-Heartbeat authentifiziert sich separat mit dem pro Ziel hinterlegten
+Agent-Token. API-Antworten enthalten für ungültige/abgelaufene Tokens `401`, für
+authentifizierte Rollen ohne Berechtigung `403`. Logout verwirft das Token im
+Browser, widerruft aber kein serverseitiges Rollen-Token. Für sofortige
+Invalidierung ein Token in der Serverkonfiguration ersetzen und den Server
+neu starten. Tokenwerte werden nie geloggt oder in API-Antworten ausgegeben.
 
 ## Compose-Onboarding-E2E-Test
 

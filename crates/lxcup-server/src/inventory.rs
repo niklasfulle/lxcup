@@ -46,6 +46,22 @@ pub(super) async fn logout(axum::Extension(_actor_role): axum::Extension<ActorRo
     StatusCode::NO_CONTENT
 }
 
+#[derive(serde::Serialize)]
+pub(super) struct AuthSessionDto {
+    role: ActorRole,
+    expires_in_seconds: Option<u64>,
+}
+
+pub(super) async fn auth_session(
+    State(state): State<ApiState>,
+    axum::Extension(role): axum::Extension<ActorRole>,
+) -> Json<ApiEnvelope<AuthSessionDto>> {
+    Json(envelope(AuthSessionDto {
+        role,
+        expires_in_seconds: state.auth.remaining_ttl_seconds(),
+    }))
+}
+
 pub(super) async fn list_scans(
     State(state): State<ApiState>,
     Path(container_id): Path<String>,
@@ -110,17 +126,20 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer viewer".parse().unwrap());
         assert_eq!(config.role(&headers), Some(ActorRole::Viewer));
-        assert!(config.allows(&Method::GET, &headers));
-        assert!(!config.allows(&Method::POST, &headers));
+        assert!(config.allows("/api/v1/targets", &Method::GET, &ActorRole::Viewer));
+        assert!(!config.allows("/api/v1/targets", &Method::POST, &ActorRole::Viewer));
+        assert!(config.allows("/api/v1/auth/logout", &Method::POST, &ActorRole::Viewer));
+        assert!(config.allows("/api/v1/ansible/jobs", &Method::POST, &ActorRole::Viewer));
         headers.insert("authorization", "Bearer operator".parse().unwrap());
         assert_eq!(config.role(&headers), Some(ActorRole::Operator));
-        assert!(config.allows(&Method::POST, &headers));
+        assert!(config.allows("/api/v1/targets", &Method::POST, &ActorRole::Operator));
+        assert!(!config.allows("/api/v1/secrets", &Method::POST, &ActorRole::Operator));
+        assert!(!config.allows("/api/v1/targets/id", &Method::DELETE, &ActorRole::Operator));
         headers.insert("authorization", "Bearer admin".parse().unwrap());
         assert_eq!(config.role(&headers), Some(ActorRole::Admin));
-        assert!(config.allows(&Method::DELETE, &headers));
+        assert!(config.allows("/api/v1/secrets/id", &Method::DELETE, &ActorRole::Admin));
         headers.insert("authorization", "Bearer unknown".parse().unwrap());
         assert_eq!(config.role(&headers), None);
-        assert!(!config.allows(&Method::GET, &headers));
     }
 
     #[test]
@@ -273,15 +292,41 @@ impl AuthConfig {
         self
     }
 
-    fn allows(&self, method: &Method, headers: &HeaderMap) -> bool {
-        if !self.required {
+    fn remaining_ttl_seconds(&self) -> Option<u64> {
+        self.token_expires_at.map(|expires_at| {
+            expires_at
+                .saturating_duration_since(Instant::now())
+                .as_secs()
+        })
+    }
+
+    fn allows(&self, path: &str, method: &Method, role: &ActorRole) -> bool {
+        if path == "/api/v1/auth/logout" {
             return true;
         }
-        self.role(headers).is_some_and(|role| {
-            role == lxcup_core::ActorRole::Admin
-                || role == lxcup_core::ActorRole::Operator
-                || (method == Method::GET && role == lxcup_core::ActorRole::Viewer)
-        })
+        if method == Method::GET || method == Method::HEAD {
+            return role.grants(lxcup_core::Permission::Read);
+        }
+        // Workflow permissions depend on the registered operation and are
+        // checked by the handler after parsing the request body.
+        if (path == "/api/v1/ansible/jobs"
+            || path.ends_with("/scans")
+            || path.starts_with("/api/v1/scans/"))
+            && method == Method::POST
+        {
+            return true;
+        }
+        let permission = if method == Method::DELETE
+            || path.ends_with("/revoke")
+            || path.ends_with("/disable")
+            || path.ends_with("/abort")
+            || (path.starts_with("/api/v1/secrets") && method != Method::GET)
+        {
+            lxcup_core::Permission::Destructive
+        } else {
+            lxcup_core::Permission::Configure
+        };
+        role.grants(permission)
     }
 
     fn role(&self, headers: &HeaderMap) -> Option<ActorRole> {
@@ -359,11 +404,23 @@ pub(super) async fn request_middleware(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| Uuid::parse_str(value).ok())
         .unwrap_or_else(Uuid::new_v4);
-    let public = path == "/health/live" || path == "/health/ready" || path == "/metrics";
-    if !public && !state.auth.allows(request.method(), request.headers()) {
+    // The heartbeat handler validates its own per-target agent token.
+    let public = path == "/health/live"
+        || path == "/health/ready"
+        || path == "/metrics"
+        || path == "/api/v1/agents/heartbeat";
+    let role = state.auth.role(request.headers());
+    if !public && role.is_none() {
         return ApiError::unauthorized().into_response();
     }
-    if let Some(role) = state.auth.role(request.headers()) {
+    if let Some(role) = role {
+        if !public && !state.auth.allows(&path, request.method(), &role) {
+            return ApiError::forbidden(
+                "permission_denied",
+                "the current role cannot perform this action",
+            )
+            .into_response();
+        }
         request.extensions_mut().insert(role);
     }
     request.extensions_mut().insert(request_id);

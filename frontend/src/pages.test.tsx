@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ContainerDto, DockerWorkloadDto, SecretMetadata, TargetDto, WorkerAvailabilityDto } from "./api";
+import { ApiError, type ContainerDto, type DockerWorkloadDto, type SecretMetadata, type TargetDto, type WorkerAvailabilityDto } from "./api";
 
 const mocks = vi.hoisted(() => ({
   targets: { data: [] as TargetDto[], isLoading: false, error: null as Error | null },
@@ -33,6 +33,10 @@ const mocks = vi.hoisted(() => ({
   adoptDockerWorkload: vi.fn(async () => undefined),
   removeDockerWorkload: vi.fn(async () => undefined),
   subscribe: vi.fn(() => () => undefined),
+  setCredentials: vi.fn(),
+  setUnauthorizedHandler: vi.fn(),
+  getSession: vi.fn(async () => ({ role: "admin" as const, expires_in_seconds: null })),
+  logout: vi.fn(async () => undefined),
 }));
 
 const userEvent = {
@@ -64,7 +68,7 @@ vi.mock("./queries", () => ({
 
 vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
-  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe } };
+  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe, setCredentials: mocks.setCredentials, setUnauthorizedHandler: mocks.setUnauthorizedHandler, getSession: mocks.getSession, logout: mocks.logout } };
 });
 
 import { Dashboard } from "./pages/Dashboard";
@@ -608,6 +612,17 @@ describe("workflow pages", () => {
 });
 
 describe("application shell", () => {
+  it("asks for a bearer token and exposes the verified read-only role", async () => {
+    mocks.getSession.mockRejectedValueOnce(new ApiError("authentication required", 401, "unauthorized"));
+    mocks.getSession.mockResolvedValueOnce({ role: "viewer", expires_in_seconds: 3600 });
+    renderPage(<App />);
+    expect(await screen.findByRole("heading", { name: "Bei lxcup anmelden" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("API-Token"), { target: { value: "viewer-token" } });
+    await userEvent.click(screen.getByRole("button", { name: "Anmelden" }));
+    expect(await screen.findByText("Viewer-Zugriff: Änderungen und Workflow-Ausführungen sind deaktiviert.")).toBeInTheDocument();
+    expect(mocks.setCredentials).toHaveBeenLastCalledWith("viewer-token", "viewer");
+  });
+
   it("renders navigation and an SSE error notification", async () => {
     mocks.subscribe.mockImplementation(((onEvent: any, onError: any) => {
       onEvent({ type: "Status", payload: { resource: "node", resource_id: "node-1", state: "online" } });
@@ -620,6 +635,7 @@ describe("application shell", () => {
     mocks.workerAvailability.data = { available: false, last_seen_at: null };
     mocks.jobs.data = [{ id: "job-alert", operation: "deploy_agent", playbook: "agent/deploy.yml", playbook_version: "1", target: { target: "target-1" }, mode: "apply", status: "failed", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" }, { id: "job-reconcile", operation: "health_check", playbook: "health.yml", playbook_version: "1", target: { target: "target-1" }, mode: "check", status: "reconcile_required", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" }] as any;
     renderPage(<App />);
+    await screen.findByRole("link", { name: "lxcup Übersicht" });
     expect(screen.getByRole("link", { name: "lxcup Übersicht" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Server" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "LXC-Container" })).toBeInTheDocument();
@@ -640,6 +656,6 @@ describe("application shell", () => {
     await userEvent.click(screen.getByRole("button", { name: "Theme wechseln" }));
     cleanup();
     renderPage(<App />, "/unknown");
-    expect(screen.getByText("Seite nicht gefunden")).toBeInTheDocument();
+    expect(await screen.findByText("Seite nicht gefunden")).toBeInTheDocument();
   });
 });

@@ -165,6 +165,8 @@ export type ApiErrorBody = {
   error?: { code: string; message: string };
   request_id?: string;
 };
+export type AuthRole = "viewer" | "operator" | "admin";
+export type AuthSession = { role: AuthRole; expires_in_seconds: number | null };
 
 export type ApiEvent =
   | { type: "Task"; payload: { task_id: string; state: string } }
@@ -186,7 +188,28 @@ export class ApiError extends Error {
 }
 
 export class ApiClient {
+  private token: string | null = null;
+  private role: AuthRole | null = null;
+  private unauthorizedHandler: (() => void) | null = null;
+
   constructor(private readonly baseUrl = import.meta.env.VITE_API_BASE_URL ?? "") {}
+
+  setCredentials(token: string | null, role: AuthRole | null = null) {
+    this.token = token;
+    this.role = token === null ? null : role;
+  }
+
+  setUnauthorizedHandler(handler: (() => void) | null) {
+    this.unauthorizedHandler = handler;
+  }
+
+  async getSession(signal?: AbortSignal) {
+    return this.get<AuthSession>("/api/v1/auth/session", signal);
+  }
+
+  async logout(signal?: AbortSignal) {
+    return this.post<void>("/api/v1/auth/logout", undefined, signal);
+  }
 
   async get<T>(path: string, signal?: AbortSignal): Promise<T> {
     return this.request<T>(path, { signal });
@@ -211,23 +234,50 @@ export class ApiClient {
   }
 
   subscribe(onEvent: (event: ApiEvent) => void, onError?: () => void): () => void {
-    const source = new EventSource(`${this.baseUrl}/api/v1/events`);
-    const eventTypes = ["task", "log", "status", "error"] as const;
-    const handlers = eventTypes.map((type) => {
-      const handler = (event: MessageEvent<string>) => {
-        try {
-          onEvent(JSON.parse(event.data) as ApiEvent);
-        } catch {
-          onError?.();
+    let stopped = false;
+    let retryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+    let controller: AbortController | undefined;
+    const connect = async () => {
+      controller = new AbortController();
+      try {
+        const headers = new Headers({ accept: "text/event-stream" });
+        if (this.token) headers.set("authorization", `Bearer ${this.token}`);
+        const response = await fetch(`${this.baseUrl}/api/v1/events`, { headers, cache: "no-store", signal: controller.signal });
+        if (response.status === 401) {
+          this.unauthorizedHandler?.();
+          stopped = true;
+          return;
         }
-      };
-      source.addEventListener(type, handler);
-      return [type, handler] as const;
-    });
-    source.onerror = () => onError?.();
+        if (!response.ok || !response.body) throw new ApiError("Die Echtzeitverbindung wurde abgelehnt.", response.status, "event_stream_error");
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (!stopped) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true }).replaceAll("\r\n", "\n");
+          let boundary = buffer.indexOf("\n\n");
+          while (boundary >= 0) {
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const type = frame.split("\n").find((line) => line.startsWith("event:"))?.slice(6).trim();
+            const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+            if (type && data) {
+              try { onEvent(JSON.parse(data) as ApiEvent); } catch { onError?.(); }
+            }
+            boundary = buffer.indexOf("\n\n");
+          }
+        }
+      } catch (error) {
+        if (!stopped && !(error instanceof DOMException && error.name === "AbortError")) onError?.();
+      }
+      if (!stopped) retryTimer = globalThis.setTimeout(() => void connect(), 1000);
+    };
+    void connect();
     return () => {
-      handlers.forEach(([type, handler]) => source.removeEventListener(type, handler));
-      source.close();
+      stopped = true;
+      if (retryTimer !== undefined) globalThis.clearTimeout(retryTimer);
+      controller?.abort();
     };
   }
 
@@ -245,10 +295,29 @@ export class ApiClient {
   }
 
   private async requestAttempt<T>(path: string, init: RequestInit | undefined, attempt: number, maxAttempts: number): Promise<T> {
+    const method = (init?.method ?? "GET").toUpperCase();
+    let workflowOperation: string | undefined;
+    if (path === "/api/v1/ansible/jobs" && method === "POST") {
+      try { workflowOperation = (JSON.parse(String(init?.body ?? "{}")) as { operation?: string }).operation; } catch { /* The API returns the canonical malformed-body error. */ }
+    }
+    const readOnlyPost = path === "/api/v1/auth/logout"
+      || (path === "/api/v1/ansible/jobs" && ["health_check", "collect_package_inventory"].includes(workflowOperation ?? ""))
+      || path.endsWith("/scans")
+      || /^\/api\/v1\/scans\/[^/]+\/run$/.test(path);
+    if (this.role === "viewer" && method !== "GET" && method !== "HEAD" && !readOnlyPost) {
+      throw new ApiError("Deine Rolle darf keine Änderungen ausführen.", 403, "permission_denied");
+    }
+    const destructive = method === "DELETE" || /\/(revoke|disable|abort)$/.test(path);
+    if (this.role === "operator" && (destructive || (path.startsWith("/api/v1/secrets") && method !== "GET"))) {
+      throw new ApiError("Für diese Aktion ist die Admin-Rolle erforderlich.", 403, "permission_denied");
+    }
+    const headers = new Headers(init?.headers);
+    if (this.token) headers.set("authorization", `Bearer ${this.token}`);
+    headers.set("accept", "application/json");
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
       cache: "no-store",
-      headers: { accept: "application/json", ...init?.headers },
+      headers,
     });
     const text = await response.text();
     if (response.status === 204) return undefined as T;
@@ -256,6 +325,7 @@ export class ApiClient {
     if (!response.ok) {
       const error = payload as ApiErrorBody | undefined;
       const retryable = response.status >= 500;
+      if (response.status === 401) this.unauthorizedHandler?.();
       if (retryable && attempt + 1 < maxAttempts) {
         await delay(attempt);
         return this.requestAttempt<T>(path, init, attempt + 1, maxAttempts);
