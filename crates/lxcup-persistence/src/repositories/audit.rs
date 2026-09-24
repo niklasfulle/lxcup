@@ -1,6 +1,7 @@
 use super::{
     AuditEvent, AuditEventRepository, Database, ExecutionId, NodeId, RepositoryError, UpdatePlanId,
 };
+use sqlx::Row;
 
 impl AuditEventRepository {
     pub(crate) fn new(database: &Database) -> Self {
@@ -24,5 +25,27 @@ impl AuditEventRepository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn list_secret_events(&self) -> Result<Vec<AuditEvent>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT id, event_type, details, created_at FROM audit_events WHERE event_type LIKE 'secret.%' ORDER BY created_at DESC LIMIT 500",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(AuditEvent {
+                    id: row.try_get("id")?,
+                    node_id: None,
+                    container_id: None,
+                    plan_id: None,
+                    execution_id: None,
+                    event_type: row.try_get("event_type")?,
+                    details: row.try_get("details")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
     }
 }

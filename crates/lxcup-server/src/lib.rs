@@ -51,7 +51,7 @@ pub(crate) use targets::{
 mod workflows;
 pub(crate) use workflows::{
     create_ansible_job, create_enrollment, get_ansible_job, get_ansible_job_events, get_enrollment,
-    list_ansible_jobs, retry_ansible_job,
+    list_ansible_jobs, queue_agent_reconfiguration, retry_ansible_job,
 };
 mod worker;
 pub(crate) use worker::get_worker_availability;
@@ -412,11 +412,16 @@ impl ApiState {
     pub async fn invalidate_agents_for_secret(&self, secret_id: SecretId) {
         if let Some(repositories) = self.repositories.as_ref() {
             if let Ok(registrations) = repositories.agent_registrations.list().await {
-                for registration in registrations
-                    .into_iter()
-                    .filter(|item| item.secret_ref == secret_id)
-                {
+                for registration in registrations.into_iter().filter(|item| {
+                    item.secret_ref == secret_id || item.ca_secret_ref == Some(secret_id)
+                }) {
                     self.agents.write().await.remove(&registration.container_id);
+                    let mut registration = registration;
+                    registration.record_unreachable(
+                        chrono::Utc::now(),
+                        "agent credentials changed; re-register or redeploy the agent",
+                    );
+                    let _ = repositories.agent_registrations.save(&registration).await;
                     self.publish(ApiEvent::status(
                         "agent",
                         registration.container_id.value().to_string(),
@@ -425,17 +430,31 @@ impl ApiState {
                 }
             }
         }
-        let affected_targets = self
-            .store
-            .read()
-            .await
-            .targets
-            .iter()
-            .filter(|target| {
-                target.credential_secret_ref == secret_id || target.agent_secret_ref == secret_id
-            })
-            .map(|target| target.id)
-            .collect::<Vec<_>>();
+        let (affected_targets, changed_targets) = {
+            let mut store = self.store.write().await;
+            let mut affected = Vec::new();
+            let mut changed = Vec::new();
+            for target in &mut store.targets {
+                if target.credential_secret_ref == secret_id
+                    || target.agent_secret_ref == secret_id
+                    || target.ssh_known_hosts_secret_ref == Some(secret_id)
+                {
+                    affected.push(target.id);
+                    if target.agent_secret_ref == secret_id && target.state != TargetState::Disabled
+                    {
+                        target.state = TargetState::Pending;
+                        target.updated_at = chrono::Utc::now();
+                        changed.push(target.clone());
+                    }
+                }
+            }
+            (affected, changed)
+        };
+        if let Some(repositories) = self.repositories.as_ref() {
+            for target in changed_targets {
+                let _ = repositories.targets.update(&target).await;
+            }
+        }
         let disabled = {
             let mut store = self.store.write().await;
             let mut changed = Vec::new();

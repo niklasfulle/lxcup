@@ -1,4 +1,5 @@
 import { cn, ui } from "../ui";
+import { Link } from "react-router-dom";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -82,7 +83,7 @@ export function SecretsPage() {
       </section>
       <section className={ui.panel}>
         <div className={ui.sectionHeading}><h2>Audit</h2><span className={ui.muted}>Lebenszyklus-Ereignisse</span></div>
-        <ul className={ui.auditList}>{(audit.data ?? []).slice().reverse().map((event, index) => <li key={`${event.secret_id}-${event.occurred_at}-${index}`}><strong>{event.action}</strong><span className={ui.muted}>{event.secret_id} · {new Date(event.occurred_at).toLocaleString()}</span></li>)}</ul>
+        <ul className={ui.auditList}>{(audit.data ?? []).map((event, index) => <li key={`${event.secret_id}-${event.occurred_at}-${index}`}><strong>{event.action}</strong><span className={ui.muted}>{event.secret_id} · {new Date(event.occurred_at).toLocaleString()} · {event.role}</span>{event.related_job_id ? <Link to={`/workflows/${event.related_job_id}`}>Job ansehen</Link> : null}</li>)}</ul>
       </section>
     </>
   );

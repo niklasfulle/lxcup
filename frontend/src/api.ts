@@ -159,7 +159,7 @@ export type SecretMetadata = {
     status: "active" | "revoked";
   };
 };
-export type SecretAuditEvent = { secret_id: string; action: string; role: string; occurred_at: string };
+export type SecretAuditEvent = { secret_id: string; action: string; role: string; occurred_at: string; related_job_id?: string | null };
 
 export type ApiErrorBody = {
   error?: { code: string; message: string };

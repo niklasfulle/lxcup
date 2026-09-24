@@ -13,7 +13,7 @@ use lxcup_ansible::{
 };
 use lxcup_core::{
     ActorRole, ContainerId, ContainerManagementState, EnrollmentId, EnrollmentState,
-    ResourceLifecycle, ResourceTarget, SecretId, TargetId, TargetState,
+    ResourceLifecycle, ResourceTarget, SecretId, Target, TargetId, TargetState,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -217,6 +217,14 @@ pub(super) async fn reconcile_onboarding_jobs(state: &ApiState) -> Result<usize,
                     format!("onboarding-health-{target_id}"),
                     format!("onboarding-inventory-{target_id}"),
                 )
+            } else if let Some(rotation_id) = deployment
+                .idempotency_key
+                .strip_prefix("agent-token-reconfiguration-")
+            {
+                (
+                    format!("agent-token-health-{rotation_id}"),
+                    format!("agent-token-inventory-{rotation_id}"),
+                )
             } else {
                 continue;
             };
@@ -228,6 +236,51 @@ pub(super) async fn reconcile_onboarding_jobs(state: &ApiState) -> Result<usize,
         }
     }
     Ok(queued)
+}
+
+pub(crate) async fn queue_agent_reconfiguration(
+    state: &ApiState,
+    target: &Target,
+    idempotency_key: String,
+) -> Result<Option<AnsibleJob>, ApiError> {
+    if target.state == TargetState::Disabled {
+        return Ok(None);
+    }
+    let resource_target = ResourceTarget::Target(target.id);
+    if let Some(existing) = find_existing_job(state, resource_target, &idempotency_key).await? {
+        return Ok(Some(existing));
+    }
+    let submission = state
+        .ansible
+        .write()
+        .await
+        .submit(AnsibleJobRequest {
+            operation: AnsibleOperation::DeployAgent,
+            target: resource_target,
+            lifecycle: ResourceLifecycle::Pending,
+            mode: ExecutionMode::Apply,
+            parameters: AnsibleParameters::DeployAgent {
+                agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+            },
+            secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
+            idempotency_key,
+            confirmed: true,
+            actor_role: ActorRole::Admin,
+        })
+        .map_err(map_ansible_error)?;
+    let (job, created) = match submission {
+        JobSubmission::Created(job) => (job, true),
+        JobSubmission::Duplicate(job) => (job, false),
+    };
+    if created {
+        persist_created_job(state, &job).await?;
+        state.publish(ApiEvent::status(
+            "ansible_job",
+            job.id.as_uuid().to_string(),
+            "queued",
+        ));
+    }
+    Ok(Some(job))
 }
 
 async fn ensure_deployment_followups(

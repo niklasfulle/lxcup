@@ -188,6 +188,8 @@ pub struct SecretAuditEvent {
     pub action: String,
     pub role: ActorRole,
     pub occurred_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub related_job_id: Option<lxcup_core::AnsibleJobId>,
 }
 
 pub(super) async fn list_secrets(
@@ -221,7 +223,7 @@ pub(super) async fn create_secret(
         })
         .map_err(map_secret_error)?;
     let id = metadata.metadata.id;
-    record_secret_audit(&state, id, "created", actor_role).await;
+    record_secret_audit(&state, id, "created", actor_role, None).await?;
     Ok((
         StatusCode::CREATED,
         Json(envelope(SecretMetadataDto { metadata })),
@@ -230,8 +232,48 @@ pub(super) async fn create_secret(
 
 pub(super) async fn list_secret_audit(
     State(state): State<ApiState>,
-) -> Json<ApiEnvelope<Vec<SecretAuditEvent>>> {
-    Json(envelope(state.store.read().await.secret_audit.clone()))
+) -> Result<Json<ApiEnvelope<Vec<SecretAuditEvent>>>, ApiError> {
+    if let Some(repositories) = state.repositories.as_ref() {
+        let events = repositories
+            .audit_events
+            .list_secret_events()
+            .await
+            .map_err(|_| ApiError::storage())?;
+        let events = events
+            .into_iter()
+            .filter_map(|event| {
+                let secret_id = uuid::Uuid::parse_str(event.details.get("secret_id")?.as_str()?)
+                    .ok()
+                    .map(SecretId::from_uuid)?;
+                let role = match event.details.get("role")?.as_str()? {
+                    "admin" => ActorRole::Admin,
+                    "operator" => ActorRole::Operator,
+                    _ => ActorRole::Viewer,
+                };
+                let related_job_id = event
+                    .details
+                    .get("related_job_id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                    .map(lxcup_core::AnsibleJobId::from_uuid);
+                Some(SecretAuditEvent {
+                    secret_id,
+                    action: event
+                        .event_type
+                        .strip_prefix("secret.")
+                        .unwrap_or(&event.event_type)
+                        .to_owned(),
+                    role,
+                    occurred_at: event.created_at,
+                    related_job_id,
+                })
+            })
+            .collect();
+        return Ok(Json(envelope(events)));
+    }
+    Ok(Json(envelope(
+        state.store.read().await.secret_audit.clone(),
+    )))
 }
 
 pub(super) async fn get_secret(
@@ -259,10 +301,59 @@ pub(super) async fn rotate_secret(
     let id = parse_secret_id(&secret_id)?;
     let value = SecretValue::new(request.value)
         .map_err(|_| ApiError::bad_request("invalid_secret", "the secret value is invalid"))?;
+    let metadata_before = state.secrets.metadata(id).map_err(map_secret_error)?;
     state.secrets.rotate(id, value).map_err(map_secret_error)?;
     state.invalidate_agents_for_secret(id).await;
     let metadata = state.secrets.metadata(id).map_err(map_secret_error)?;
-    record_secret_audit(&state, id, "rotated", actor_role).await;
+    record_secret_audit(&state, id, "rotated", actor_role, None).await?;
+    if metadata_before.metadata.kind == SecretKind::AgentToken {
+        let targets = state
+            .store
+            .read()
+            .await
+            .targets
+            .iter()
+            .filter(|target| {
+                target.agent_secret_ref == id && target.state != lxcup_core::TargetState::Disabled
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for target in targets {
+            let key = format!("agent-token-reconfiguration-{}", uuid::Uuid::new_v4());
+            match super::queue_agent_reconfiguration(&state, &target, key).await {
+                Ok(Some(job)) => {
+                    record_secret_audit(
+                        &state,
+                        id,
+                        "agent_reconfiguration_queued",
+                        actor_role,
+                        Some(job.id),
+                    )
+                    .await?
+                }
+                Ok(None) => {
+                    record_secret_audit(
+                        &state,
+                        id,
+                        "agent_reconfiguration_skipped",
+                        actor_role,
+                        None,
+                    )
+                    .await?
+                }
+                Err(_) => {
+                    record_secret_audit(
+                        &state,
+                        id,
+                        "agent_reconfiguration_failed",
+                        actor_role,
+                        None,
+                    )
+                    .await?
+                }
+            }
+        }
+    }
     Ok(Json(envelope(SecretMetadataDto { metadata })))
 }
 
@@ -283,7 +374,7 @@ pub(super) async fn revoke_secret(
     state.secrets.revoke(id).map_err(map_secret_error)?;
     state.invalidate_agents_for_secret(id).await;
     let metadata = state.secrets.metadata(id).map_err(map_secret_error)?;
-    record_secret_audit(&state, id, "revoked", actor_role).await;
+    record_secret_audit(&state, id, "revoked", actor_role, None).await?;
     Ok(Json(envelope(SecretMetadataDto { metadata })))
 }
 
@@ -302,7 +393,8 @@ pub(super) async fn delete_secret(
     }
     let id = parse_secret_id(&secret_id)?;
     state.secrets.delete(id).map_err(map_secret_error)?;
-    record_secret_audit(&state, id, "deleted", actor_role).await;
+    state.invalidate_agents_for_secret(id).await;
+    record_secret_audit(&state, id, "deleted", actor_role, None).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -311,15 +403,36 @@ pub(super) async fn record_secret_audit(
     id: SecretId,
     action: &str,
     role: ActorRole,
-) {
+    related_job_id: Option<lxcup_core::AnsibleJobId>,
+) -> Result<(), ApiError> {
+    let occurred_at = chrono::Utc::now();
+    if let Some(repositories) = state.repositories.as_ref() {
+        let details = serde_json::json!({ "secret_id": id.as_uuid(), "role": format!("{role:?}").to_lowercase(), "related_job_id": related_job_id.map(|job| job.as_uuid()) });
+        repositories
+            .audit_events
+            .append(&lxcup_persistence::AuditEvent {
+                id: uuid::Uuid::new_v4(),
+                node_id: None,
+                container_id: None,
+                plan_id: None,
+                execution_id: None,
+                event_type: format!("secret.{action}"),
+                details,
+                created_at: occurred_at,
+            })
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
     let event = SecretAuditEvent {
         secret_id: id,
         action: action.to_owned(),
         role,
-        occurred_at: chrono::Utc::now(),
+        occurred_at,
+        related_job_id,
     };
     state.store.write().await.secret_audit.push(event);
     state.publish(ApiEvent::status("secret", id.as_uuid().to_string(), action));
+    Ok(())
 }
 
 pub(super) fn parse_secret_id(value: &str) -> Result<SecretId, ApiError> {

@@ -85,6 +85,7 @@ function eventDetail(event: AnsibleJobEvent) {
 
 function jobGuidance(status: string, event: AnsibleJobEvent | undefined) {
   if (status === "queued") return { level: "info", title: "Wartet auf den Ansible-Worker", detail: "Der Controller hat den Job angenommen, aber noch keine Worker-Ausführung erhalten. Prüfe Worker, Zielverbindung und Secrets." };
+  if (status === "failed" && event?.event.code === "host_key_changed") return { level: "danger", title: "SSH-Host-Key stimmt nicht überein", detail: "Der gespeicherte Known-Hosts-Fingerprint passt nicht mehr. Verifiziere den neuen Fingerprint über einen vertrauenswürdigen Kanal, aktualisiere anschließend das Known-Hosts-Secret und starte den Job erneut. Deaktiviere die Host-Key-Prüfung nicht." };
   if (status === "failed") return { level: "danger", title: "Workflow fehlgeschlagen", detail: event?.event.code ? `Der Worker meldet den Fehlercode „${event.event.code}“. Die betroffene Aufgabe steht im Protokoll.` : "Der Worker hat einen Fehler gemeldet. Prüfe den letzten Protokolleintrag und die Zielverbindung." };
   if (status === "reconcile_required") return { level: "danger", title: "Abgleich erforderlich", detail: "Die Ausführung wurde unterbrochen oder ihr Ergebnis ist unklar. Starte einen Reconcile-Workflow, bevor du weitere Änderungen ausführst." };
   if (status === "succeeded") return { level: "success", title: "Workflow abgeschlossen", detail: "Alle vom Worker gemeldeten Schritte sind im Protokoll dokumentiert." };

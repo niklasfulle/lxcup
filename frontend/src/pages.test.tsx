@@ -403,6 +403,12 @@ describe("onboarding and secret pages", () => {
     expect(mocks.createSecret).toHaveBeenCalled();
   });
 
+  it("links token reconfiguration audit events to their deployment job", async () => {
+    mocks.listSecretAudit.mockResolvedValue([{ secret_id: "agent", action: "agent_reconfiguration_queued", role: "admin", occurred_at: "2026-01-01T00:00:00Z", related_job_id: "job-deploy" }] as any);
+    renderPage(<SecretsPage />);
+    expect(await screen.findByRole("link", { name: "Job ansehen" })).toHaveAttribute("href", "/workflows/job-deploy");
+  });
+
   it("registers a target using an inline generated secret", async () => {
     mocks.targets.data = [];
     renderPage(<TargetsPage />);
@@ -584,6 +590,14 @@ describe("workflow pages", () => {
     expect(screen.getAllByText("Abgleich erforderlich").length).toBeGreaterThan(0);
   });
 
+  it("shows safe recovery guidance for a changed SSH host key", () => {
+    mocks.job.data = { id: "job-host-key", operation: "health_check", playbook: "health.yml", playbook_version: "1", target: { target: "target-1" }, mode: "check", status: "failed", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" };
+    mocks.events.data = [{ sequence: 1, job_id: "job-host-key", event: { kind: "failed", code: "host_key_changed" }, created_at: "2026-01-01T00:00:00Z" }] as any;
+    renderPage(<WorkflowDetailPage />, "/workflows/job-host-key");
+    expect(screen.getByText("SSH-Host-Key stimmt nicht überein")).toBeInTheDocument();
+    expect(screen.getByText(/Deaktiviere die Host-Key-Prüfung nicht/)).toBeInTheDocument();
+  });
+
   it("renders workflow loading and API error states", () => {
     mocks.jobs.isLoading = true;
     renderPage(<WorkflowsPage />);
@@ -614,7 +628,7 @@ describe("workflow pages", () => {
 describe("application shell", () => {
   it("asks for a bearer token and exposes the verified read-only role", async () => {
     mocks.getSession.mockRejectedValueOnce(new ApiError("authentication required", 401, "unauthorized"));
-    mocks.getSession.mockResolvedValueOnce({ role: "viewer", expires_in_seconds: 3600 });
+    mocks.getSession.mockResolvedValueOnce({ role: "viewer", expires_in_seconds: 3600 } as any);
     renderPage(<App />);
     expect(await screen.findByRole("heading", { name: "Bei lxcup anmelden" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("API-Token"), { target: { value: "viewer-token" } });
