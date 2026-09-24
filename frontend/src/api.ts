@@ -106,9 +106,22 @@ export type DockerWorkloadDto = {
   started_at: string | null;
   labels: string[];
   presence: "present" | "missing";
+  change_state: "new" | "changed" | "unchanged" | "missing";
   management_state: "discovered" | "managed";
   discovered_at: string;
 };
+
+export type DockerDiscoveryRunDto = {
+  id: string;
+  host_container_id: number;
+  status: "running" | "succeeded" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  container_count: number;
+  error_code: string | null;
+};
+
+export type DockerDiscoveryResultDto = { run: DockerDiscoveryRunDto; workloads: DockerWorkloadDto[] };
 export type PackageInventoryDto = {
   target_id: string;
   status: "complete" | "not_collected";
@@ -338,7 +351,11 @@ export function listDockerWorkloads(containerId: number, signal?: AbortSignal) {
 }
 
 export function discoverDockerWorkloads(containerId: number, signal?: AbortSignal) {
-  return apiClient.post<DockerWorkloadDto[]>(`/api/v1/containers/${containerId}/docker/discover`, undefined, signal);
+  return apiClient.post<DockerDiscoveryResultDto>(`/api/v1/containers/${containerId}/docker/discover`, undefined, signal);
+}
+
+export function getDockerDiscovery(containerId: number, signal?: AbortSignal) {
+  return apiClient.get<DockerDiscoveryRunDto | null>(`/api/v1/containers/${containerId}/docker/discovery`, signal);
 }
 
 export function adoptDockerWorkload(containerId: number, dockerId: string, signal?: AbortSignal) {

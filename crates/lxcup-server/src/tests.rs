@@ -896,6 +896,7 @@ async fn docker_inventory_endpoints_manage_in_memory_workloads() {
             started_at: None,
             labels: vec!["app=web".to_owned()],
             presence: "present".to_owned(),
+            change_state: "new".to_owned(),
             management_state: "discovered".to_owned(),
             discovered_at: chrono::Utc::now(),
         },
@@ -976,6 +977,100 @@ async fn docker_inventory_endpoints_manage_in_memory_workloads() {
             StatusCode::NOT_FOUND
         );
     }
+}
+
+#[tokio::test]
+async fn docker_unavailable_is_audited_without_marking_existing_workloads_missing() {
+    let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+    let host_id = ContainerId::new(606);
+    let agent_token = "docker-unavailable-token";
+    let info = lxcup_agent::AgentInfo {
+        agent_id: "windows-agent".to_owned(),
+        platform: lxcup_agent::AgentPlatform::Windows,
+        hostname: "docker-host".to_owned(),
+        version: "0.2.0".to_owned(),
+        protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let agent_task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            lxcup_agent::agent_router(lxcup_agent::LocalAgentState::new(info, agent_token)),
+        )
+        .await
+        .unwrap();
+    });
+    let client = lxcup_agent::AgentClient::new(
+        lxcup_agent::AgentClientConfig::new(format!("http://{address}"), agent_token).unwrap(),
+    )
+    .unwrap();
+    state
+        .agents
+        .write()
+        .await
+        .insert(host_id, RegisteredAgent { client });
+    state.store.write().await.docker_workloads.insert(
+        (host_id, "previous-container".to_owned()),
+        DockerWorkloadDto {
+            host_container_id: host_id,
+            id: "previous-container".to_owned(),
+            name: "previous".to_owned(),
+            image: "nginx:stable".to_owned(),
+            state: "running".to_owned(),
+            status: "Up".to_owned(),
+            ports: vec![],
+            started_at: None,
+            labels: vec![],
+            presence: "present".to_owned(),
+            change_state: "unchanged".to_owned(),
+            management_state: "managed".to_owned(),
+            discovered_at: chrono::Utc::now(),
+        },
+    );
+
+    let failed = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/containers/606/docker/discover")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+    let latest = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/containers/606/docker/discovery")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(latest.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["status"], "failed");
+    assert_eq!(json["data"]["error_code"], "docker_unavailable");
+
+    let inventory = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/containers/606/docker/containers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(inventory.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"][0]["presence"], "present");
+    agent_task.abort();
 }
 
 #[tokio::test]

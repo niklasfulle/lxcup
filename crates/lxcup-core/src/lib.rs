@@ -26,7 +26,10 @@ pub use agent::{AgentConnectionState, AgentRegistration};
 pub use container::{
     Container, ContainerAction, ContainerManagementState, ContainerStatus, OperatingSystem,
 };
-pub use docker::{DockerWorkload, DockerWorkloadManagementState, DockerWorkloadPresence};
+pub use docker::{
+    DockerDiscoveryRun, DockerDiscoveryStatus, DockerWorkload, DockerWorkloadChange,
+    DockerWorkloadManagementState, DockerWorkloadPresence,
+};
 pub use enrollment::{Enrollment, EnrollmentState};
 pub use environment::{EnvironmentStatus, ProxmoxEnvironment};
 pub use error::{

@@ -72,10 +72,11 @@ pub(crate) use inventory::{
 };
 mod agent;
 pub(crate) use agent::{
-    DockerWorkloadDto, SecretAuditEvent, adopt_docker_container, create_secret, delete_secret,
-    discover_docker_containers, get_agent_health, get_agent_metrics, get_secret,
-    list_docker_containers, list_secret_audit, list_secrets, map_secret_error, register_agent,
-    remove_docker_container, revoke_agent, revoke_secret, rotate_secret,
+    DockerWorkloadDto, SecretAuditEvent, adopt_docker_container,
+    create_secret, delete_secret, discover_docker_containers, get_agent_health, get_agent_metrics,
+    get_docker_discovery, get_secret, list_docker_containers, list_secret_audit, list_secrets,
+    map_secret_error, register_agent, remove_docker_container, revoke_agent, revoke_secret,
+    rotate_secret,
 };
 
 #[derive(Clone)]
@@ -525,6 +526,7 @@ struct ApiStore {
     results: HashMap<ExecutionId, ExecutionResultDto>,
     secret_audit: Vec<SecretAuditEvent>,
     docker_workloads: HashMap<(ContainerId, String), DockerWorkloadDto>,
+    docker_discovery_runs: Vec<lxcup_core::DockerDiscoveryRun>,
     schedules: Vec<lxcup_core::JobSchedule>,
     update_policies: Vec<lxcup_core::UpdatePolicy>,
 }
@@ -665,6 +667,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/v1/containers/{container_id}/docker/containers",
             get(list_docker_containers),
+        )
+        .route(
+            "/api/v1/containers/{container_id}/docker/discovery",
+            get(get_docker_discovery),
         )
         .route(
             "/api/v1/containers/{container_id}/docker/discover",
@@ -854,6 +860,7 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/api/v1/containers/{container_id}/agent": {"post": {}},
     "/api/v1/containers/{container_id}/agent/health": {"get": {}},
     "/api/v1/containers/{container_id}/agent/metrics": {"get": {}},
+    "/api/v1/containers/{container_id}/docker/discovery": {"get": {"responses": {"200": {"description": "Latest Docker discovery workflow"}}}},
     "/api/v1/events": {"get": {"description": "Typed task, log and status SSE"}}
   }
 }"#;

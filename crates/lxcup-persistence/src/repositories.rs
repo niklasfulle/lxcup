@@ -92,6 +92,11 @@ pub struct DockerWorkloadRepository {
 }
 
 #[derive(Clone)]
+pub struct DockerDiscoveryRepository {
+    pool: PgPool,
+}
+
+#[derive(Clone)]
 pub struct PackageInventoryRepository {
     pool: PgPool,
 }
@@ -163,6 +168,7 @@ pub struct AuditEventRepository {
 #[derive(Clone)]
 pub struct Repositories {
     pub docker_workloads: DockerWorkloadRepository,
+    pub docker_discovery: DockerDiscoveryRepository,
     pub package_inventory: PackageInventoryRepository,
     pub schedules: ScheduleRepository,
     pub targets: TargetRepository,
@@ -183,6 +189,7 @@ impl Repositories {
     pub fn new(database: &Database) -> Self {
         Self {
             docker_workloads: DockerWorkloadRepository::new(database),
+            docker_discovery: DockerDiscoveryRepository::new(database),
             package_inventory: PackageInventoryRepository::new(database),
             schedules: ScheduleRepository::new(database),
             targets: TargetRepository::new(database),
@@ -346,6 +353,17 @@ fn docker_workload_from_row(row: PgRow) -> Result<DockerWorkload, RepositoryErro
             _ => {
                 return Err(RepositoryError::InvalidValue {
                     field: "docker workload presence",
+                });
+            }
+        },
+        change: match row.try_get::<String, _>("change_state")?.as_str() {
+            "new" => lxcup_core::DockerWorkloadChange::New,
+            "changed" => lxcup_core::DockerWorkloadChange::Changed,
+            "unchanged" => lxcup_core::DockerWorkloadChange::Unchanged,
+            "missing" => lxcup_core::DockerWorkloadChange::Missing,
+            _ => {
+                return Err(RepositoryError::InvalidValue {
+                    field: "docker workload change state",
                 });
             }
         },

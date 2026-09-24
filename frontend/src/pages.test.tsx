@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   events: { data: [], isLoading: false, error: null as Error | null },
   enrollment: { data: undefined as any, isLoading: false, error: null as Error | null },
   workloads: { data: [] as DockerWorkloadDto[], isLoading: false, error: null as Error | null },
+  dockerDiscovery: { data: null as any, isLoading: false, error: null as Error | null },
   workerAvailability: { data: { available: true, last_seen_at: "2026-01-01T00:00:00Z" } as WorkerAvailabilityDto, isLoading: false, error: null as Error | null },
   packageInventory: { data: undefined as any, isLoading: false, error: null as Error | null },
   telemetry: { data: undefined as any, isLoading: false, error: null as Error | null },
@@ -45,7 +46,7 @@ const container: ContainerDto = { id: 101, node_id: "node-1", name: "web-lxc", o
 const secret = (id: string, name: string, kind: "ssh_password" | "ssh_known_hosts" | "agent_token" = "ssh_password") => ({ metadata: { metadata: { id, name, kind, scope: { type: "global" as const }, created_at: "2026-01-01", updated_at: "2026-01-01" }, status: "active" as const } });
 
 vi.mock("./queries", () => ({
-  queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id], schedules: ["schedules"], updatePolicies: ["update-policies"] },
+  queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id], dockerDiscovery: (id: number) => ["docker-discovery", id], schedules: ["schedules"], updatePolicies: ["update-policies"] },
   useTargets: () => mocks.targets,
   useContainers: () => mocks.containers,
   useAnsibleJobs: () => mocks.jobs,
@@ -53,6 +54,7 @@ vi.mock("./queries", () => ({
   useAnsibleJobEvents: () => mocks.events,
   useEnrollment: () => mocks.enrollment,
   useDockerWorkloads: () => mocks.workloads,
+  useDockerDiscovery: () => mocks.dockerDiscovery,
   useWorkerAvailability: () => mocks.workerAvailability,
   usePackageInventory: () => mocks.packageInventory,
   useTargetTelemetry: () => mocks.telemetry,
@@ -291,7 +293,7 @@ describe("inventory pages", () => {
     renderPage(<DockerPage />);
     await userEvent.selectOptions(screen.getByRole("combobox"), "101");
     expect(screen.getByText(/Noch keine Docker-Container/)).toBeInTheDocument();
-    mocks.workloads.data = [{ host_container_id: 101, id: "docker-1", name: "web", image: "nginx", state: "running", status: "Up", ports: ["80/tcp"], started_at: null, labels: ["app=web"], presence: "present", management_state: "discovered", discovered_at: "2026-01-01" }];
+    mocks.workloads.data = [{ host_container_id: 101, id: "docker-1", name: "web", image: "nginx", state: "running", status: "Up", ports: ["80/tcp"], started_at: null, labels: ["app=web"], presence: "present", change_state: "new", management_state: "discovered", discovered_at: "2026-01-01" }];
     cleanup();
     renderPage(<DockerPage />);
     await userEvent.selectOptions(screen.getByRole("combobox"), "101");
@@ -324,6 +326,20 @@ describe("inventory pages", () => {
     renderPage(<DockerPage />);
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "101" } });
     expect(screen.getByText("docker failure")).toBeInTheDocument();
+  });
+
+  it("shows Docker discovery audit status, host, and reconciliation changes", () => {
+    mocks.containers.data = [container];
+    mocks.dockerDiscovery.data = { id: "run-1", host_container_id: 101, status: "failed", started_at: "2026-01-01T00:00:00Z", finished_at: "2026-01-01T00:00:01Z", container_count: 0, error_code: "docker_unavailable" };
+    mocks.workloads.data = [{ host_container_id: 101, id: "docker-1", name: "web", image: "nginx:1", state: "exited", status: "Exited (0)", ports: [], started_at: null, labels: [], presence: "present", change_state: "changed", management_state: "discovered", discovered_at: "2026-01-01T00:00:00Z" }];
+    renderPage(<DockerPage />);
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "101" } });
+
+    expect(screen.getByText(/Host: web-lxc/)).toBeInTheDocument();
+    expect(screen.getByText(/Fehler: docker_unavailable/)).toBeInTheDocument();
+    expect(screen.getByText("web-lxc")).toBeInTheDocument();
+    expect(screen.getByText(/exited · Exited/)).toBeInTheDocument();
+    expect(screen.getByText(/geändert · entdeckt/)).toBeInTheDocument();
   });
 });
 

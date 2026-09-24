@@ -440,6 +440,7 @@ pub struct DockerWorkloadDto {
     pub started_at: Option<String>,
     pub labels: Vec<String>,
     pub presence: String,
+    pub change_state: String,
     pub management_state: String,
     pub discovered_at: chrono::DateTime<chrono::Utc>,
 }
@@ -457,6 +458,7 @@ impl DockerWorkloadDto {
             started_at: container.started_at,
             labels: container.labels,
             presence: "present".to_owned(),
+            change_state: "new".to_owned(),
             management_state: "discovered".to_owned(),
             discovered_at: chrono::Utc::now(),
         }
@@ -479,6 +481,12 @@ impl From<DockerWorkload> for DockerWorkloadDto {
                 lxcup_core::DockerWorkloadPresence::Present => "present".to_owned(),
                 lxcup_core::DockerWorkloadPresence::Missing => "missing".to_owned(),
             },
+            change_state: match item.change {
+                lxcup_core::DockerWorkloadChange::New => "new".to_owned(),
+                lxcup_core::DockerWorkloadChange::Changed => "changed".to_owned(),
+                lxcup_core::DockerWorkloadChange::Unchanged => "unchanged".to_owned(),
+                lxcup_core::DockerWorkloadChange::Missing => "missing".to_owned(),
+            },
             management_state: match item.management_state {
                 DockerWorkloadManagementState::Discovered => "discovered".to_owned(),
                 DockerWorkloadManagementState::Managed => "managed".to_owned(),
@@ -486,6 +494,37 @@ impl From<DockerWorkload> for DockerWorkloadDto {
             discovered_at: item.discovered_at,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DockerDiscoveryResultDto {
+    pub run: lxcup_core::DockerDiscoveryRun,
+    pub workloads: Vec<DockerWorkloadDto>,
+}
+
+pub(super) async fn get_docker_discovery(
+    State(state): State<ApiState>,
+    Path(container_id): Path<String>,
+) -> Result<Json<ApiEnvelope<Option<lxcup_core::DockerDiscoveryRun>>>, ApiError> {
+    let container_id = parse_container_id(&container_id)?;
+    let latest = if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .docker_discovery
+            .latest(container_id)
+            .await
+            .map_err(|_| ApiError::storage())?
+    } else {
+        state
+            .store
+            .read()
+            .await
+            .docker_discovery_runs
+            .iter()
+            .rev()
+            .find(|run| run.host_container_id == container_id)
+            .cloned()
+    };
+    Ok(Json(envelope(latest)))
 }
 
 pub(super) async fn list_docker_containers(
@@ -524,21 +563,70 @@ pub(super) async fn list_docker_containers(
 pub(super) async fn discover_docker_containers(
     State(state): State<ApiState>,
     Path(container_id): Path<String>,
-) -> Result<Json<ApiEnvelope<Vec<DockerWorkloadDto>>>, ApiError> {
+) -> Result<Json<ApiEnvelope<DockerDiscoveryResultDto>>, ApiError> {
     let container_id = parse_container_id(&container_id)?;
+    let mut run = if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .docker_discovery
+            .start(container_id)
+            .await
+            .map_err(|_| ApiError::storage())?
+    } else {
+        let run = lxcup_core::DockerDiscoveryRun {
+            id: uuid::Uuid::new_v4(),
+            host_container_id: container_id,
+            status: lxcup_core::DockerDiscoveryStatus::Running,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            container_count: 0,
+            error_code: None,
+        };
+        state
+            .store
+            .write()
+            .await
+            .docker_discovery_runs
+            .push(run.clone());
+        run
+    };
+    state.publish(ApiEvent::status(
+        "docker_discovery",
+        container_id.value().to_string(),
+        "running",
+    ));
+
     let agent = state
         .agents
         .read()
         .await
         .get(&container_id)
         .cloned()
-        .ok_or_else(|| ApiError::not_found("agent not registered"))?;
-    let discovered = agent.client.docker_containers().await.map_err(|_| {
-        ApiError::dependency(
-            "docker_discovery_failed",
-            "Docker-Inventar konnte vom Agenten nicht gelesen werden",
-        )
-    })?;
+        .ok_or_else(|| ApiError::not_found("agent not registered"));
+    let agent = match agent {
+        Ok(agent) => agent,
+        Err(error) => {
+            finish_docker_discovery(&state, &mut run, 0, Some("agent_unavailable")).await?;
+            return Err(error);
+        }
+    };
+    let discovered = match agent.client.docker_containers().await {
+        Ok(discovered) => discovered,
+        Err(_) => {
+            finish_docker_discovery(&state, &mut run, 0, Some("docker_discovery_failed")).await?;
+            return Err(ApiError::dependency(
+                "docker_discovery_failed",
+                "Docker-Inventar konnte vom Agenten nicht gelesen werden",
+            ));
+        }
+    };
+    if !discovered.available {
+        finish_docker_discovery(&state, &mut run, 0, Some("docker_unavailable")).await?;
+        return Err(ApiError::dependency(
+            "docker_unavailable",
+            "Auf diesem Host ist Docker nicht verfügbar; bestehende Funde bleiben unverändert",
+        ));
+    }
+    let container_count = discovered.containers.len() as u32;
     if let Some(repositories) = state.repositories.as_ref() {
         for container in &discovered.containers {
             let workload = DockerWorkload {
@@ -552,21 +640,25 @@ pub(super) async fn discover_docker_containers(
                 started_at: container.started_at.clone(),
                 labels: container.labels.clone(),
                 presence: lxcup_core::DockerWorkloadPresence::Present,
+                change: lxcup_core::DockerWorkloadChange::New,
                 management_state: DockerWorkloadManagementState::Discovered,
                 discovered_at: chrono::Utc::now(),
             };
-            repositories
+            if repositories
                 .docker_workloads
                 .upsert_discovered(&workload)
                 .await
-                .map_err(|_| {
-                    ApiError::dependency(
-                        "docker_inventory_unavailable",
-                        "Docker-Inventar konnte nicht gespeichert werden",
-                    )
-                })?;
+                .is_err()
+            {
+                finish_docker_discovery(&state, &mut run, 0, Some("docker_inventory_unavailable"))
+                    .await?;
+                return Err(ApiError::dependency(
+                    "docker_inventory_unavailable",
+                    "Docker-Inventar konnte nicht gespeichert werden",
+                ));
+            }
         }
-        repositories
+        if repositories
             .docker_workloads
             .mark_missing_except(
                 container_id,
@@ -577,43 +669,68 @@ pub(super) async fn discover_docker_containers(
                     .collect::<Vec<_>>(),
             )
             .await
-            .map_err(|_| {
-                ApiError::dependency(
-                    "docker_inventory_unavailable",
-                    "Docker-Inventar konnte nicht abgeglichen werden",
-                )
-            })?;
-        let workloads = repositories
-            .docker_workloads
-            .list(container_id)
-            .await
-            .map_err(|_| {
-                ApiError::dependency(
+            .is_err()
+        {
+            finish_docker_discovery(&state, &mut run, 0, Some("docker_inventory_unavailable"))
+                .await?;
+            return Err(ApiError::dependency(
+                "docker_inventory_unavailable",
+                "Docker-Inventar konnte nicht abgeglichen werden",
+            ));
+        }
+        let workloads = match repositories.docker_workloads.list(container_id).await {
+            Ok(workloads) => workloads.into_iter().map(DockerWorkloadDto::from).collect(),
+            Err(_) => {
+                finish_docker_discovery(&state, &mut run, 0, Some("docker_inventory_unavailable"))
+                    .await?;
+                return Err(ApiError::dependency(
                     "docker_inventory_unavailable",
                     "Docker-Inventar konnte nicht gelesen werden",
-                )
-            })?
-            .into_iter()
-            .map(DockerWorkloadDto::from)
-            .collect();
-        state.publish(ApiEvent::status(
-            "docker",
-            container_id.value().to_string(),
-            "discovered",
-        ));
-        return Ok(Json(envelope(workloads)));
+                ));
+            }
+        };
+        let run = finish_docker_discovery(&state, &mut run, container_count, None).await?;
+        return Ok(Json(envelope(DockerDiscoveryResultDto { run, workloads })));
     }
     let mut store = state.store.write().await;
+    let seen_ids = discovered
+        .containers
+        .iter()
+        .map(|container| container.id.clone())
+        .collect::<std::collections::HashSet<_>>();
     for container in discovered.containers {
         let key = (container_id, container.id.clone());
-        let management_state = store
-            .docker_workloads
-            .get(&key)
+        let previous = store.docker_workloads.get(&key).cloned();
+        let management_state = previous
+            .as_ref()
             .map(|item| item.management_state.clone())
             .unwrap_or_else(|| "discovered".to_owned());
+        let change_state = match previous {
+            None => "new",
+            Some(ref previous)
+                if previous.presence == "missing"
+                    || previous.name != container.name
+                    || previous.image != container.image
+                    || previous.state != container.state
+                    || previous.status != container.status
+                    || previous.ports != container.ports
+                    || previous.started_at != container.started_at
+                    || previous.labels != container.labels =>
+            {
+                "changed"
+            }
+            Some(_) => "unchanged",
+        };
         let mut workload = DockerWorkloadDto::discovered(container_id, container);
         workload.management_state = management_state;
+        workload.change_state = change_state.to_owned();
         store.docker_workloads.insert(key, workload);
+    }
+    for ((host_id, id), workload) in store.docker_workloads.iter_mut() {
+        if *host_id == container_id && !seen_ids.contains(id) && workload.presence == "present" {
+            workload.presence = "missing".to_owned();
+            workload.change_state = "missing".to_owned();
+        }
     }
     let workloads = store
         .docker_workloads
@@ -622,12 +739,60 @@ pub(super) async fn discover_docker_containers(
         .cloned()
         .collect();
     drop(store);
+    let run = finish_docker_discovery(&state, &mut run, container_count, None).await?;
+    Ok(Json(envelope(DockerDiscoveryResultDto { run, workloads })))
+}
+
+async fn finish_docker_discovery(
+    state: &ApiState,
+    run: &mut lxcup_core::DockerDiscoveryRun,
+    container_count: u32,
+    error_code: Option<&str>,
+) -> Result<lxcup_core::DockerDiscoveryRun, ApiError> {
+    let status = if error_code.is_some() {
+        lxcup_core::DockerDiscoveryStatus::Failed
+    } else {
+        lxcup_core::DockerDiscoveryStatus::Succeeded
+    };
+    if let Some(repositories) = state.repositories.as_ref() {
+        *run = repositories
+            .docker_discovery
+            .finish(run.id, status, container_count, error_code)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    } else {
+        run.status = status;
+        run.finished_at = Some(chrono::Utc::now());
+        run.container_count = container_count;
+        run.error_code = error_code.map(str::to_owned);
+        if let Some(stored) = state
+            .store
+            .write()
+            .await
+            .docker_discovery_runs
+            .iter_mut()
+            .find(|stored| stored.id == run.id)
+        {
+            *stored = run.clone();
+        }
+    }
     state.publish(ApiEvent::status(
-        "docker",
-        container_id.value().to_string(),
-        "discovered",
+        "docker_discovery",
+        run.host_container_id.value().to_string(),
+        if error_code.is_some() {
+            "failed"
+        } else {
+            "succeeded"
+        },
     ));
-    Ok(Json(envelope(workloads)))
+    if let Some(code) = error_code {
+        state.publish(ApiEvent::Error {
+            code: code.to_owned(),
+            message: "Docker discovery failed".to_owned(),
+            request_id: run.id.to_string(),
+        });
+    }
+    Ok(run.clone())
 }
 
 pub(super) async fn adopt_docker_container(
@@ -799,6 +964,7 @@ mod tests {
             started_at: discovered.started_at.clone(),
             labels: discovered.labels.clone(),
             presence: lxcup_core::DockerWorkloadPresence::Present,
+            change: lxcup_core::DockerWorkloadChange::Changed,
             management_state: DockerWorkloadManagementState::Managed,
             discovered_at: discovered.discovered_at,
         };

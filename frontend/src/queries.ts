@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { apiClient, getAnsibleJob, getAnsibleJobEvents, getEnrollment, getPackageInventory, getTargetTelemetry, getWorkerAvailability, listAnsibleJobs, listDockerWorkloads, listSchedules, listTargets, listUpdatePolicies, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type PackageInventoryDto, type ScheduleDto, type TargetDto, type TelemetryDto, type UpdatePolicyDto, type WorkerAvailabilityDto } from "./api";
+import { apiClient, getAnsibleJob, getAnsibleJobEvents, getDockerDiscovery, getEnrollment, getPackageInventory, getTargetTelemetry, getWorkerAvailability, listAnsibleJobs, listDockerWorkloads, listSchedules, listTargets, listUpdatePolicies, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerDiscoveryRunDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type PackageInventoryDto, type ScheduleDto, type TargetDto, type TelemetryDto, type UpdatePolicyDto, type WorkerAvailabilityDto } from "./api";
 
 export const queryKeys = {
   targets: ["targets"] as const,
@@ -10,6 +10,7 @@ export const queryKeys = {
   ansibleJobEvents: (jobId: string) => ["ansible-jobs", jobId, "events"] as const,
   workerAvailability: ["ansible-worker-availability"] as const,
   dockerWorkloads: (containerId: number) => ["containers", containerId, "docker-workloads"] as const,
+  dockerDiscovery: (containerId: number) => ["containers", containerId, "docker-discovery"] as const,
   packageInventory: (targetId: string) => ["targets", targetId, "package-inventory"] as const,
   telemetry: (targetId: string) => ["targets", targetId, "telemetry"] as const,
   schedules: ["schedules"] as const,
@@ -96,6 +97,15 @@ export function useDockerWorkloads(containerId: number | undefined) {
     queryFn: ({ signal }) => listDockerWorkloads(containerId!, signal),
     enabled: Boolean(containerId),
     staleTime: 10_000,
+  });
+}
+
+export function useDockerDiscovery(containerId: number | undefined) {
+  return useQuery<DockerDiscoveryRunDto | null>({
+    queryKey: containerId ? queryKeys.dockerDiscovery(containerId) : ["containers", "none", "docker-discovery"],
+    queryFn: ({ signal }) => getDockerDiscovery(containerId!, signal),
+    enabled: Boolean(containerId),
+    staleTime: 5_000,
   });
 }
 

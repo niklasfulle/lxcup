@@ -281,14 +281,76 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
         started_at: Some("2026-01-01T00:00:00Z".to_owned()),
         labels: vec!["app=web".to_owned()],
         presence: lxcup_core::DockerWorkloadPresence::Present,
+        change: lxcup_core::DockerWorkloadChange::New,
         management_state: DockerWorkloadManagementState::Discovered,
         discovered_at: now,
     };
+    assert_eq!(
+        repositories
+            .docker_workloads
+            .upsert_discovered(&workload)
+            .await
+            .unwrap(),
+        lxcup_core::DockerWorkloadChange::New
+    );
+    assert_eq!(
+        repositories
+            .docker_workloads
+            .upsert_discovered(&workload)
+            .await
+            .unwrap(),
+        lxcup_core::DockerWorkloadChange::Unchanged
+    );
+    let mut changed_workload = workload.clone();
+    changed_workload.image = "nginx:stable".to_owned();
+    assert_eq!(
+        repositories
+            .docker_workloads
+            .upsert_discovered(&changed_workload)
+            .await
+            .unwrap(),
+        lxcup_core::DockerWorkloadChange::Changed
+    );
     repositories
         .docker_workloads
-        .upsert_discovered(&workload)
+        .mark_missing_except(container_id, &[])
         .await
         .unwrap();
+    assert_eq!(
+        repositories
+            .docker_workloads
+            .list(container_id)
+            .await
+            .unwrap()[0]
+            .change,
+        lxcup_core::DockerWorkloadChange::Missing
+    );
+    let discovery = repositories
+        .docker_discovery
+        .start(container_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        repositories
+            .docker_discovery
+            .latest(container_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        lxcup_core::DockerDiscoveryStatus::Running
+    );
+    let completed_discovery = repositories
+        .docker_discovery
+        .finish(
+            discovery.id,
+            lxcup_core::DockerDiscoveryStatus::Succeeded,
+            1,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed_discovery.container_count, 1);
     assert!(
         repositories
             .docker_workloads
