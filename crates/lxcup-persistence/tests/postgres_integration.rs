@@ -13,7 +13,8 @@ use lxcup_core::{
     ActorRole, AgentRegistration, Container, ContainerId, ContainerStatus, DockerWorkload,
     DockerWorkloadManagementState, Execution, ExecutionStatus, InstalledPackage, JobSchedule, Node,
     OperatingSystem, PackageInventorySnapshot, PackageName, PackageVersion, ResourceLifecycle,
-    ResourceTarget, ScheduleFrequency, SecretId, Target, TargetKind, TargetTransport,
+    ResourceTarget, ScheduleFrequency, SecretId, Target, TargetKind, TargetTransport, UpdatePolicy,
+    UpdateRisk,
 };
 use lxcup_persistence::{
     AuditEvent, Database, DatabaseConfig, ExecutionEvent, Repositories, seeds::seed_development,
@@ -215,6 +216,29 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
     let database = Database::connect(&config).await.unwrap();
     database.migrate().await.unwrap();
     let repositories = Repositories::new(&database);
+    let persisted_policy = UpdatePolicy {
+        id: "postgres-integration-package-policy".to_owned(),
+        allowed_targets: vec![lxcup_core::TargetId::new()],
+        allowed_packages: vec!["curl".to_owned()],
+        maintenance_start_minute: 60,
+        maintenance_end_minute: 120,
+        timezone: "UTC".to_owned(),
+        maximum_risk: UpdateRisk::High,
+        enabled: true,
+    };
+    repositories
+        .update_policies
+        .save(&persisted_policy)
+        .await
+        .unwrap();
+    assert!(
+        repositories
+            .update_policies
+            .list()
+            .await
+            .unwrap()
+            .contains(&persisted_policy)
+    );
     let now = postgres_now();
     let suffix = Uuid::new_v4().simple().to_string();
     let container_id = ContainerId::new((Uuid::new_v4().as_u128() as u64 % 900_000_000) + 10_000);

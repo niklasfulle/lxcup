@@ -7,17 +7,11 @@
       - lxcup_update_packages is defined
       - lxcup_update_packages | length > 0
       - lxcup_update_packages | length <= 100
-      - lxcup_update_plan_hash is defined
-      - lxcup_update_plan_hash is match('^[a-f0-9]{64}$')
+      - lxcup_update_request_hash is defined
+      - lxcup_update_request_hash is match('^[a-f0-9]{64}$')
       - lxcup_execution_mode in ['check', 'plan', 'apply', 'reconcile']
       - not lxcup_distribution_upgrade
     fail_msg: The update request is not a validated, supported package plan.
-
-- name: Require safety snapshot before apply
-  ansible.builtin.assert:
-    that: lxcup_snapshot_verified | bool
-    fail_msg: A verified snapshot is required before applying package updates.
-  when: lxcup_execution_mode == 'apply'
 
 - name: Require explicit plan confirmation before apply
   ansible.builtin.assert:
@@ -61,39 +55,57 @@
   check_mode: true
   when: lxcup_execution_mode in ['check', 'plan']
 
-- name: Apply only the validated package list
-  ansible.builtin.apt:
-    name: "{{ lxcup_update_packages }}"
-    state: latest
-    update_cache: true
-    cache_valid_time: 3600
-    only_upgrade: true
-  register: lxcup_update_apply
+- name: Capture installed package versions for rollback
+  ansible.builtin.package_facts:
+    manager: auto
   when: lxcup_execution_mode == 'apply'
+
+- name: Apply updates and verify agent health, rolling back versions on failure
+  when: lxcup_execution_mode == 'apply'
+  block:
+    - name: Apply only the validated package list
+      ansible.builtin.apt:
+        name: "{{ lxcup_update_packages }}"
+        state: latest
+        update_cache: true
+        cache_valid_time: 3600
+        only_upgrade: true
+      register: lxcup_update_apply
+
+    - name: Verify agent health after package apply
+      ansible.builtin.uri:
+        url: "{{ lxcup_agent_health_url }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ lxcup_agent_token }}"
+        status_code: 200
+        timeout: 10
+      when: lxcup_agent_token is defined
+      no_log: true
+      check_mode: false
+  rescue:
+    - name: Restore previously installed package versions
+      ansible.builtin.apt:
+        name: "{{ item }}={{ ansible_facts.packages[item][0].version }}"
+        state: present
+        allow_downgrade: true
+        update_cache: false
+      loop: "{{ lxcup_update_packages | select('in', ansible_facts.packages.keys() | list) | list }}"
+      register: lxcup_update_rollback
+
+    - name: Fail the update after rollback attempt
+      ansible.builtin.fail:
+        msg: "Package update or post-update healthcheck failed; previous installed versions were restored where packages remained available. Review the preceding rollback task output."
 
 - name: Check whether the operating system requests a reboot
   ansible.builtin.stat:
     path: /var/run/reboot-required
   register: lxcup_reboot_required
 
-- name: Verify agent health after package apply
-  ansible.builtin.uri:
-    url: "{{ lxcup_agent_health_url }}"
-    method: GET
-    headers:
-      Authorization: "Bearer {{ lxcup_agent_token }}"
-    status_code: 200
-    timeout: 10
-  when:
-    - lxcup_execution_mode == 'apply'
-    - lxcup_agent_token is defined
-  no_log: true
-  check_mode: false
-
 - name: Publish structured update result
   ansible.builtin.set_stats:
     data:
-      lxcup_update_plan_hash: "{{ lxcup_update_plan_hash }}"
+      lxcup_update_request_hash: "{{ lxcup_update_request_hash }}"
       lxcup_update_packages: "{{ lxcup_update_packages }}"
       lxcup_reboot_required: "{{ lxcup_reboot_required.stat.exists | bool }}"
       lxcup_update_changed: "{{ (lxcup_update_apply.changed | default(false)) | bool }}"

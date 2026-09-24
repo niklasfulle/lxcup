@@ -26,8 +26,17 @@ fn default_true() -> bool {
 
 pub(super) async fn list_update_policies(
     State(state): State<ApiState>,
-) -> Json<ApiEnvelope<Vec<UpdatePolicy>>> {
-    Json(envelope(state.store.read().await.update_policies.clone()))
+) -> Result<Json<ApiEnvelope<Vec<UpdatePolicy>>>, ApiError> {
+    let policies = if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .update_policies
+            .list()
+            .await
+            .map_err(|_| ApiError::storage())?
+    } else {
+        state.store.read().await.update_policies.clone()
+    };
+    Ok(Json(envelope(policies)))
 }
 
 pub(super) async fn create_update_policy(
@@ -48,6 +57,12 @@ pub(super) async fn create_update_policy(
             "timezone is required and bounded",
         ));
     }
+    if request.timezone != "UTC" {
+        return Err(ApiError::bad_request(
+            "unsupported_timezone",
+            "update policy windows currently use UTC",
+        ));
+    }
     if request.maintenance_start_minute >= 24 * 60 || request.maintenance_end_minute >= 24 * 60 {
         return Err(ApiError::bad_request(
             "invalid_window",
@@ -58,6 +73,21 @@ pub(super) async fn create_update_policy(
         return Err(ApiError::bad_request(
             "target_required",
             "at least one target is required",
+        ));
+    }
+    if request.allowed_packages.len() > 500
+        || request.allowed_packages.iter().any(|package| {
+            package.trim().is_empty()
+                || package.len() > 100
+                || package.chars().any(char::is_whitespace)
+                || package.chars().any(|character| {
+                    !(character.is_ascii_alphanumeric() || "+._:-".contains(character))
+                })
+        })
+    {
+        return Err(ApiError::bad_request(
+            "invalid_package_group",
+            "allowed package names must be bounded safe package identifiers",
         ));
     }
     let mut store = state.store.write().await;
@@ -89,5 +119,13 @@ pub(super) async fn create_update_policy(
         enabled: request.enabled,
     };
     store.update_policies.push(policy.clone());
+    drop(store);
+    if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .update_policies
+            .save(&policy)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
     Ok((axum::http::StatusCode::CREATED, Json(envelope(policy))))
 }

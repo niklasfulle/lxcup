@@ -76,6 +76,9 @@ export type AnsibleJobDto = {
   mode: AnsibleExecutionMode;
   status: string;
   parameter_hash: string;
+  package_names?: string[];
+  update_policy_id?: string;
+  approved_plan_job_id?: string;
   created_at: string;
   updated_at: string;
 };
@@ -142,6 +145,8 @@ export type CreateAnsibleJobRequest = {
   parameters: Record<string, unknown>;
   idempotency_key: string;
   confirmed: boolean;
+  policy_id?: string;
+  approved_plan_job_id?: string;
 };
 
 export type SecretKind = "ssh_private_key" | "ssh_password" | "ssh_known_hosts" | "agent_token" | "generic";
@@ -361,6 +366,7 @@ export function getTargetTelemetry(targetId: string, signal?: AbortSignal) { ret
 export function listSchedules(signal?: AbortSignal) { return apiClient.get<ScheduleDto[]>("/api/v1/schedules", signal); }
 export function createSchedule(request: Omit<ScheduleDto, "last_run_at" | "next_run_at" | "last_error">, signal?: AbortSignal) { return apiClient.post<ScheduleDto>("/api/v1/schedules", request, signal); }
 export function listUpdatePolicies(signal?: AbortSignal) { return apiClient.get<UpdatePolicyDto[]>("/api/v1/update-policies", signal); }
+export function createUpdatePolicy(request: Omit<UpdatePolicyDto, "enabled"> & { enabled?: boolean }, signal?: AbortSignal) { return apiClient.post<UpdatePolicyDto>("/api/v1/update-policies", request, signal); }
 
 export function createAnsibleJob(request: CreateAnsibleJobRequest, signal?: AbortSignal) {
   return apiClient.post<AnsibleJobDto>("/api/v1/ansible/jobs", request, signal);

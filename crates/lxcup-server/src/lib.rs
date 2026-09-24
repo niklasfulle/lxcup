@@ -151,6 +151,18 @@ impl ApiState {
         restored
     }
 
+    pub async fn restore_update_policies(&self) -> usize {
+        let Some(repositories) = self.repositories.as_ref() else {
+            return 0;
+        };
+        let Ok(policies) = repositories.update_policies.list().await else {
+            return 0;
+        };
+        let restored = policies.len();
+        self.store.write().await.update_policies = policies;
+        restored
+    }
+
     /// Claims due schedules and turns each target run into the same validated
     /// Ansible job contract used by the interactive API. The lock makes the
     /// poller safe when more than one tick overlaps during a slow database or
@@ -267,15 +279,18 @@ impl ApiState {
                                 Some("scheduled package update has no valid policy".to_owned());
                             continue;
                         };
-                        let packages = if policy.allowed_packages.is_empty() {
-                            vec!["*".to_owned()]
-                        } else {
-                            policy.allowed_packages.clone()
-                        };
+                        if policy.allowed_packages.is_empty() {
+                            failure = Some(
+                                "scheduled package updates require an explicit package allowlist"
+                                    .to_owned(),
+                            );
+                            continue;
+                        }
+                        let packages = policy.allowed_packages.clone();
                         if !policy.enabled
                             || !policy.allowed_targets.contains(target_id)
                             || packages.iter().any(|package| {
-                                !policy.allows(*target_id, package, UpdateRisk::Low, now)
+                                !policy.allows(*target_id, package, UpdateRisk::High, now)
                             })
                         {
                             failure =

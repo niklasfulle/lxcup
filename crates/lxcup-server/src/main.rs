@@ -109,6 +109,8 @@ async fn run(
         tracing::info!(restored_targets, "Persisted targets restored");
         let restored_schedules = state.restore_schedules().await;
         tracing::info!(restored_schedules, "Persisted schedules restored");
+        let restored_policies = state.restore_update_policies().await;
+        tracing::info!(restored_policies, "Persisted update policies restored");
         let restored = state.restore_registered_agents().await;
         tracing::info!(restored, "Persisted agent registrations restored");
         tracing::info!("PostgreSQL persistence enabled");

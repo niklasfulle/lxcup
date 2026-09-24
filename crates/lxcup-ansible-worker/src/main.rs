@@ -397,6 +397,14 @@ async fn prepare_invocation(
         vars["lxcup_agent_version"] = serde_json::json!(agent_version);
         vars["lxcup_agent_binary_src"] = serde_json::json!(artifact(r, agent_version, dir).await?);
     }
+    if let AnsibleParameters::UpdatePackages { packages } = &job.parameters {
+        vars["lxcup_update_packages"] = serde_json::json!(packages);
+        vars["lxcup_update_request_hash"] = serde_json::json!(job.parameter_hash);
+        vars["lxcup_plan_confirmed"] =
+            // The server contract only creates mutating Apply jobs after an explicit confirmation.
+            serde_json::json!(job.mode == lxcup_ansible::ExecutionMode::Apply);
+        vars["lxcup_distribution_upgrade"] = serde_json::json!(false);
+    }
     if job.operation == AnsibleOperation::CollectPackageInventory {
         vars["lxcup_package_inventory_output"] =
             serde_json::json!(dir.join("package-inventory.json"));

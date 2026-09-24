@@ -14,7 +14,7 @@ pub use repositories::{
     ExecutionEvent, ExecutionRepository, ExecutionResultRecord, NodeRepository,
     PackageInventoryRepository, PackageInventoryStatus, PersistedPackageInventory, Repositories,
     RepositoryError, ScanRepository, ScheduleRepository, TargetRepository, UpdatePlanRepository,
-    WorkerHeartbeatRepository,
+    UpdatePolicyRepository, WorkerHeartbeatRepository,
 };
 
 /// Konfiguration für eine PostgreSQL-Verbindung.

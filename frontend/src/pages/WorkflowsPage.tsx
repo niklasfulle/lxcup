@@ -3,7 +3,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { createAnsibleJob, type AnsibleExecutionMode, type AnsibleOperation, type CreateAnsibleJobRequest } from "../api";
-import { queryKeys, useAnsibleJobEvents, useAnsibleJobs, useTargets } from "../queries";
+import { queryKeys, useAnsibleJobEvents, useAnsibleJobs, useTargets, useUpdatePolicies } from "../queries";
 
 const operations: Array<{ value: AnsibleOperation; label: string; risk: string }> = [
   { value: "deploy_agent", label: "Agent installieren", risk: "Ändernd" },
@@ -26,6 +26,8 @@ export function buildWorkflowRequest(
   mode: AnsibleExecutionMode,
   packages: string,
   confirmed: boolean,
+  policyId?: string,
+  approvedPlanJobId?: string,
 ): CreateAnsibleJobRequest {
   let parameters: Record<string, unknown> = { operation };
   if (operation === "update_packages") {
@@ -39,14 +41,16 @@ export function buildWorkflowRequest(
     target_id: targetId,
     mode,
     parameters,
-    idempotency_key: crypto.randomUUID(),
+    idempotency_key: operation === "update_packages" && mode === "plan" && policyId ? `package-plan:${policyId}:${crypto.randomUUID()}` : operation === "update_packages" && mode === "apply" && approvedPlanJobId ? `package-apply:${approvedPlanJobId}:${crypto.randomUUID()}` : crypto.randomUUID(),
     confirmed,
+    ...(operation === "update_packages" ? { policy_id: policyId, approved_plan_job_id: approvedPlanJobId } : {}),
   };
 }
 
 export function WorkflowsPage() {
   const targets = useTargets();
   const jobs = useAnsibleJobs();
+  const policies = useUpdatePolicies();
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const targetFilter = searchParams.get("target");
@@ -55,6 +59,8 @@ export function WorkflowsPage() {
   const [mode, setMode] = useState<AnsibleExecutionMode>("check");
   const [packages, setPackages] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+  const [policyId, setPolicyId] = useState("");
+  const [approvedPlanJobId, setApprovedPlanJobId] = useState("");
   const mutation = useMutation({
     mutationFn: (request: CreateAnsibleJobRequest) => createAnsibleJob(request),
     onSuccess: () => {
@@ -66,12 +72,14 @@ export function WorkflowsPage() {
   const selectedTarget = targets.data?.find((target) => target.id === targetId);
   const visibleJobs = jobs.data?.filter((job) => targetFilter === null || ("target" in job.target && job.target.target === targetFilter));
   const isMutating = operation !== "health_check";
-  const canSubmit = Boolean(targetId) && (isMutating === false || confirmed) && (operation !== "update_packages" || packages.trim().length > 0);
+  const requestedPackages = packages.split(",").map((value) => value.trim()).filter(Boolean).sort().join(",");
+  const packagePlans = (jobs.data ?? []).filter((job) => job.operation === "update_packages" && job.mode === "plan" && job.status === "succeeded" && "target" in job.target && job.target.target === targetId && job.update_policy_id === policyId && [...(job.package_names ?? [])].sort().join(",") === requestedPackages);
+  const canSubmit = Boolean(targetId) && (isMutating === false || confirmed) && (operation !== "update_packages" || (packages.trim().length > 0 && policyId !== "" && (mode === "plan" || (mode === "apply" && packagePlans.some((job) => job.id === approvedPlanJobId)))));
 
   function submit(event: Readonly<{ preventDefault: () => void }>) {
     event.preventDefault();
     if (targetId === "" || canSubmit === false) return;
-    mutation.mutate(buildWorkflowRequest(targetId, operation, mode, packages, confirmed));
+    mutation.mutate(buildWorkflowRequest(targetId, operation, mode, packages, confirmed, policyId || undefined, approvedPlanJobId || undefined));
   }
 
   return (
@@ -87,20 +95,25 @@ export function WorkflowsPage() {
               </select>
             </label>
             <label title="Die erlaubte, fest registrierte Aktion des Workers."><span>Operation</span>
-              <select value={operation} onChange={(event) => setOperation(event.target.value as AnsibleOperation)}>
+              <select value={operation} onChange={(event) => { const next = event.target.value as AnsibleOperation; setOperation(next); if (next === "update_packages") setMode("plan"); }}>
                 {operations.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
               </select>
             </label>
             <label title="Check prüft, Plan erstellt eine Vorschau, Apply führt aus und Reconcile gleicht einen unklaren Zustand ab."><span>Modus</span>
               <select value={mode} onChange={(event) => setMode(event.target.value as AnsibleExecutionMode)} aria-describedby="mode-help">
-                {modes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              {modes.filter((item) => operation !== "update_packages" || item.value === "plan" || item.value === "apply").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
               </select>
             </label>
           </div>
           {operation === "update_packages" ? <label className={ui.workflowField} title="Nur Pakete verwenden, die bereits durch einen Update-Plan validiert wurden."><span>Validierte Pakete aus dem Plan</span>
             <input value={packages} onChange={(event) => setPackages(event.target.value)} placeholder="z. B. nginx,curl" aria-describedby="package-help" />
-            <small id="package-help" className={ui.muted}>Die API akzeptiert ausschließlich bereits validierte Planpakete.</small>
+            <small id="package-help" className={ui.muted}>Die Policy begrenzt die Pakete. Plan prüft ohne Änderung; Apply benötigt denselben erfolgreichen Plan.</small>
           </label> : null}
+          {operation === "update_packages" ? <div className={ui.workflowGrid}>
+            <label><span>Freigegebene Update-Policy</span><select value={policyId} onChange={(event) => setPolicyId(event.target.value)}><option value="">Policy auswählen</option>{(policies.data ?? []).filter((policy) => policy.enabled).map((policy) => <option key={policy.id} value={policy.id}>{policy.id} · max. Risiko {policy.maximum_risk}</option>)}</select></label>
+            {mode === "apply" ? <label><span>Erfolgreicher Plan zur Bestätigung</span><select value={approvedPlanJobId} onChange={(event) => setApprovedPlanJobId(event.target.value)}><option value="">Plan auswählen</option>{packagePlans.map((job) => <option key={job.id} value={job.id}>{job.id} · {new Date(job.updated_at).toLocaleString()}</option>)}</select></label> : null}
+            {mode === "plan" ? <p className={cn(ui.callout, ui.calloutInfo)}>Nach erfolgreichem Plan kannst du denselben Ziel- und Paketumfang mit Apply ausdrücklich bestätigen.</p> : null}
+          </div> : null}
           <div className={ui.workflowSummary}><span>Risiko: <strong>{selectedOperation?.risk}</strong></span><span>Playbook und Secret-Auflösung kommen aus der Registry.</span></div>
           {selectedMode ? <div id="mode-help" className={cn(ui.callout, ui.calloutInfo)} role="note"><strong>{selectedMode.label}: {selectedMode.effect}</strong><p>{selectedMode.description}</p></div> : null}
           {selectedTarget?.state === "pending" ? <div className={cn(ui.callout, ui.calloutInfo)}><strong>Onboarding für {selectedTarget.name}</strong><p>Dieses Ziel wartet noch auf seinen Agenten. Mit „Agent installieren“ startest du den nächsten nachvollziehbaren Schritt.</p></div> : null}

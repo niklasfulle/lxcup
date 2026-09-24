@@ -8,6 +8,7 @@ use lxcup_core::{
     ExecutionId, ExecutionStatus, Node, NodeId, NodeStatus, OperatingSystem, PackageChangeKind,
     PackageName, PackageVersion, PlanStatus, ProxmoxEnvironment, ResolvedPackageChange, Scan,
     ScanId, ScanStatus, SecretId, Target, TargetId, UpdateClassification, UpdatePlan, UpdatePlanId,
+    UpdatePolicy,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
@@ -22,6 +23,7 @@ pub use package_inventory::{PackageInventoryStatus, PersistedPackageInventory};
 mod schedules;
 mod targets;
 mod telemetry;
+mod update_policies;
 mod worker_heartbeats;
 pub use ansible_jobs::AnsibleQueueMetrics;
 
@@ -107,6 +109,11 @@ pub struct ScheduleRepository {
 }
 
 #[derive(Clone)]
+pub struct UpdatePolicyRepository {
+    pool: PgPool,
+}
+
+#[derive(Clone)]
 pub struct ContainerRepository {
     pool: PgPool,
 }
@@ -171,6 +178,7 @@ pub struct Repositories {
     pub docker_discovery: DockerDiscoveryRepository,
     pub package_inventory: PackageInventoryRepository,
     pub schedules: ScheduleRepository,
+    pub update_policies: UpdatePolicyRepository,
     pub targets: TargetRepository,
     pub agent_registrations: AgentRegistrationRepository,
     pub ansible_jobs: AnsibleJobRepository,
@@ -192,6 +200,7 @@ impl Repositories {
             docker_discovery: DockerDiscoveryRepository::new(database),
             package_inventory: PackageInventoryRepository::new(database),
             schedules: ScheduleRepository::new(database),
+            update_policies: UpdatePolicyRepository::new(database),
             targets: TargetRepository::new(database),
             agent_registrations: AgentRegistrationRepository::new(database),
             ansible_jobs: AnsibleJobRepository::new(database),

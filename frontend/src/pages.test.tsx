@@ -311,7 +311,7 @@ describe("inventory pages", () => {
     const submit = screen.getByRole("button", { name: "Zeitplan anlegen" });
     expect(submit).toBeDisabled();
     await userEvent.type(screen.getByPlaceholderText("nightly-inventory"), "nightly");
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Ziel" }), target.id);
+    await userEvent.selectOptions(screen.getAllByRole("combobox", { name: "Ziel" })[1], target.id);
     expect(submit).toBeEnabled();
     fireEvent.click(screen.getByLabelText("Schwellwert aktivieren"));
     await userEvent.click(submit);
@@ -538,12 +538,15 @@ describe("onboarding and secret pages", () => {
 describe("workflow pages", () => {
   it("starts a confirmed package workflow and lists failure codes", async () => {
     mocks.targets.data = [target];
+    mocks.updatePolicies.data = [{ id: "safe-packages", allowed_targets: ["target-1"], allowed_packages: ["nginx", "curl"], maintenance_start_minute: 0, maintenance_end_minute: 1439, timezone: "UTC", maximum_risk: "high", enabled: true }] as any;
     mocks.jobs.data = [{ id: "job-1", operation: "update_packages", playbook: "packages/update.yml", playbook_version: "1", target: { target: "target-1" }, mode: "apply", status: "failed", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" }] as any;
     mocks.events.data = [{ sequence: 1, job_id: "job-1", event: { kind: "failed", code: "playbook_failed" }, created_at: "2026-01-01T00:00:00Z" }] as any;
     renderPage(<WorkflowsPage />);
     await userEvent.selectOptions(screen.getAllByRole("combobox")[0], "target-1");
     await userEvent.selectOptions(screen.getAllByRole("combobox")[1], "update_packages");
+    await userEvent.selectOptions(screen.getAllByRole("combobox")[2], "plan");
     await userEvent.type(screen.getByPlaceholderText("z. B. nginx,curl"), "nginx,curl");
+    await userEvent.selectOptions(screen.getAllByRole("combobox")[3], "safe-packages");
     await userEvent.click(screen.getByRole("checkbox"));
     await userEvent.click(screen.getByRole("button", { name: "Workflow starten" }));
     await waitFor(() => expect(mocks.createAnsibleJob).toHaveBeenCalled());
