@@ -69,6 +69,40 @@ docker compose down
 
 `docker compose down -v` also removes the Compose volumes and their data.
 
+## Backup and restore
+
+Create an encrypted backup of PostgreSQL and the encrypted secret store with
+Docker Compose and [age](https://age-encryption.org/):
+
+```powershell
+.\scripts\backup-stack.ps1 -AgeRecipient $env:LXCUP_BACKUP_AGE_RECIPIENT
+```
+
+Set `LXCUP_BACKUP_AGE_RECIPIENT` to the public age recipient first. Keep the
+matching age identity and `LXCUP_SECRET_MASTER_KEY` in separate,
+access-controlled storage; neither private key is included in the backup. Do
+not store backups, identities, or master keys in the repository. Configure an
+external schedule and retention policy appropriate to your recovery objectives.
+
+To validate a backup, install `age`, PostgreSQL client tools (`pg_restore` and
+`psql`), and the Rust toolchain. Configure `DATABASE_TEST_URL` for an isolated
+database whose name includes `test` or `restore`, provide the age identity and
+the externally managed `LXCUP_SECRET_MASTER_KEY`, then run:
+
+```powershell
+.\scripts\restore-backup-test.ps1 `
+  -BackupFile ".\backups\lxcup-<timestamp>.tar.age" `
+  -AgeIdentity "$env:LXCUP_BACKUP_AGE_IDENTITY" `
+  -ConfirmIsolatedDatabase
+```
+
+This test restores into the explicitly supplied database, applies migrations,
+and validates database references, audit data, and secret-store readability.
+It is destructive to that database: use a disposable restore/test database,
+never a production database. See
+[`docs/secret-store-recovery.md`](docs/secret-store-recovery.md) for the
+recovery procedure and recovery objectives.
+
 ## Onboarding and agent deployment
 
 Register a target in the UI, configure its SSH or WinRM connection and the
