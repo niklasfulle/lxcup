@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   createSecret: vi.fn(async (request: any) => ({ metadata: { metadata: { id: "secret-new", name: request.name, kind: request.kind, scope: request.scope, created_at: "2026-01-01", updated_at: "2026-01-01" }, status: "active" } })),
   createTarget: vi.fn(async () => ({ ...target, state: "pending" as const })),
   createAnsibleJob: vi.fn(async (request: any) => ({ id: request.operation === "health_check" ? "job-health" : "job-deploy", operation: request.operation, playbook: "agent/deploy.yml", playbook_version: "v1", target: { target: "target-1" }, mode: request.mode, status: "queued", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" })),
+  retryAnsibleJob: vi.fn(async (id: string) => ({ id, operation: "health_check", playbook: "health.yml", playbook_version: "1", target: { target: "target-1" }, mode: "check", status: "queued", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" })),
   createEnrollment: vi.fn(async () => ({ id: "enrollment-1" })),
   createContainerAction: vi.fn(async () => ({ id: "task-1", status: "queued" })),
   createSchedule: vi.fn(async (request: any) => ({ ...request, last_run_at: null, next_run_at: "2026-01-01T01:00:00Z", last_error: null })),
@@ -61,7 +62,7 @@ vi.mock("./queries", () => ({
 
 vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
-  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe } };
+  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe } };
 });
 
 import { Dashboard } from "./pages/Dashboard";
@@ -377,6 +378,20 @@ describe("onboarding and secret pages", () => {
     await waitFor(() => expect(mocks.createTarget).toHaveBeenCalled());
   });
 
+  it("resumes visible onboarding progress and links each workflow after a page reload", () => {
+    mocks.targets.data = [target];
+    mocks.jobs.data = [
+      { id: "job-inventory", operation: "collect_package_inventory", target: { target: target.id }, status: "queued", created_at: "2026-01-01T00:03:00Z" },
+      { id: "job-health", operation: "health_check", target: { target: target.id }, status: "succeeded", created_at: "2026-01-01T00:02:00Z" },
+      { id: "job-deploy", operation: "deploy_agent", target: { target: target.id }, status: "succeeded", created_at: "2026-01-01T00:01:00Z" },
+    ];
+    renderPage(<TargetsPage />);
+
+    expect(screen.getByRole("link", { name: "Agent · succeeded" })).toHaveAttribute("href", "/workflows/job-deploy");
+    expect(screen.getByRole("link", { name: "Healthcheck · succeeded" })).toHaveAttribute("href", "/workflows/job-health");
+    expect(screen.getByRole("link", { name: "Paketinventar · queued" })).toHaveAttribute("href", "/workflows/job-inventory");
+  });
+
   it("shows the version reported by a connected target agent", () => {
     mocks.targets.data = [{ ...target, agent_version: "0.2.0" }];
     renderPage(<TargetsPage />);
@@ -470,6 +485,13 @@ describe("workflow pages", () => {
     expect(await screen.findByText("Vollständiger technischer Log")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Log kopieren" }));
     expect(navigator.clipboard.writeText).toHaveBeenCalled();
+  });
+
+  it("retries a failed workflow by requeueing its existing job", async () => {
+    mocks.job.data = { id: "job-failed", operation: "health_check", playbook: "health.yml", playbook_version: "1", target: { target: "target-1" }, mode: "check", status: "failed", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" };
+    renderPage(<WorkflowDetailPage />, "/workflows/job-failed");
+    await userEvent.click(screen.getByRole("button", { name: "Fehlgeschlagenen Job erneut versuchen" }));
+    await waitFor(() => expect(mocks.retryAnsibleJob).toHaveBeenCalledWith("job-failed", false));
   });
 
   it("covers queued, failed and reconcile workflow guidance and event details", () => {

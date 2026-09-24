@@ -75,6 +75,68 @@ impl AnsibleJobRepository {
         Ok(())
     }
 
+    /// Requeues a retryable failed job and appends its status event in one
+    /// transaction. The partial unique active-target index arbitrates races
+    /// against other job submissions/claims.
+    pub async fn retry(&self, id: lxcup_core::AnsibleJobId) -> Result<AnsibleJob, RepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query("SELECT payload FROM ansible_jobs WHERE id = $1 FOR UPDATE")
+            .bind(id.as_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RepositoryError::InvalidValue {
+                field: "ansible job",
+            })?;
+        let mut job: AnsibleJob =
+            serde_json::from_value(row.try_get("payload")?).map_err(|_| {
+                RepositoryError::InvalidValue {
+                    field: "ansible job payload",
+                }
+            })?;
+        if job.status != AnsibleJobStatus::Failed
+            || (job.operation == lxcup_ansible::AnsibleOperation::UpdatePackages
+                && job.mode == lxcup_ansible::ExecutionMode::Apply)
+        {
+            return Err(RepositoryError::InvalidValue {
+                field: "retryable ansible job status",
+            });
+        }
+        job.transition_to(AnsibleJobStatus::Queued)
+            .map_err(|_| RepositoryError::InvalidValue {
+                field: "retryable ansible job status",
+            })?;
+        let payload = serde_json::to_value(&job).map_err(RepositoryError::Serialization)?;
+        sqlx::query("UPDATE ansible_jobs SET status = 'queued', payload = $1, updated_at = $2 WHERE id = $3")
+            .bind(payload)
+            .bind(job.updated_at)
+            .bind(id.as_uuid())
+            .execute(&mut *transaction)
+            .await?;
+        let sequence: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM ansible_job_events WHERE job_id = $1",
+        )
+        .bind(id.as_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let event = JobEvent {
+            sequence: sequence as u64,
+            job_id: id,
+            event: lxcup_ansible::JobEventKind::StatusChanged {
+                status: AnsibleJobStatus::Queued,
+            },
+            created_at: Utc::now(),
+        };
+        sqlx::query("INSERT INTO ansible_job_events (job_id, sequence, payload, created_at) VALUES ($1, $2, $3, $4)")
+            .bind(id.as_uuid())
+            .bind(sequence)
+            .bind(serde_json::to_value(event).map_err(RepositoryError::Serialization)?)
+            .bind(Utc::now())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(job)
+    }
+
     pub async fn find_by_id(
         &self,
         id: lxcup_core::AnsibleJobId,

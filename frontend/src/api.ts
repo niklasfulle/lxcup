@@ -287,6 +287,7 @@ export function listAnsibleJobs(signal?: AbortSignal) { return apiClient.get<Ans
 export function getWorkerAvailability(signal?: AbortSignal) { return apiClient.get<WorkerAvailabilityDto>("/api/v1/ansible/worker-availability", signal); }
 export function getAnsibleJob(id: string, signal?: AbortSignal) { return apiClient.get<AnsibleJobDto>(`/api/v1/ansible/jobs/${id}`, signal); }
 export function getAnsibleJobEvents(id: string, signal?: AbortSignal) { return apiClient.get<AnsibleJobEvent[]>(`/api/v1/ansible/jobs/${id}/events`, signal); }
+export function retryAnsibleJob(id: string, confirmed: boolean, signal?: AbortSignal) { return apiClient.post<AnsibleJobDto>(`/api/v1/ansible/jobs/${id}/retry`, { confirmed }, signal); }
 
 export function createEnrollment(containerId: number, targetId: string | undefined, startOnboarding = true, idempotencyKey = crypto.randomUUID(), signal?: AbortSignal) {
   return apiClient.post<EnrollmentDto>("/api/v1/enrollments", { container_id: containerId, target_id: targetId, idempotency_key: idempotencyKey, start_onboarding: startOnboarding }, signal);

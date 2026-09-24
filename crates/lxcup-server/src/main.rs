@@ -119,6 +119,17 @@ async fn run(
         tracing::warn!("DATABASE_URL is not configured; using in-memory state");
     }
     tracing::info!(version = env!("CARGO_PKG_VERSION"), %bind_address, "lxcup server starting");
+    let onboarding_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            let queued = onboarding_state.reconcile_onboarding_jobs().await;
+            if queued > 0 {
+                tracing::info!(queued, "onboarding follow-up jobs queued");
+            }
+        }
+    });
     let scheduler_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));

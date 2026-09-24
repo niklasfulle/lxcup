@@ -694,6 +694,17 @@ async fn postgres_ansible_job_repository_claims_jobs_and_persists_events() {
             .status,
         AnsibleJobStatus::Failed
     );
+    let retried = repositories.ansible_jobs.retry(job_id).await.unwrap();
+    assert_eq!(retried.status, AnsibleJobStatus::Queued);
+    assert!(repositories.ansible_jobs.retry(job_id).await.is_err());
+    let retry_events = repositories.ansible_jobs.events(job_id).await.unwrap();
+    assert_eq!(retry_events.len(), 3);
+    assert!(matches!(
+        retry_events.last().map(|event| &event.event),
+        Some(JobEventKind::StatusChanged {
+            status: AnsibleJobStatus::Queued
+        })
+    ));
     assert!(
         !repositories
             .ansible_jobs

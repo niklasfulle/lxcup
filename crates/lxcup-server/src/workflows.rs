@@ -1,6 +1,6 @@
 use super::{
     ApiEnvelope, ApiError, ApiEvent, ApiState, CreateEnrollmentRequest, Enrollment, EnrollmentDto,
-    envelope, parse_uuid,
+    envelope, parse_uuid, require_permission,
 };
 use axum::{
     Json,
@@ -9,7 +9,7 @@ use axum::{
 };
 use lxcup_ansible::{
     AnsibleJob, AnsibleJobRequest, AnsibleJobStatus, AnsibleOperation, AnsibleParameters,
-    ExecutionMode, JobEvent, JobEventKind, JobFailureCode, JobSubmission,
+    ExecutionMode, JobEvent, JobEventKind, JobFailureCode, JobSubmission, PlaybookRegistry,
 };
 use lxcup_core::{
     ActorRole, ContainerId, ContainerManagementState, EnrollmentId, EnrollmentState,
@@ -154,6 +154,7 @@ pub(super) async fn get_enrollment(
                 _ => {}
             }
         }
+        drop(store);
         ensure_enrollment_followups(&state, enrollment_id, job).await?;
     }
     let store = state.store.read().await;
@@ -173,21 +174,21 @@ async fn ensure_enrollment_followups(
     enrollment_id: EnrollmentId,
     deployment: &AnsibleJob,
 ) -> Result<(), ApiError> {
-    if deployment.status != AnsibleJobStatus::Succeeded {
-        return Ok(());
-    }
-    let ResourceTarget::Target(target_id) = deployment.target else {
-        return Ok(());
-    };
-    let target = state
-        .store
-        .read()
-        .await
-        .targets
-        .iter()
-        .find(|target| target.id == target_id && target.state == TargetState::Managed)
-        .cloned();
-    let Some(target) = target else { return Ok(()) };
+    ensure_deployment_followups(
+        state,
+        deployment,
+        format!("enrollment-health-{}", enrollment_id.as_uuid()),
+        format!("enrollment-packages-{}", enrollment_id.as_uuid()),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Reconciles persisted successful deployments so onboarding can continue
+/// after a browser reload or controller restart. The idempotency keys are
+/// stable per target/enrollment, so polling and competing controller ticks
+/// cannot create duplicate follow-up jobs.
+pub(super) async fn reconcile_onboarding_jobs(state: &ApiState) -> Result<usize, ApiError> {
     let jobs = if let Some(repositories) = state.repositories.clone() {
         repositories
             .ansible_jobs
@@ -197,11 +198,73 @@ async fn ensure_enrollment_followups(
     } else {
         state.ansible.read().await.jobs()
     };
-    let health_key = format!("enrollment-health-{}", enrollment_id.as_uuid());
+
+    let mut queued = 0;
+    for deployment in jobs.iter().filter(|job| {
+        job.operation == AnsibleOperation::DeployAgent && job.status == AnsibleJobStatus::Succeeded
+    }) {
+        let (health_key, inventory_key) =
+            if let Some(enrollment_id) = deployment.idempotency_key.strip_prefix("enrollment-") {
+                (
+                    format!("enrollment-health-{enrollment_id}"),
+                    format!("enrollment-packages-{enrollment_id}"),
+                )
+            } else if let Some(target_id) = deployment
+                .idempotency_key
+                .strip_prefix("onboarding-deploy-")
+            {
+                (
+                    format!("onboarding-health-{target_id}"),
+                    format!("onboarding-inventory-{target_id}"),
+                )
+            } else {
+                continue;
+            };
+        match ensure_deployment_followups(state, deployment, health_key, inventory_key).await {
+            Ok(created) => queued += created,
+            Err(error) => {
+                tracing::warn!(job_id = %deployment.id.as_uuid(), error = ?error, "onboarding follow-up reconciliation failed")
+            }
+        }
+    }
+    Ok(queued)
+}
+
+async fn ensure_deployment_followups(
+    state: &ApiState,
+    deployment: &AnsibleJob,
+    health_key: String,
+    inventory_key: String,
+) -> Result<usize, ApiError> {
+    if deployment.status != AnsibleJobStatus::Succeeded {
+        return Ok(0);
+    }
+    let ResourceTarget::Target(target_id) = deployment.target else {
+        return Ok(0);
+    };
+    let target = state
+        .store
+        .read()
+        .await
+        .targets
+        .iter()
+        .find(|target| target.id == target_id && target.state == TargetState::Managed)
+        .cloned();
+    let Some(target) = target else { return Ok(0) };
+    let jobs = if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .ansible_jobs
+            .list()
+            .await
+            .map_err(|_| ApiError::storage())?
+    } else {
+        state.ansible.read().await.jobs()
+    };
     let health = jobs
         .iter()
         .find(|job| job.idempotency_key == health_key)
         .cloned();
+    let mut created = 0;
     if health.is_none() {
         let health = state
             .ansible
@@ -226,18 +289,18 @@ async fn ensure_enrollment_followups(
                 job.id.as_uuid().to_string(),
                 "queued",
             ));
+            created += 1;
         }
-        return Ok(());
+        return Ok(created);
     }
     if health
         .as_ref()
         .is_some_and(|job| job.status != AnsibleJobStatus::Succeeded)
     {
-        return Ok(());
+        return Ok(created);
     }
-    let inventory_key = format!("enrollment-packages-{}", enrollment_id.as_uuid());
     if jobs.iter().any(|job| job.idempotency_key == inventory_key) {
-        return Ok(());
+        return Ok(created);
     }
     let submission = state
         .ansible
@@ -262,8 +325,9 @@ async fn ensure_enrollment_followups(
             job.id.as_uuid().to_string(),
             "queued",
         ));
+        created += 1;
     }
-    Ok(())
+    Ok(created)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -591,6 +655,78 @@ pub(super) async fn get_ansible_job(
             .map_err(map_ansible_error)?
     };
     Ok(Json(envelope(AnsibleJobDto::from(&job))))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct RetryAnsibleJobRequest {
+    #[serde(default)]
+    confirmed: bool,
+}
+
+pub(super) async fn retry_ansible_job(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    Path(job_id): Path<String>,
+    JsonBody(request): JsonBody<RetryAnsibleJobRequest>,
+) -> Result<Json<ApiEnvelope<AnsibleJobDto>>, ApiError> {
+    let id = lxcup_core::AnsibleJobId::from_uuid(parse_uuid(&job_id, "ansible job id")?);
+    let existing = if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .ansible_jobs
+            .find_by_id(id)
+            .await
+            .map_err(|_| ApiError::storage())?
+            .ok_or_else(|| ApiError::not_found("ansible job not found"))?
+    } else {
+        state
+            .ansible
+            .read()
+            .await
+            .job(id)
+            .map_err(map_ansible_error)?
+    };
+    let spec = PlaybookRegistry.resolve(existing.operation);
+    require_permission(actor_role, spec.action.permission())?;
+    if existing.mode == ExecutionMode::Apply
+        && spec.action.permission() != lxcup_core::Permission::Read
+        && !request.confirmed
+    {
+        return Err(ApiError::bad_request(
+            "ansible_confirmation_required",
+            "retrying a mutating operation requires explicit confirmation",
+        ));
+    }
+
+    let retried = if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .ansible_jobs
+            .retry(id)
+            .await
+            .map_err(|error| match error {
+                lxcup_persistence::RepositoryError::InvalidValue { .. } => ApiError::bad_request(
+                    "ansible_retry_not_allowed",
+                    "this job is not in a retryable state",
+                ),
+                lxcup_persistence::RepositoryError::Database(_) => ApiError::conflict(
+                    "ansible_target_busy",
+                    "another job is executing for this target",
+                ),
+                lxcup_persistence::RepositoryError::Serialization(_) => ApiError::storage(),
+            })?
+    } else {
+        state
+            .ansible
+            .write()
+            .await
+            .retry(id)
+            .map_err(map_ansible_error)?
+    };
+    state.publish(ApiEvent::status(
+        "ansible_job",
+        id.as_uuid().to_string(),
+        "queued",
+    ));
+    Ok(Json(envelope(AnsibleJobDto::from(&retried))))
 }
 
 pub(super) async fn get_ansible_job_events(

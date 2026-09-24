@@ -1,16 +1,28 @@
 import { cn, ui } from "../ui";
 import { useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import type { AnsibleJobEvent } from "../api";
-import { useAnsibleJob, useAnsibleJobEvents } from "../queries";
+import { retryAnsibleJob, type AnsibleJobEvent } from "../api";
+import { queryKeys, useAnsibleJob, useAnsibleJobEvents } from "../queries";
 
 const terminalStates = new Set(["succeeded", "failed", "aborted"]);
 
 export function WorkflowDetailPage() {
   const { jobId } = useParams();
+  const queryClient = useQueryClient();
   const job = useAnsibleJob(jobId);
   const active = !terminalStates.has(job.data?.status ?? "queued");
   const events = useAnsibleJobEvents(jobId, true);
+  const retry = useMutation({
+    mutationFn: () => retryAnsibleJob(jobId!, job.data?.mode === "apply"),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.ansibleJob(jobId!) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.ansibleJobEvents(jobId!) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.ansibleJobs }),
+      ]);
+    },
+  });
 
   if (job.isLoading) return <section className={ui.panel}><p className={ui.muted}>Lade Workflow…</p></section>;
   if (job.error !== null || job.data === undefined) return <section className={ui.panel}><h1>Workflow nicht gefunden</h1><p className={ui.errorState}>{job.error?.message ?? "Der Job ist nicht mehr verfügbar."}</p><Link className={ui.textLink} to="/workflows">Zur Workflow-Übersicht</Link></section>;
@@ -19,8 +31,10 @@ export function WorkflowDetailPage() {
   const latestEvent = events.data?.at(-1);
   const guidance = jobGuidance(currentJob.status, latestEvent);
   const rawLog = events.data?.map((event) => `[${new Date(event.created_at).toISOString()}] #${event.sequence} ${eventTitle(event)}\n${eventDetail(event)}`).join("\n\n") ?? "";
+  const retryAllowed = currentJob.status === "failed" && !(currentJob.operation === "update_packages" && currentJob.mode === "apply");
   return <>
-    <header className={ui.pageHeader}><div><p className={ui.eyebrow}>Workflow-Protokoll</p><h1>{currentJob.operation.replaceAll("_", " ")}</h1><p className={ui.muted}>Job {currentJob.id}</p></div><Link className={ui.button} to="/workflows">← Alle Workflows</Link></header>
+    <header className={ui.pageHeader}><div><p className={ui.eyebrow}>Workflow-Protokoll</p><h1>{currentJob.operation.replaceAll("_", " ")}</h1><p className={ui.muted}>Job {currentJob.id}</p></div><div className={ui.actionRow}>{currentJob.status === "failed" ? retryAllowed ? <button className={ui.button} type="button" disabled={retry.isPending} onClick={() => { if (currentJob.mode !== "apply" || window.confirm("Diesen fehlgeschlagenen Änderungslauf erneut ausführen?")) retry.mutate(); }}>{retry.isPending ? "Wird erneut eingereiht…" : "Fehlgeschlagenen Job erneut versuchen"}</button> : <span className={ui.muted} title="Paket-Apply-Jobs müssen neu geplant und erneut bestätigt werden.">Neuer Update-Plan erforderlich</span> : null}<Link className={ui.button} to="/workflows">← Alle Workflows</Link></div></header>
+    {retry.error ? <p className={ui.errorState} role="alert">{retry.error.message}</p> : null}
     <div className={ui.panelGrid}><section className={ui.panel}><h2>Ausführung</h2><dl className={ui.detailList}><dt>Status</dt><dd><span className={cn(ui.statusBadge, statusClass(currentJob.status) === "success" ? ui.statusSuccess : statusClass(currentJob.status) === "neutral" ? ui.statusNeutral : ui.statusPending)}>{currentJob.status}</span></dd><dt>Modus</dt><dd>{currentJob.mode}</dd><dt>Playbook</dt><dd>{currentJob.playbook} · v{currentJob.playbook_version}</dd></dl></section><section className={ui.panel}><h2>Zeiten</h2><dl className={ui.detailList}><dt>Erstellt</dt><dd>{new Date(currentJob.created_at).toLocaleString()}</dd><dt>Letzte Änderung</dt><dd>{new Date(currentJob.updated_at).toLocaleString()}</dd><dt>Protokoll</dt><dd>{active ? "wird automatisch aktualisiert" : "abgeschlossen"}</dd></dl></section></div>
     <section className={cn(ui.callout, guidance.level === "success" ? ui.calloutSuccess : guidance.level === "danger" ? ui.calloutDanger : ui.calloutInfo)} aria-live="polite"><strong>{guidance.title}</strong><p>{guidance.detail}</p></section>
     <section className={ui.panel}><div className={ui.sectionHeading}><div><h2>Ausführungsprotokoll</h2><p className={ui.muted}>Zeitlich sortierte, audit-sichere Schritte und Fehlerhinweise dieses Jobs.</p></div><span className={ui.muted}>{events.data?.length ?? 0} Einträge</span></div>{workflowLogContent(events, rawLog)}</section>

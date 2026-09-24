@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createAnsibleJob, createSecret, createTarget, listSecrets, type SecretKind, type SecretMetadata, type TargetKind, type TargetTransport } from "../api";
-import { queryKeys, useAnsibleJob, useTargets } from "../queries";
+import { queryKeys, useAnsibleJob, useAnsibleJobs, useTargets } from "../queries";
 import { TargetLifecycle } from "../components/TargetLifecycle";
 
 const kinds: Array<{ value: TargetKind; label: string; transport: TargetTransport }> = [
@@ -41,6 +41,7 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const targets = useTargets();
+  const jobs = useAnsibleJobs();
   const secrets = useQuery({ queryKey: ["secrets"], queryFn: ({ signal }) => listSecrets(signal) });
   const [name, setName] = useState("");
   const [address, setAddress] = useState("");
@@ -186,7 +187,7 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
           </div>
           <span className={ui.muted}>{visibleTargets.length} Einträge</span>
         </div>
-        <TargetInventory targets={visibleTargets} isLoading={targets.isLoading} />
+        <TargetInventory targets={visibleTargets} isLoading={targets.isLoading} jobs={jobs.data ?? []} />
       </section>
     </>
   );
@@ -344,10 +345,25 @@ function mutationError(error: unknown) {
   return error instanceof Error ? <p className={ui.errorState}>{error.message}</p> : null;
 }
 
-function TargetInventory({ targets, isLoading }: Readonly<{ targets: import("../api").TargetDto[]; isLoading: boolean }>) {
+function TargetInventory({ targets, isLoading, jobs }: Readonly<{ targets: import("../api").TargetDto[]; isLoading: boolean; jobs: import("../api").AnsibleJobDto[] }>) {
   if (isLoading) return <p className={ui.muted}>Lade Zugangsprofile…</p>;
   if (targets.length === 0) return <p className={ui.emptyState}>Noch keine Zugangsprofile für diese Ressourcenart angelegt.</p>;
-  return <div className={ui.tableWrap}><table><thead><tr><th>Name</th><th>Typ</th><th>Adresse</th><th>Transport</th><th>Agent</th><th>Status</th><th /></tr></thead><tbody>{targets.map((target) => <tr key={target.id}><td><Link className={ui.textLink} to={`/targets/${target.id}`}>{target.name}</Link></td><td>{target.kind}</td><td>{target.address}</td><td>{target.transport}</td><td title="Wird vom letzten authentifizierten Heartbeat des Zielsystems gemeldet.">{target.agent_version ? `v${target.agent_version}` : "Noch keine Meldung"}</td><td><span className={cn(ui.statusBadge, targetStateClass(target.state) === "success" ? ui.statusSuccess : targetStateClass(target.state) === "neutral" ? ui.statusNeutral : ui.statusPending)}>{targetStateLabel(target.state)}</span></td><td><Link className={ui.textLink} to={`/targets/${target.id}/packages`}>Inventar</Link></td></tr>)}</tbody></table></div>;
+  return <div className={ui.tableWrap}><table><thead><tr><th>Name</th><th>Typ</th><th>Adresse</th><th>Transport</th><th>Agent</th><th>Status</th><th>Onboarding-Protokolle</th><th /></tr></thead><tbody>{targets.map((target) => <tr key={target.id}><td><Link className={ui.textLink} to={`/targets/${target.id}`}>{target.name}</Link></td><td>{target.kind}</td><td>{target.address}</td><td>{target.transport}</td><td title="Wird vom letzten authentifizierten Heartbeat des Zielsystems gemeldet.">{target.agent_version ? `v${target.agent_version}` : "Noch keine Meldung"}</td><td><span className={cn(ui.statusBadge, targetStateClass(target.state) === "success" ? ui.statusSuccess : targetStateClass(target.state) === "neutral" ? ui.statusNeutral : ui.statusPending)}>{targetStateLabel(target.state)}</span></td><td><TargetOnboardingProtocols target={target} jobs={jobs} /></td><td><Link className={ui.textLink} to={`/targets/${target.id}/packages`}>Inventar</Link></td></tr>)}</tbody></table></div>;
+}
+
+function TargetOnboardingProtocols({ target, jobs }: Readonly<{ target: import("../api").TargetDto; jobs: import("../api").AnsibleJobDto[] }>) {
+  const targetJobs = jobs.filter((job) => "target" in job.target && job.target.target === target.id);
+  const deployment = targetJobs.find((job) => job.operation === "deploy_agent");
+  if (!deployment) return <span className={ui.muted}>Noch nicht gestartet</span>;
+  const laterJobs = targetJobs.filter((job) => job.created_at >= deployment.created_at);
+  const health = laterJobs.find((job) => job.operation === "health_check");
+  const inventory = laterJobs.find((job) => job.operation === "collect_package_inventory");
+  const steps = [
+    ["Agent", deployment],
+    ["Healthcheck", health],
+    ["Paketinventar", inventory],
+  ] as const;
+  return <div className={ui.lifecycleList}>{steps.map(([label, job]) => job ? <Link className={ui.textLink} key={label} to={`/workflows/${job.id}`} title={`${label}: ${job.status}`}>{label} · {job.status}</Link> : <span className={ui.muted} key={label}>{label} · ausstehend</span>)}</div>;
 }
 
 function targetStateClass(state: "pending" | "managed" | "disabled") {

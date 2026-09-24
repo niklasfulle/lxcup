@@ -51,7 +51,7 @@ pub(crate) use targets::{
 mod workflows;
 pub(crate) use workflows::{
     create_ansible_job, create_enrollment, get_ansible_job, get_ansible_job_events, get_enrollment,
-    list_ansible_jobs,
+    list_ansible_jobs, retry_ansible_job,
 };
 mod worker;
 pub(crate) use worker::get_worker_availability;
@@ -347,6 +347,19 @@ impl ApiState {
         dispatched
     }
 
+    /// Resumes the dependent jobs for completed onboarding deployments.
+    /// This controller-owned reconciliation is independent of UI polling.
+    pub async fn reconcile_onboarding_jobs(&self) -> usize {
+        let _guard = self.scheduler_lock.lock().await;
+        match workflows::reconcile_onboarding_jobs(self).await {
+            Ok(queued) => queued,
+            Err(error) => {
+                tracing::warn!(error = ?error, "onboarding job reconciliation failed");
+                0
+            }
+        }
+    }
+
     #[cfg(test)]
     pub async fn replace_nodes(&self, _nodes: Vec<lxcup_core::Node>) {}
 
@@ -598,6 +611,10 @@ pub fn router(state: ApiState) -> Router {
             get(list_ansible_jobs).post(create_ansible_job),
         )
         .route("/api/v1/ansible/jobs/{job_id}", get(get_ansible_job))
+        .route(
+            "/api/v1/ansible/jobs/{job_id}/retry",
+            post(retry_ansible_job),
+        )
         .route(
             "/api/v1/ansible/jobs/{job_id}/events",
             get(get_ansible_job_events),

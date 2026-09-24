@@ -488,6 +488,13 @@ impl AnsibleJobCoordinator {
 
     pub fn retry(&mut self, id: AnsibleJobId) -> Result<AnsibleJob, CoordinatorError> {
         let job = self.jobs.get(&id).ok_or(CoordinatorError::NotFound)?;
+        if self
+            .active_targets
+            .get(&job.target)
+            .is_some_and(|active| *active != id)
+        {
+            return Err(CoordinatorError::TargetBusy);
+        }
         if job.status != AnsibleJobStatus::Failed
             || (job.operation == AnsibleOperation::UpdatePackages
                 && job.mode == ExecutionMode::Apply)
