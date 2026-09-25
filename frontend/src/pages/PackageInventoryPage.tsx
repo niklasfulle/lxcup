@@ -1,7 +1,10 @@
-import { useDeferredValue, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { cn } from "../classnames";
-import { useAnsibleJobs, usePackageInventory, useTargetTelemetry, useTargets } from "../queries";
+import { createAnsibleJob, type AnsibleJobDto } from "../api";
+import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
+import { queryKeys, useAnsibleJobs, usePackageInventory, useTargetTelemetry, useTargets } from "../queries";
 
 type TelemetrySample = NonNullable<ReturnType<typeof useTargetTelemetry>["data"]>["samples"][number];
 
@@ -50,19 +53,47 @@ function TelemetryChart({ samples }: Readonly<{ samples: TelemetrySample[] }>) {
 
 export function PackageInventoryPage() {
   const { targetId } = useParams();
+  const queryClient = useQueryClient();
   const inventory = usePackageInventory(targetId);
   const telemetry = useTargetTelemetry(targetId);
   const targets = useTargets();
   const jobs = useAnsibleJobs();
+  const [submittedInventoryJob, setSubmittedInventoryJob] = useState<AnsibleJobDto>();
+  const refreshedInventoryJob = useRef<string | undefined>(undefined);
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
   const [sortBy, setSortBy] = useState<"name" | "version">("name");
   const target = targets.data?.find((item) => item.id === targetId);
-  const inventoryJob = (jobs.data ?? [])
+  const inventoryJobs = (jobs.data ?? [])
     .filter((job) => job.operation === "collect_package_inventory" && "target" in job.target && job.target.target === targetId)
-    .sort((left, right) => right.created_at.localeCompare(left.created_at))[0];
+    .sort((left, right) => right.created_at.localeCompare(left.created_at));
+  const inventoryJob = submittedInventoryJob
+    ? inventoryJobs.find((job) => job.id === submittedInventoryJob.id) ?? submittedInventoryJob
+    : inventoryJobs[0];
+  const hasActiveInventoryJob = inventoryJobs.some((job) => isActiveInventoryJob(job.status)) || Boolean(submittedInventoryJob && !inventoryJobs.some((job) => job.id === submittedInventoryJob.id) && isActiveInventoryJob(submittedInventoryJob.status));
   const latestSample = telemetry.data?.samples.at(-1);
   const telemetryStale = latestSample ? Date.now() - new Date(latestSample.collected_at).getTime() > 15_000 : false;
+  const collectInventory = useMutation({
+    mutationFn: () => createAnsibleJob({
+      operation: "collect_package_inventory",
+      target_id: targetId,
+      mode: "check",
+      parameters: { operation: "collect_package_inventory" },
+      idempotency_key: `inventory-refresh-${targetId}-${crypto.randomUUID()}`,
+      confirmed: true,
+    }),
+    onSuccess: (job) => {
+      setSubmittedInventoryJob(job);
+      queryClient.setQueryData<AnsibleJobDto[]>(queryKeys.ansibleJobs, (current) => [job, ...(current ?? []).filter((item) => item.id !== job.id)]);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.ansibleJobs });
+    },
+  });
+
+  useEffect(() => {
+    if (!targetId || !inventoryJob || inventoryJob.status !== "succeeded" || refreshedInventoryJob.current === inventoryJob.id) return;
+    refreshedInventoryJob.current = inventoryJob.id;
+    void queryClient.invalidateQueries({ queryKey: queryKeys.packageInventory(targetId) });
+  }, [inventoryJob, queryClient, targetId]);
   const packages = useMemo(() => {
     const all = inventory.data?.packages ?? [];
     return [...all]
@@ -78,10 +109,14 @@ export function PackageInventoryPage() {
       {telemetryContent(telemetry)}
     </section>
     <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-        <span className="text-[var(--muted)]">Erhebungsstatus: {inventoryStatusLabel(inventory.data?.status, inventory.isLoading)}</span>
-        {inventoryJob ? <Link className="mt-3 inline-block text-xs font-semibold text-lxcup-primary hover:underline" to={`/workflows/${inventoryJob.id}`}>Inventarisierungs-Workflow · {inventoryJob.status}</Link> : <span className="text-[var(--muted)]">Kein Inventarisierungs-Workflow vorhanden</span>}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="grid gap-1"><span className="text-[var(--muted)]">Erhebungsstatus: {inventoryStatusLabel(inventory.data?.status, inventory.isLoading)}</span>
+          {inventoryJob ? <Link className={cn("inline-flex w-fit items-center border border-transparent px-2 py-1 text-xs font-semibold hover:border-[var(--primary)] hover:underline", jobStatusBadgeClass(inventoryJob.status))} to={`/workflows/${inventoryJob.id}`}>Inventarisierungs-Workflow · {jobStatusLabel(inventoryJob.status)}</Link> : <span className="text-xs text-[var(--muted)]">Kein Inventarisierungs-Workflow vorhanden</span>}
+        </div>
+        {target ? <button className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={collectInventory.isPending || hasActiveInventoryJob || target.state !== "managed"} onClick={() => collectInventory.mutate()}>{collectInventory.isPending ? "Wird eingereiht…" : hasActiveInventoryJob ? "Inventarisierung läuft" : "Inventarisierung starten"}</button> : null}
       </div>
+      {target && target.state !== "managed" ? <p className="text-xs text-[var(--muted)]">Die Erfassung ist erst möglich, wenn das Ziel verbunden ist.</p> : null}
+      {collectInventory.error instanceof Error ? <p className="font-semibold text-[var(--error)]" role="alert">Inventarisierung konnte nicht gestartet werden: {collectInventory.error.message}</p> : null}
       {inventory.isLoading ? <p className="text-[var(--muted)]">Paketinventar wird geladen…</p> : null}
       {inventory.error ? <p className="font-semibold text-[var(--error)]" role="alert">{inventory.error.message}</p> : null}
       {inventory.data?.status === "not_collected" ? <div className={cn("border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-[var(--ink)]", "border-[#bad0fa] bg-[var(--primary-soft)]")}><strong>Noch kein Paketinventar</strong><p>Die erste Inventarisierung wird nach dem Onboarding eingereiht. Anschließend erscheint hier die vollständige, durchsuchbare Paketliste.</p></div> : null}
@@ -92,6 +127,10 @@ export function PackageInventoryPage() {
       </> : null}
     </section>
   </>;
+}
+
+function isActiveInventoryJob(status: string) {
+  return ["queued", "checking", "planned", "applying"].includes(status);
 }
 
 function telemetryContent(telemetry: TelemetryQuery) {

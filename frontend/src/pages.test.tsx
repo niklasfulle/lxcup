@@ -51,7 +51,7 @@ const container: ContainerDto = { id: 101, node_id: "node-1", name: "web-lxc", o
 const secret = (id: string, name: string, kind: "ssh_password" | "ssh_known_hosts" | "agent_token" = "ssh_password") => ({ metadata: { metadata: { id, name, kind, scope: { type: "global" as const }, created_at: "2026-01-01", updated_at: "2026-01-01" }, status: "active" as const } });
 
 vi.mock("./queries", () => ({
-  queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id], dockerDiscovery: (id: number) => ["docker-discovery", id], schedules: ["schedules"], updatePolicies: ["update-policies"] },
+  queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id], dockerDiscovery: (id: number) => ["docker-discovery", id], packageInventory: (id: string) => ["targets", id, "package-inventory"], telemetry: (id: string) => ["targets", id, "telemetry"], schedules: ["schedules"], updatePolicies: ["update-policies"] },
   useTargets: () => mocks.targets,
   useContainers: () => mocks.containers,
   useAnsibleJobs: () => mocks.jobs,
@@ -300,12 +300,45 @@ describe("inventory pages", () => {
     ] };
     renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
     expect(screen.getByRole("figure", { name: /CPU-, RAM/ })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Inventarisierungs-Workflow · succeeded" })).toHaveAttribute("href", "/workflows/inventory-job");
+    expect(screen.getByRole("link", { name: "Inventarisierungs-Workflow · Erfolgreich" })).toHaveAttribute("href", "/workflows/inventory-job");
     expect(screen.getByText("2 installierte Pakete")).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("z. B. curl oder 8.5"), { target: { value: "zlib" } });
     expect(screen.getByText("zlib")).toBeInTheDocument();
     expect(screen.queryByText("curl")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Sortierung"), { target: { value: "version" } });
+  });
+
+  it("starts one package inventory job and prevents duplicate runs while it is queued", async () => {
+    mocks.targets.data = [target];
+    mocks.packageInventory.data = { target_id: target.id, status: "not_collected", collected_at: null, packages: [] };
+    renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
+
+    const startButton = screen.getByRole("button", { name: "Inventarisierung starten" });
+    await userEvent.click(startButton);
+
+    await waitFor(() => expect(mocks.createAnsibleJob).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "collect_package_inventory",
+      target_id: target.id,
+      mode: "check",
+      parameters: { operation: "collect_package_inventory" },
+      confirmed: true,
+    })));
+    expect(screen.getByRole("link", { name: "Inventarisierungs-Workflow · Wartet" })).toHaveAttribute("href", "/workflows/job-deploy");
+    expect(screen.getByRole("button", { name: "Inventarisierung läuft" })).toBeDisabled();
+  });
+
+  it("shows job submission failures and blocks inventory on an unconnected target", async () => {
+    mocks.targets.data = [{ ...target, state: "pending" }];
+    renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
+    expect(screen.getByRole("button", { name: "Inventarisierung starten" })).toBeDisabled();
+    expect(screen.getByText("Die Erfassung ist erst möglich, wenn das Ziel verbunden ist.")).toBeInTheDocument();
+
+    cleanup();
+    mocks.targets.data = [target];
+    mocks.createAnsibleJob.mockRejectedValueOnce(new Error("worker unavailable"));
+    renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
+    await userEvent.click(screen.getByRole("button", { name: "Inventarisierung starten" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Inventarisierung konnte nicht gestartet werden: worker unavailable");
   });
 
   it("shows inventory and telemetry loading, empty and error states", () => {
