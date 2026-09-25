@@ -20,6 +20,8 @@ use tokio::{process::Command, time::timeout};
 use tracing::Instrument;
 use uuid::Uuid;
 
+mod execution_support;
+
 #[derive(Deserialize)]
 struct Manifest {
     version: String,
@@ -258,22 +260,7 @@ async fn invoke(
     };
     let context = prepare_invocation(r, job, target, dir).await?;
     if job.mode == lxcup_ansible::ExecutionMode::Apply {
-        job.transition_to(AnsibleJobStatus::Applying)
-            .map_err(|_| JobFailureCode::PlaybookFailed)?;
-        repos
-            .ansible_jobs
-            .update(job)
-            .await
-            .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-        event(
-            repos,
-            job.id,
-            JobEventKind::StatusChanged {
-                status: AnsibleJobStatus::Applying,
-            },
-        )
-        .await
-        .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+        execution_support::mark_job_applying(repos, job).await?;
     }
     let playbook = playbook(job.operation, target.kind).ok_or(JobFailureCode::PlaybookFailed)?;
     let out = timeout(
@@ -297,95 +284,10 @@ async fn invoke(
     .await
     .map_err(|_| JobFailureCode::Timeout)?
     .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    let redactions = [
-        Some(context.credential.expose()),
-        context.agent_token.as_ref().map(|value| value.expose()),
-    ];
-    for (source, output) in [("stdout", &out.stdout), ("stderr", &out.stderr)] {
-        let message = redact_output(&String::from_utf8_lossy(output), &redactions);
-        if !message.trim().is_empty() {
-            event(
-                repos,
-                job.id,
-                JobEventKind::WorkerLog {
-                    source: source.to_owned(),
-                    message,
-                },
-            )
-            .await
-            .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-        }
-    }
-    if job.mode == lxcup_ansible::ExecutionMode::Apply {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        for (task, changed) in finished_task_results(&stdout) {
-            event(repos, job.id, JobEventKind::TaskFinished { task, changed })
-                .await
-                .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-        }
-        event(
-            repos,
-            job.id,
-            JobEventKind::WorkerLog {
-                source: "apply".to_owned(),
-                message: apply_summary(&stdout, out.status.success()),
-            },
-        )
-        .await
-        .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    }
-    if job.mode == lxcup_ansible::ExecutionMode::Check {
-        event(
-            repos,
-            job.id,
-            JobEventKind::WorkerLog {
-                source: "check".to_owned(),
-                message: check_mode_summary(&String::from_utf8_lossy(&out.stdout)),
-            },
-        )
-        .await
-        .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    }
-    if job.mode == lxcup_ansible::ExecutionMode::Plan {
-        event(
-            repos,
-            job.id,
-            JobEventKind::WorkerLog {
-                source: "plan".to_owned(),
-                message: plan_summary(&String::from_utf8_lossy(&out.stdout)),
-            },
-        )
-        .await
-        .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    }
+    execution_support::emit_worker_streams(repos, job.id, &out, &context).await?;
+    execution_support::emit_mode_summary(repos, job, &out).await?;
     if let Some(source) = reconciliation_source {
-        if out.status.success() {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let decision = reconciliation_decision(&stdout);
-            let message = reconciliation_summary(decision);
-            event(
-                repos,
-                job.id,
-                JobEventKind::WorkerLog {
-                    source: "reconcile".to_owned(),
-                    message: message.clone(),
-                },
-            )
-            .await
-            .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-            finalize_reconciliation_source(repos, source, decision, &message).await?;
-        } else {
-            event(
-                repos,
-                job.id,
-                JobEventKind::WorkerLog {
-                    source: "reconcile".to_owned(),
-                    message: "Ist-Zustand konnte nicht zuverlässig ermittelt werden. Der Ursprungsjob bleibt abgleichspflichtig; dieser Reconcile-Lauf kann nach Behebung der Verbindungsursache erneut versucht werden.".to_owned(),
-                },
-            )
-            .await
-            .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-        }
+        execution_support::reconcile_job(repos, job.id, source, &out).await?;
     }
     if !out.status.success() {
         let output = format!(
@@ -396,22 +298,7 @@ async fn invoke(
         return Err(classify_playbook_failure(&output));
     };
     if job.operation == AnsibleOperation::CollectPackageInventory {
-        let snapshot = read_package_inventory(dir, target.id)?;
-        repos
-            .package_inventory
-            .replace(&snapshot)
-            .await
-            .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-        event(
-            repos,
-            job.id,
-            JobEventKind::TaskFinished {
-                task: format!("package inventory: {} packages", snapshot.packages.len()),
-                changed: false,
-            },
-        )
-        .await
-        .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+        execution_support::persist_package_inventory(repos, job.id, dir, target.id).await?;
     }
     Ok(job.mode == lxcup_ansible::ExecutionMode::Apply
         && playbook_changed(&String::from_utf8_lossy(&out.stdout)))
@@ -673,31 +560,45 @@ fn finished_task_results(stdout: &str) -> Vec<(String, bool)> {
     let mut current: Option<(String, bool, bool)> = None;
     for line in stdout.lines() {
         if let Some(task) = task_header_name(line) {
-            if let Some((name, changed, finished)) = current.take() {
-                if finished {
-                    results.push((name, changed));
-                }
-            }
+            push_finished_task(&mut current, &mut results);
             current = Some((task.to_owned(), false, false));
-        } else if let Some((_, changed, finished)) = current.as_mut() {
-            let outcome = line.trim_start();
-            if outcome.starts_with("changed: [") {
-                *changed = true;
-                *finished = true;
-            } else if ["ok: [", "fatal: [", "unreachable: ["]
-                .iter()
-                .any(|prefix| outcome.starts_with(prefix))
-            {
-                *finished = true;
-            }
+            continue;
         }
+        update_task_result(&mut current, line);
     }
-    if let Some((name, changed, finished)) = current {
-        if finished {
-            results.push((name, changed));
-        }
-    }
+    push_finished_task(&mut current, &mut results);
     results
+}
+
+fn push_finished_task(
+    current: &mut Option<(String, bool, bool)>,
+    results: &mut Vec<(String, bool)>,
+) {
+    if let Some((name, changed, finished)) = current {
+        if *finished {
+            results.push((std::mem::take(name), *changed));
+        }
+    }
+    *current = None;
+}
+
+fn update_task_result(current: &mut Option<(String, bool, bool)>, line: &str) {
+    let Some((_, changed, finished)) = current.as_mut() else {
+        return;
+    };
+    let outcome = line.trim_start();
+    if outcome.starts_with("changed: [") {
+        *changed = true;
+        *finished = true;
+    } else if is_finished_outcome(outcome) {
+        *finished = true;
+    }
+}
+
+fn is_finished_outcome(outcome: &str) -> bool {
+    ["ok: [", "fatal: [", "unreachable: ["]
+        .iter()
+        .any(|prefix| outcome.starts_with(prefix))
 }
 
 fn task_header_name(line: &str) -> Option<&str> {
