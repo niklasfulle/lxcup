@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -85,6 +85,7 @@ import { ResourceTree } from "./components/ResourceTree";
 import { TargetDetailPage } from "./pages/TargetDetailPage";
 import { PackageInventoryPage } from "./pages/PackageInventoryPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
+import { UpdatePoliciesPage } from "./pages/UpdatePoliciesPage";
 import { ContainersPage } from "./pages/ContainersPage";
 
 function renderPage(element: React.ReactElement, route = "/") {
@@ -140,7 +141,7 @@ describe("inventory pages", () => {
   it("renders resource tree entries and empty state", () => {
     mocks.targets.data = [target];
     renderPage(<ResourceTree />);
-    expect(screen.getByText("test-target")).toBeInTheDocument();
+    expect(screen.getAllByText("test-target").length).toBeGreaterThan(0);
     cleanup();
     mocks.targets.data = [{ ...target, state: "pending" }];
     renderPage(<ResourceTree />);
@@ -155,11 +156,24 @@ describe("inventory pages", () => {
     expect(screen.queryByText("Keine Zugänge angelegt")).not.toBeInTheDocument();
   });
 
-  it("renders dashboard data and empty state", () => {
+  it("renders the dashboard system overview, resources, and recent workflows", () => {
     mocks.targets.data = [target];
+    mocks.jobs.data = [{ id: "dashboard-job", operation: "health_check", target: { target: target.id }, status: "failed", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:01:00Z" }];
     renderPage(<Dashboard />);
     expect(screen.getByRole("heading", { name: "Übersicht" })).toBeInTheDocument();
-    expect(screen.getByText(/test-target \(managed\)/)).toBeInTheDocument();
+    expect(screen.getByText("test-target")).toBeInTheDocument();
+    expect(screen.getByText("Verbunden")).toBeInTheDocument();
+    expect(screen.getByText("Worker · Verfügbar")).toBeInTheDocument();
+    expect(screen.getByText("Healthcheck")).toBeInTheDocument();
+    expect(screen.getByText("Fehlgeschlagen")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /LXC-Container.*1 Ziele.*Manuell eingebundene LXCs/ })).toHaveAttribute("href", "/containers");
+  });
+
+  it("shows resource onboarding shortcuts on an empty dashboard", () => {
+    renderPage(<Dashboard />);
+    expect(screen.getByText("Es sind noch keine Ressourcen registriert. Wähle unten den passenden Ressourcenbereich aus.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Linux-Server/ })).toHaveAttribute("href", "/servers");
+    expect(screen.queryByRole("link", { name: /LXC einbinden/ })).not.toBeInTheDocument();
   });
 
   it("renders missing and healthy container details and submits an action", async () => {
@@ -183,14 +197,36 @@ describe("inventory pages", () => {
     renderPage(<TargetDetailPage />, "/targets/target-1");
     expect(screen.getByRole("heading", { name: "test-target" })).toBeInTheDocument();
     expect(screen.getByText("Veraltet")).toBeInTheDocument();
+    expect(screen.getByText(/Der letzte Heartbeat liegt mehr als 2 Minuten zurück/)).toBeInTheDocument();
     expect(screen.getByText(/1 Pakete/)).toBeInTheDocument();
-    expect(screen.getByText("health check")).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: /CPU-Auslastung im Verlauf/ })).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: /RAM-Auslastung im Verlauf/ })).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: /Speicher-Auslastung im Verlauf/ })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Docker-Inventar dieses Hosts" })).toHaveAttribute("href", "/docker?host=101");
-    expect(screen.getByRole("link", { name: "Workflows dieses Ziels" })).toHaveAttribute("href", "/workflows?target=target-1");
+    expect(screen.getByText("Healthcheck")).toBeInTheDocument();
+    const workflowLink = screen.getByRole("link", { name: /Healthcheck/ });
+    expect(workflowLink).toHaveAttribute("href", "/workflows/job-1");
+    expect(workflowLink.querySelector("svg")).toHaveClass("h-5", "w-5");
+    expect(workflowLink.querySelector("small")).toHaveAttribute("title", "Job job-1");
+    expect(screen.getByRole("figure", { name: /CPU-Auslastung im Verlauf/ })).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /RAM-Auslastung im Verlauf/ })).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /Speicher-Auslastung im Verlauf/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Docker-Inventar öffnen/ })).toHaveAttribute("href", "/docker?host=101");
+    expect(screen.getByRole("link", { name: /Alle Workflows/ })).toHaveAttribute("href", "/workflows?target=target-1");
     expect(screen.getByText("web")).toBeInTheDocument();
+  });
+
+  it("updates the heartbeat warning when the two-minute limit passes without reloading", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      mocks.targets.data = [{ ...target, updated_at: "2026-01-01T00:00:00Z" }];
+      renderPage(<TargetDetailPage />, "/targets/target-1");
+
+      expect(screen.queryByText(/Der letzte Heartbeat liegt mehr als 2 Minuten zurück/)).not.toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(120_001); });
+      vi.setSystemTime(new Date("2026-01-01T00:02:00.001Z"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(screen.getByText(/Der letzte Heartbeat liegt mehr als 2 Minuten zurück/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("covers target detail loading, missing, empty and dependency errors", () => {
@@ -237,7 +273,7 @@ describe("inventory pages", () => {
     expect(screen.getByText("Deaktiviert")).toBeInTheDocument();
     expect(screen.getByText("Windows")).toBeInTheDocument();
     expect(screen.getByText("Noch nicht erhoben")).toBeInTheDocument();
-    expect(screen.getByText("deploy agent")).toBeInTheDocument();
+    expect(screen.getByText("Agent installieren")).toBeInTheDocument();
   });
 
   it("filters workflow detail links to the selected target", () => {
@@ -247,9 +283,9 @@ describe("inventory pages", () => {
       { id: "job-other", operation: "deploy_agent", target: { target: "target-2" }, status: "failed", created_at: "2026-01-01", updated_at: "2026-01-01" },
     ];
     renderPage(<WorkflowsPage />, "/workflows?target=target-1");
-    expect(screen.getByRole("link", { name: "health check" })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "deploy agent" })).not.toBeInTheDocument();
-    expect(screen.getByText("Jobs für test-target.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Healthcheck/ })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Agent installieren/ })).not.toBeInTheDocument();
+    expect(screen.getByText("Ausführungen für test-target.")).toBeInTheDocument();
   });
 
   it("searches and sorts package inventory while rendering telemetry", () => {
@@ -263,7 +299,7 @@ describe("inventory pages", () => {
       { collected_at: "2026-01-01T00:00:00Z", cpu_basis_points: 1200, memory_basis_points: 3400, storage_basis_points: 5600, load_1_milli: 100, network_rx_bytes: null, network_tx_bytes: null, process_count: null },
     ] };
     renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
-    expect(screen.getByRole("img", { name: /CPU-, RAM/ })).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /CPU-, RAM/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Inventarisierungs-Workflow · succeeded" })).toHaveAttribute("href", "/workflows/inventory-job");
     expect(screen.getByText("2 installierte Pakete")).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("z. B. curl oder 8.5"), { target: { value: "zlib" } });
@@ -324,10 +360,7 @@ describe("inventory pages", () => {
     ];
     renderPage(<SchedulesPage />);
     expect(screen.getByRole("heading", { name: "Zeitpläne" })).toBeInTheDocument();
-    expect(screen.getByText("Noch keine Zeitpläne angelegt.")).toBeInTheDocument();
-    expect(screen.getByText(/safe/)).toBeInTheDocument();
-    expect(screen.getByText(/paused/)).toBeInTheDocument();
-    expect(screen.getByText(/alle Pakete/)).toBeInTheDocument();
+    expect(screen.getByText("Noch keine Zeitpläne")).toBeInTheDocument();
     cleanup();
     mocks.schedules.data = [
       { id: "nightly", operation: "collect_package_inventory", timezone: "Europe/Berlin", target_ids: [target.id], every_minutes: 60, enabled: true, last_run_at: null, next_run_at: "2026-01-01T01:00:00Z", last_error: null },
@@ -335,18 +368,18 @@ describe("inventory pages", () => {
     ];
     renderPage(<SchedulesPage />);
     expect(screen.getByText("nightly")).toBeInTheDocument();
-    expect(screen.getByText("aktiv")).toBeInTheDocument();
+    expect(screen.getAllByText("Aktiv").length).toBeGreaterThan(0);
     expect(screen.getByText("worker offline")).toBeInTheDocument();
-    expect(screen.getByText("pausiert")).toBeInTheDocument();
+    expect(screen.getAllByText("Pausiert").length).toBeGreaterThan(0);
   });
 
   it("validates, submits and reports schedule form states", async () => {
     mocks.targets.data = [target];
     renderPage(<SchedulesPage />);
-    const submit = screen.getByRole("button", { name: "Zeitplan anlegen" });
+    const submit = screen.getByRole("button", { name: /Zeitplan speichern/ });
     expect(submit).toBeDisabled();
     await userEvent.type(screen.getByPlaceholderText("nightly-inventory"), "nightly");
-    await userEvent.selectOptions(screen.getAllByRole("combobox", { name: "Ziel" })[1], target.id);
+    await userEvent.selectOptions(screen.getAllByRole("combobox", { name: "Ziel" })[0], target.id);
     expect(submit).toBeEnabled();
     fireEvent.click(screen.getByLabelText("Schwellwert aktivieren"));
     await userEvent.click(submit);
@@ -364,9 +397,9 @@ describe("inventory pages", () => {
 
   it("creates an update policy and converts its maintenance window to minutes", async () => {
     mocks.targets.data = [target];
-    renderPage(<SchedulesPage />);
+    renderPage(<UpdatePoliciesPage />);
     await userEvent.type(screen.getByPlaceholderText("security-updates"), "security");
-    await userEvent.selectOptions(screen.getAllByRole("combobox", { name: "Ziel" })[0], target.id);
+    await userEvent.selectOptions(screen.getAllByRole("combobox", { name: "Freigegebenes Ziel" })[0], target.id);
     await userEvent.type(screen.getByPlaceholderText("curl, openssl"), "curl, openssl");
     fireEvent.change(screen.getByDisplayValue("00:00"), { target: { value: "01:00" } });
     fireEvent.change(screen.getByDisplayValue("23:59"), { target: { value: "02:00" } });
@@ -382,14 +415,34 @@ describe("inventory pages", () => {
     })));
   });
 
+  it("lists policies with their target, packages, risk and UTC maintenance window", () => {
+    mocks.targets.data = [target];
+    mocks.updatePolicies.data = [{ id: "security", enabled: true, allowed_targets: [target.id], allowed_packages: ["curl", "openssl"], maintenance_start_minute: 60, maintenance_end_minute: 120, timezone: "UTC", maximum_risk: "medium" }];
+    renderPage(<UpdatePoliciesPage />);
+    expect(screen.getByRole("heading", { name: "Update-Policies" })).toBeInTheDocument();
+    expect(screen.getAllByText("test-target").length).toBeGreaterThan(0);
+    expect(screen.getByText("curl, openssl")).toBeInTheDocument();
+    expect(screen.getByText((_text, element) => element?.tagName === "DD" && element.textContent === "01:00–02:00")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Zu den Zeitplänen/ })).toHaveAttribute("href", "/schedules");
+  });
+
+  it("links to policy management when creating a package-update schedule", async () => {
+    mocks.targets.data = [target];
+    renderPage(<SchedulesPage />);
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Aufgabe" }), "update_packages");
+    expect(screen.getByRole("link", { name: /Zuerst eine Policy erstellen/ })).toHaveAttribute("href", "/update-policies");
+  });
+
   it("discovers and manages docker workloads", async () => {
     mocks.containers.data = [container];
     renderPage(<DockerPage />);
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
     await userEvent.selectOptions(screen.getByRole("combobox"), "101");
     expect(screen.getByText(/Noch keine Docker-Container/)).toBeInTheDocument();
     mocks.workloads.data = [{ host_container_id: 101, id: "docker-1", name: "web", image: "nginx", state: "running", status: "Up", ports: ["80/tcp"], started_at: null, labels: ["app=web"], presence: "present", change_state: "new", management_state: "discovered", discovered_at: "2026-01-01" }];
     cleanup();
     renderPage(<DockerPage />);
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
     await userEvent.selectOptions(screen.getByRole("combobox"), "101");
     expect(await screen.findByText("web")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Aufnehmen" }));
@@ -399,39 +452,42 @@ describe("inventory pages", () => {
     await waitFor(() => expect(mocks.removeDockerWorkload).toHaveBeenCalledWith(101, "docker-1"));
   });
 
-  it("covers loading, error and filtered empty inventory states", () => {
+  it("covers loading, error and filtered empty inventory states", async () => {
     mocks.targets.isLoading = true;
     renderPage(<Dashboard />);
-    expect(screen.getAllByText("Daten werden geladen…").length).toBeGreaterThan(0);
+    expect(screen.getByText("Ressourcen werden geladen…")).toBeInTheDocument();
     cleanup();
     mocks.targets.isLoading = false;
     mocks.targets.error = new Error("target failure");
     renderPage(<Dashboard />);
-    expect(screen.getAllByText("target failure").length).toBeGreaterThan(0);
+    expect(screen.getByText("Ressourcen konnten nicht geladen werden: target failure")).toBeInTheDocument();
     cleanup();
     mocks.containers.data = [container];
     mocks.workloads.isLoading = true;
     renderPage(<DockerPage />);
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "101" } });
     expect(screen.getByText("Docker-Inventar wird geladen…")).toBeInTheDocument();
     cleanup();
     mocks.workloads.isLoading = false;
     mocks.workloads.error = new Error("docker failure");
     renderPage(<DockerPage />);
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "101" } });
     expect(screen.getByText("docker failure")).toBeInTheDocument();
   });
 
-  it("shows Docker discovery audit status, host, and reconciliation changes", () => {
+  it("shows Docker discovery audit status, host, and reconciliation changes", async () => {
     mocks.containers.data = [container];
     mocks.dockerDiscovery.data = { id: "run-1", host_container_id: 101, status: "failed", started_at: "2026-01-01T00:00:00Z", finished_at: "2026-01-01T00:00:01Z", container_count: 0, error_code: "docker_unavailable" };
     mocks.workloads.data = [{ host_container_id: 101, id: "docker-1", name: "web", image: "nginx:1", state: "exited", status: "Exited (0)", ports: [], started_at: null, labels: [], presence: "present", change_state: "changed", management_state: "discovered", discovered_at: "2026-01-01T00:00:00Z" }];
     renderPage(<DockerPage />);
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "101" } });
 
     expect(screen.getByText(/Host: web-lxc/)).toBeInTheDocument();
     expect(screen.getByText(/Fehler: docker_unavailable/)).toBeInTheDocument();
-    expect(screen.getByText("web-lxc")).toBeInTheDocument();
+    expect(screen.getAllByText("web-lxc").length).toBeGreaterThan(0);
     expect(screen.getByText(/exited · Exited/)).toBeInTheDocument();
     expect(screen.getByText(/geändert · entdeckt/)).toBeInTheDocument();
   });
@@ -451,37 +507,64 @@ describe("inventory pages", () => {
     expect(screen.queryByRole("button", { name: "Aufnehmen" })).not.toBeInTheDocument();
   });
 
-  it("opens Docker inventory with the selected host from a target deep link", () => {
+  it("opens Docker inventory with the selected host from a target deep link", async () => {
     mocks.containers.data = [container];
     renderPage(<DockerPage />, "/docker?host=101");
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.getByText("web-lxc")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
     expect(screen.getByRole("combobox")).toHaveValue("101");
     expect(screen.getByText(/Für diesen Host gibt es noch keinen protokollierten Discovery-Lauf/)).toBeInTheDocument();
   });
 });
 
 describe("onboarding and secret pages", () => {
+  it("keeps resource registration forms collapsed until the matching add button is clicked", async () => {
+    const sections = [
+      { area: "linux_server" as const, button: "Hinzufügen", heading: "Serverzugang konfigurieren" },
+      { area: "lxc" as const, button: "Hinzufügen", heading: "LXC-Container hinzufügen" },
+      { area: "windows_server" as const, button: "Hinzufügen", heading: "Windows-Zugang konfigurieren" },
+    ];
+
+    for (const section of sections) {
+      renderPage(<TargetsPage area={section.area} />);
+      expect(screen.queryByText("Verbindungsdaten")).not.toBeInTheDocument();
+      const toggle = screen.getByRole("button", { name: section.button });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await userEvent.click(toggle);
+      expect(screen.getByRole("heading", { name: section.heading })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Schließen" })).toHaveAttribute("aria-expanded", "true");
+      await userEvent.click(screen.getByRole("button", { name: "Schließen" }));
+      expect(screen.queryByText("Verbindungsdaten")).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
+
   it("creates and rotates a secret", async () => {
     renderPage(<SecretsPage />);
-    expect(await screen.findByText("ssh-password")).toBeInTheDocument();
+    expect(await screen.findByText("SSH-Passwort")).toBeInTheDocument();
+    expect(screen.getAllByText("Aktiv").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Umfang: Global").length).toBeGreaterThan(0);
     const inputs = screen.getAllByRole("textbox");
     await userEvent.type(inputs[0], "new-secret");
-    await userEvent.type(screen.getByLabelText("Wert"), "value");
+    await userEvent.type(screen.getByLabelText("Secret-Wert"), "value");
     await userEvent.click(screen.getByRole("button", { name: "Secret speichern" }));
     await userEvent.click(screen.getAllByRole("button", { name: "Rotieren" })[0]);
-    await userEvent.type(screen.getByPlaceholderText("Neuer Wert"), "rotated");
-    await userEvent.click(screen.getByRole("button", { name: "Bestätigen" }));
+    await userEvent.type(screen.getByPlaceholderText("Neuen Secret-Wert eingeben"), "rotated");
+    await userEvent.click(screen.getByRole("button", { name: "Rotation bestätigen" }));
     expect(mocks.createSecret).toHaveBeenCalled();
   });
 
   it("links token reconfiguration audit events to their deployment job", async () => {
     mocks.listSecretAudit.mockResolvedValue([{ secret_id: "agent", action: "agent_reconfiguration_queued", role: "admin", occurred_at: "2026-01-01T00:00:00Z", related_job_id: "job-deploy" }] as any);
     renderPage(<SecretsPage />);
-    expect(await screen.findByRole("link", { name: "Job ansehen" })).toHaveAttribute("href", "/workflows/job-deploy");
+    expect(await screen.findByRole("link", { name: /Workflow öffnen/ })).toHaveAttribute("href", "/workflows/job-deploy");
   });
 
   it("registers a target using an inline generated secret", async () => {
     mocks.targets.data = [];
     renderPage(<TargetsPage />);
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
     const fields = screen.getAllByRole("textbox");
     await userEvent.type(fields[0], "new-target");
     await userEvent.type(screen.getByPlaceholderText("IP oder DNS-Name …"), "192.0.2.20");
@@ -502,6 +585,7 @@ describe("onboarding and secret pages", () => {
     const writeText = vi.fn(async () => undefined);
     Object.assign(navigator, { clipboard: { writeText } });
     renderPage(<TargetsPage />);
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
     await userEvent.click(screen.getByRole("button", { name: /Installationsbefehl kopieren/ }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("bootstrap-lxcup-user.sh")));
     expect(screen.getByRole("button", { name: /Befehl kopiert/ })).toBeInTheDocument();
@@ -510,6 +594,7 @@ describe("onboarding and secret pages", () => {
   it("renders pending targets and submits a target with onboarding disabled", async () => {
     mocks.targets.data = [{ ...target, state: "pending" }];
     renderPage(<TargetsPage />);
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
     const fields = screen.getAllByRole("textbox");
     await userEvent.type(fields[0], "target-2");
     await userEvent.type(screen.getByPlaceholderText("IP oder DNS-Name …"), "192.0.2.21");
@@ -517,7 +602,7 @@ describe("onboarding and secret pages", () => {
     fireEvent.change(selects[1], { target: { value: "cred" } });
     fireEvent.change(selects[2], { target: { value: "known" } });
     fireEvent.change(selects[3], { target: { value: "agent" } });
-    fireEvent.submit(screen.getByRole("button", { name: "Ziel registrieren" }).closest("form")!);
+    fireEvent.submit(screen.getByRole("button", { name: "Hinzufügen" }).closest("form")!);
     await waitFor(() => expect(mocks.createTarget).toHaveBeenCalled());
   });
 
@@ -530,15 +615,35 @@ describe("onboarding and secret pages", () => {
     ];
     renderPage(<TargetsPage />);
 
-    expect(screen.getByRole("link", { name: "Agent · succeeded" })).toHaveAttribute("href", "/workflows/job-deploy");
-    expect(screen.getByRole("link", { name: "Healthcheck · succeeded" })).toHaveAttribute("href", "/workflows/job-health");
-    expect(screen.getByRole("link", { name: "Paketinventar · queued" })).toHaveAttribute("href", "/workflows/job-inventory");
+    expect(screen.getByRole("link", { name: "Agent · Erfolgreich" })).toHaveAttribute("href", "/workflows/job-deploy");
+    expect(screen.getByRole("link", { name: "Healthcheck · Erfolgreich" })).toHaveAttribute("href", "/workflows/job-health");
+    expect(screen.getByRole("link", { name: "Paketinventar · Wartet" })).toHaveAttribute("href", "/workflows/job-inventory");
   });
 
   it("shows the version reported by a connected target agent", () => {
     mocks.targets.data = [{ ...target, agent_version: "0.2.0" }];
     renderPage(<TargetsPage />);
     expect(screen.getByText("v0.2.0")).toBeInTheDocument();
+  });
+
+  it("uses the same resource-card inventory design for LXC, Linux, and Windows", () => {
+    const resources = [
+      { area: "lxc" as const, kind: "lxc" as const, badge: "LXC" },
+      { area: "linux_server" as const, kind: "linux_server" as const, badge: "Linux" },
+      { area: "windows_server" as const, kind: "windows_server" as const, badge: "Win" },
+    ];
+
+    for (const resource of resources) {
+      mocks.targets.data = [{ ...target, kind: resource.kind, agent_version: "0.2.0" }];
+      renderPage(<TargetsPage area={resource.area} />);
+
+      expect(screen.getByRole("list", { name: "Ressourcen" })).toBeInTheDocument();
+      expect(screen.getByText(resource.badge)).toBeInTheDocument();
+      expect(screen.getByText("v0.2.0")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Paketinventar für test-target" })).toHaveAttribute("href", "/targets/target-1/packages");
+      expect(screen.queryByRole("table")).not.toBeInTheDocument();
+      cleanup();
+    }
   });
 
   it("starts enrollment and displays a failed state", async () => {
@@ -621,14 +726,24 @@ describe("workflow pages", () => {
     await userEvent.click(screen.getByRole("button", { name: "Workflow starten" }));
     await waitFor(() => expect(mocks.createAnsibleJob).toHaveBeenCalled());
     expect(screen.getByText("playbook_failed")).toBeInTheDocument();
+    const protocolTable = screen.getByRole("table");
+    expect(protocolTable).toHaveTextContent("test-target");
+    expect(protocolTable).toHaveTextContent("Pakete aktualisieren");
+    expect(screen.getByText("1 fehlgeschlagen")).toBeInTheDocument();
+    expect(screen.queryByText(/In diesem Entwicklungs-Stack ist derzeit kein ausführender Ansible-Worker gestartet/)).not.toBeInTheDocument();
   });
 
   it("renders workflow logs and copies the technical log", async () => {
+    mocks.targets.data = [target];
     mocks.job.data = { id: "job-1", operation: "deploy_agent", playbook: "agent/deploy.yml", playbook_version: "1", target: { target: "target-1" }, mode: "apply", status: "succeeded", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" };
     mocks.events.data = [{ sequence: 1, job_id: "job-1", event: { kind: "worker_log", source: "stdout", message: "ok" }, created_at: "2026-01-01T00:00:00Z" }] as any;
     Object.assign(navigator, { clipboard: { writeText: vi.fn(async () => undefined) } });
     renderPage(<WorkflowDetailPage />, "/workflows/job-1");
+    expect(screen.getByRole("heading", { name: "Agent installieren" })).toBeInTheDocument();
+    expect(screen.getAllByText("test-target").length).toBeGreaterThan(0);
+    expect(screen.getByRole("listitem")).toHaveClass("grid");
     expect(await screen.findByText("Vollständiger technischer Log")).toBeInTheDocument();
+    expect(screen.getByText("Ungekürzte Controller- und Workerausgabe zum Kopieren und Debuggen.")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Log kopieren" }));
     expect(navigator.clipboard.writeText).toHaveBeenCalled();
   });
@@ -699,6 +814,22 @@ describe("workflow pages", () => {
 });
 
 describe("application shell", () => {
+  it("keeps the activity sidebar preference after reloading the app", async () => {
+    window.localStorage.removeItem("lxcup-activity-sidebar-open");
+    renderPage(<App />);
+    await screen.findByRole("link", { name: "lxcup Übersicht" });
+    const sidebar = document.querySelector('aside[aria-label="Aktivitäten"]');
+    expect(sidebar).not.toHaveClass("translate-x-full");
+    await userEvent.click(screen.getByRole("button", { name: "Aktivitäten ausblenden" }));
+    expect(window.localStorage.getItem("lxcup-activity-sidebar-open")).toBe("false");
+
+    cleanup();
+    renderPage(<App />);
+    await screen.findByRole("link", { name: "lxcup Übersicht" });
+    expect(screen.getByRole("button", { name: "Aktivitäten einblenden" })).toBeInTheDocument();
+    expect(document.querySelector('aside[aria-label="Aktivitäten"]')).toHaveClass("translate-x-full");
+  });
+
   it("asks for a bearer token and exposes the verified read-only role", async () => {
     mocks.getSession.mockRejectedValueOnce(new ApiError("authentication required", 401, "unauthorized"));
     mocks.getSession.mockResolvedValueOnce({ role: "viewer", expires_in_seconds: 3600 } as any);
@@ -732,17 +863,27 @@ describe("application shell", () => {
     expect(screen.getByRole("link", { name: "Secrets" })).toBeInTheDocument();
     expect(screen.getByText("Ansible-Worker nicht verfügbar")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Zugänge & Agenten" })).not.toBeInTheDocument();
-    expect(screen.getAllByText("＋ LXC einbinden").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("link", { name: /LXC einbinden/ })).not.toBeInTheDocument();
     expect(mocks.subscribe).toHaveBeenCalled();
     expect(await screen.findByText(/Echtzeitverbindung unterbrochen/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Benachrichtigungen" }));
-    expect(screen.getByText("Fehlgeschlagen")).toBeInTheDocument();
+    expect(document.querySelector("header")).toHaveClass("z-[60]");
+    expect(document.querySelector('aside[aria-label="Aktivitäten"]')).toHaveClass("z-40");
+    expect(screen.getAllByText("Fehlgeschlagen").length).toBeGreaterThan(0);
+    const notificationPanel = screen.getByText("Benachrichtigungen").closest("div.absolute") as HTMLElement;
+    const agentNotification = within(notificationPanel).getByRole("link", { name: /Agent installieren/ });
+    expect(agentNotification).toHaveTextContent("test-target");
+    expect(agentNotification).toHaveTextContent("lxc · 192.0.2.10");
+    expect(agentNotification).toHaveTextContent("Apply");
+    expect(agentNotification).toHaveTextContent("Job · job-ale");
     await userEvent.click(screen.getByRole("button", { name: "Alle als gelesen markieren" }));
     expect(screen.queryByText("2")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("link", { name: /deploy agent/ }));
+    await userEvent.click(agentNotification);
     await userEvent.click(screen.getByRole("button", { name: "Theme wechseln" }));
     cleanup();
     renderPage(<App />, "/unknown");
-    expect(await screen.findByText("Seite nicht gefunden")).toBeInTheDocument();
+    const breadcrumbs = await screen.findByRole("navigation", { name: "Brotkrumennavigation" });
+    expect(within(breadcrumbs).getByText("Seite nicht gefunden")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Seite nicht gefunden" })).toBeInTheDocument();
   });
 });

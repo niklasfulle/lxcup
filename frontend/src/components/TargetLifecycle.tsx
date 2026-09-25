@@ -1,4 +1,4 @@
-import { cn, ui } from "../ui";
+import { cn } from "../classnames";
 import { Link } from "react-router-dom";
 import type { TargetDto } from "../api";
 
@@ -25,22 +25,22 @@ export function TargetLifecycle({ target }: Readonly<{ target: TargetDto }>) {
   const statusClass = lifecycleStatusClass(target.state);
 
   return (
-    <section className={cn(ui.panel, ui.lifecyclePanel)} aria-label={`Onboarding-Status für ${target.name}`}>
-      <div className={ui.sectionHeading}>
+    <section className={cn("mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]", "mb-3")} aria-label={`Onboarding-Status für ${target.name}`}>
+      <div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start">
         <div>
-          <p className={ui.eyebrow}>Onboarding-Fortschritt</p>
+          <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Onboarding-Fortschritt</p>
           <h2>{target.name}</h2>
-          <p className={ui.muted}>{target.kind.toUpperCase()} · {target.address}{target.agent_version ? ` · Agent v${target.agent_version}` : " · Noch keine Agent-Version gemeldet"}</p>
+          <p className="text-[var(--muted)]">{target.kind.toUpperCase()} · {target.address}{target.agent_version ? ` · Agent v${target.agent_version}` : " · Noch keine Agent-Version gemeldet"}</p>
         </div>
-        <span className={cn(ui.statusBadge, statusClass === "success" ? ui.statusSuccess : statusClass === "neutral" ? ui.statusNeutral : ui.statusPending)}>{statusLabel}</span>
+        <span className={cn("inline-flex items-center px-2 py-0.5 text-xs font-bold", statusBadgeClass(statusClass))}>{statusLabel}</span>
       </div>
 
-      <ol className={ui.lifecycleSteps}>
+      <ol className="my-4 grid list-none grid-cols-1 gap-3 p-0 md:grid-cols-3">
         {steps.map((step, index) => {
           const status = stepStatus(target, step.key);
           return (
-            <li className={cn(ui.lifecycleStep, status === "complete" && ui.lifecycleComplete, status === "current" && ui.lifecycleCurrent)} key={step.key}>
-              <span className={ui.lifecycleMarker} aria-hidden="true">
+            <li className={cn("flex items-start gap-2 border-t-2 border-[var(--line)] pt-2 text-[var(--muted)]", status === "complete" && "border-[#8bd4b2] text-[var(--ink)]", status === "current" && "border-lxcup-primary text-[var(--ink)]")} key={step.key}>
+              <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full border border-[var(--line)] bg-[var(--panel)] text-xs font-bold text-[var(--muted)]" aria-hidden="true">
                 {stepMarker(status, index)}
               </span>
               <div>
@@ -69,6 +69,12 @@ function lifecycleStatusClass(state: TargetDto["state"]) {
   return "pending";
 }
 
+function statusBadgeClass(status: string) {
+  if (status === "success") return "bg-[var(--success-soft)] text-[var(--success)]";
+  if (status === "neutral") return "bg-[var(--paper-muted)] text-[var(--muted)]";
+  return "bg-[var(--warning-soft)] text-[var(--warning)]";
+}
+
 function stepMarker(status: ReturnType<typeof stepStatus>, index: number) {
   if (status === "complete") return "✓";
   if (status === "blocked") return "—";
@@ -78,10 +84,10 @@ function stepMarker(status: ReturnType<typeof stepStatus>, index: number) {
 
 function lifecycleCallout(target: TargetDto, isManaged: boolean, isDisabled: boolean) {
   if (isManaged) {
-    return <div className={cn(ui.callout, ui.calloutSuccess)}><strong>Der LXC ist bereit.</strong><p>Der Agent{target.agent_version ? ` v${target.agent_version}` : ""} ist verbunden. Healthchecks und Workflows können jetzt ausgeführt werden.</p><Link className={ui.textLink} to="/workflows">Workflows öffnen →</Link></div>;
+    return <div className={cn("border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-[var(--ink)]", "border-[#b7e7d0] bg-[var(--success-soft)]")}><strong>Der LXC ist bereit.</strong><p>Der Agent{target.agent_version ? ` v${target.agent_version}` : ""} ist verbunden. Healthchecks und Workflows können jetzt ausgeführt werden.</p><Link className="mt-3 inline-block text-xs font-semibold text-lxcup-primary hover:underline" to="/workflows">Workflows öffnen →</Link></div>;
   }
   if (isDisabled) {
-    return <div className={ui.callout}><strong>Das Ziel ist deaktiviert.</strong><p>Es werden keine Agenten- oder Workflow-Aktionen ausgeführt.</p></div>;
+    return <div className="border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-[var(--ink)]"><strong>Das Ziel ist deaktiviert.</strong><p>Es werden keine Agenten- oder Workflow-Aktionen ausgeführt.</p></div>;
   }
-  return <div className={cn(ui.callout, ui.calloutInfo)}><strong>Warum steht der Status auf „pending“?</strong><p>Das Ziel ist angelegt. Es wird erst als verbunden markiert, wenn der Agent bereitgestellt wurde und den ersten Heartbeat sendet.</p><div className={ui.actionRow}><Link className={ui.primaryButton} to={`/workflows?target=${encodeURIComponent(target.id)}`}>Agent-Workflow öffnen</Link>{target.kind === "lxc" && <Link className={ui.textLink} to="/enrollments/new">LXC-Auswahl öffnen</Link>}</div></div>;
+  return <div className={cn("border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-[var(--ink)]", "border-[#bad0fa] bg-[var(--primary-soft)]")}><strong>Warum steht der Status auf „pending“?</strong><p>Das Ziel ist angelegt. Es wird erst als verbunden markiert, wenn der Agent bereitgestellt wurde und den ersten Heartbeat sendet.</p><div className="flex flex-wrap items-center gap-2"><Link className="inline-flex justify-self-start items-center justify-center border border-lxcup-primary bg-lxcup-primary px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" to={`/workflows?target=${encodeURIComponent(target.id)}`}>Agent-Workflow öffnen</Link>{target.kind === "lxc" && <Link className="mt-3 inline-block text-xs font-semibold text-lxcup-primary hover:underline" to="/enrollments/new">LXC-Auswahl öffnen</Link>}</div></div>;
 }

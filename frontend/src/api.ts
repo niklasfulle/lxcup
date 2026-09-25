@@ -261,17 +261,7 @@ export class ApiClient {
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true }).replaceAll("\r\n", "\n");
-          let boundary = buffer.indexOf("\n\n");
-          while (boundary >= 0) {
-            const frame = buffer.slice(0, boundary);
-            buffer = buffer.slice(boundary + 2);
-            const type = frame.split("\n").find((line) => line.startsWith("event:"))?.slice(6).trim();
-            const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
-            if (type && data) {
-              try { onEvent(JSON.parse(data) as ApiEvent); } catch { onError?.(); }
-            }
-            boundary = buffer.indexOf("\n\n");
-          }
+          buffer = consumeEventFrames(buffer, onEvent, onError);
         }
       } catch (error) {
         if (!stopped && !(error instanceof DOMException && error.name === "AbortError")) onError?.();
@@ -301,24 +291,8 @@ export class ApiClient {
 
   private async requestAttempt<T>(path: string, init: RequestInit | undefined, attempt: number, maxAttempts: number): Promise<T> {
     const method = (init?.method ?? "GET").toUpperCase();
-    let workflowOperation: string | undefined;
-    if (path === "/api/v1/ansible/jobs" && method === "POST") {
-      try { workflowOperation = (JSON.parse(String(init?.body ?? "{}")) as { operation?: string }).operation; } catch { /* The API returns the canonical malformed-body error. */ }
-    }
-    const readOnlyPost = path === "/api/v1/auth/logout"
-      || (path === "/api/v1/ansible/jobs" && ["health_check", "collect_package_inventory"].includes(workflowOperation ?? ""))
-      || path.endsWith("/scans")
-      || /^\/api\/v1\/scans\/[^/]+\/run$/.test(path);
-    if (this.role === "viewer" && method !== "GET" && method !== "HEAD" && !readOnlyPost) {
-      throw new ApiError("Deine Rolle darf keine Änderungen ausführen.", 403, "permission_denied");
-    }
-    const destructive = method === "DELETE" || /\/(revoke|disable|abort)$/.test(path);
-    if (this.role === "operator" && (destructive || (path.startsWith("/api/v1/secrets") && method !== "GET"))) {
-      throw new ApiError("Für diese Aktion ist die Admin-Rolle erforderlich.", 403, "permission_denied");
-    }
-    const headers = new Headers(init?.headers);
-    if (this.token) headers.set("authorization", `Bearer ${this.token}`);
-    headers.set("accept", "application/json");
+    this.assertRequestPermission(path, method, init);
+    const headers = this.requestHeaders(init);
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
       cache: "no-store",
@@ -342,6 +316,67 @@ export class ApiClient {
     }
     return payload.data;
   }
+
+  private assertRequestPermission(path: string, method: string, init: RequestInit | undefined) {
+    const workflowOperation = readWorkflowOperation(path, method, init?.body);
+    const readOnlyPost = isReadOnlyPost(path, workflowOperation);
+    if (this.role === "viewer" && method !== "GET" && method !== "HEAD" && !readOnlyPost) {
+      throw new ApiError("Deine Rolle darf keine Änderungen ausführen.", 403, "permission_denied");
+    }
+    if (this.role === "operator" && isAdminOnlyRequest(path, method)) {
+      throw new ApiError("Für diese Aktion ist die Admin-Rolle erforderlich.", 403, "permission_denied");
+    }
+  }
+
+  private requestHeaders(init: RequestInit | undefined) {
+    const headers = new Headers(init?.headers);
+    if (this.token) headers.set("authorization", `Bearer ${this.token}`);
+    headers.set("accept", "application/json");
+    return headers;
+  }
+}
+
+function readWorkflowOperation(path: string, method: string, body: BodyInit | null | undefined) {
+  if (path !== "/api/v1/ansible/jobs" || method !== "POST") return undefined;
+  try { return parseWorkflowOperation(body); } catch { return undefined; }
+}
+
+function isReadOnlyPost(path: string, operation: string | undefined) {
+  return path === "/api/v1/auth/logout"
+    || (path === "/api/v1/ansible/jobs" && ["health_check", "collect_package_inventory"].includes(operation ?? ""))
+    || path.endsWith("/scans")
+    || /^\/api\/v1\/scans\/[^/]+\/run$/.test(path);
+}
+
+function isAdminOnlyRequest(path: string, method: string) {
+  const destructive = method === "DELETE" || /\/(revoke|disable|abort)$/.test(path);
+  return destructive || (path.startsWith("/api/v1/secrets") && method !== "GET");
+}
+
+function consumeEventFrames(
+  buffer: string,
+  onEvent: (event: ApiEvent) => void,
+  onError?: () => void,
+) {
+  let boundary = buffer.indexOf("\n\n");
+  while (boundary >= 0) {
+    const frame = buffer.slice(0, boundary);
+    buffer = buffer.slice(boundary + 2);
+    const type = frame.split("\n").find((line) => line.startsWith("event:"))?.slice(6).trim();
+    const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+    if (type && data) dispatchEventFrame(data, onEvent, onError);
+    boundary = buffer.indexOf("\n\n");
+  }
+  return buffer;
+}
+
+function dispatchEventFrame(data: string, onEvent: (event: ApiEvent) => void, onError?: () => void) {
+  try { onEvent(JSON.parse(data) as ApiEvent); } catch { onError?.(); }
+}
+
+function parseWorkflowOperation(body: BodyInit | null | undefined): string | undefined {
+  if (typeof body !== "string") return undefined;
+  return (JSON.parse(body) as { operation?: string }).operation;
 }
 
 function parsePayload<T>(text: string): ApiEnvelope<T> | ApiErrorBody | undefined {

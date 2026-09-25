@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -36,6 +36,11 @@ function DisabledProbe() {
   return <output>{[safety, enrollment, job, events, workloads].filter((query) => query.fetchStatus === "idle").length}</output>;
 }
 
+function TargetHeartbeatProbe() {
+  const targets = useTargets();
+  return <output>{targets.data?.[0]?.updated_at ?? "loading"}</output>;
+}
+
 describe("query hooks", () => {
   it("load each resource through its API query function", async () => {
     vi.spyOn(api, "listTargets").mockResolvedValue([]);
@@ -57,5 +62,29 @@ describe("query hooks", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><><DisabledProbe /><Probe /></></QueryClientProvider>);
     await waitFor(() => expect(screen.getByText("5")).toBeInTheDocument());
+  });
+
+  it("refreshes managed targets so the latest heartbeat timestamp becomes visible", async () => {
+    vi.useFakeTimers();
+    let request = 0;
+    const listTargets = vi.spyOn(api, "listTargets").mockImplementation(async () => {
+      request += 1;
+      return [{ id: "t", state: "managed", updated_at: request === 1 ? "heartbeat-1" : "heartbeat-2" }] as never;
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
+    try {
+      render(<QueryClientProvider client={client}><TargetHeartbeatProbe /></QueryClientProvider>);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText("heartbeat-1")).toBeInTheDocument();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(listTargets).toHaveBeenCalledTimes(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(client.getQueryData(["targets"])).toEqual([{ id: "t", state: "managed", updated_at: "heartbeat-2" }]);
+      expect(screen.getByText("heartbeat-2")).toBeInTheDocument();
+    } finally {
+      client.clear();
+      vi.useRealTimers();
+    }
   });
 });

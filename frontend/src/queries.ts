@@ -22,7 +22,11 @@ export function useTargets() {
     queryKey: queryKeys.targets,
     queryFn: ({ signal }) => listTargets(signal),
     staleTime: 15_000,
-    refetchInterval: (query) => query.state.data?.some((target) => target.state === "pending") ? 3_000 : false,
+    refetchInterval: (query) => {
+      const targets = query.state.data;
+      if (!targets?.length) return false;
+      return targets.some((target) => target.state === "pending") ? 3_000 : 30_000;
+    },
   });
 }
 

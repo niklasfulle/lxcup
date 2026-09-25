@@ -1,8 +1,14 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { createSchedule, createUpdatePolicy } from "../api";
+import { createSchedule } from "../api";
 import { queryKeys, useSchedules, useTargets, useUpdatePolicies } from "../queries";
-import { cn, ui } from "../ui";
+import { cn } from "../classnames";
+
+const panelClass = "border border-[var(--line)] bg-[var(--panel)] p-5 text-[var(--ink)] shadow-sm";
+const fieldClass = "grid min-w-0 gap-1.5 text-xs font-semibold text-[var(--muted)]";
+const inputClass = "mt-0.5 min-h-10 rounded-sm border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm font-normal text-[var(--ink)] transition-colors focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--primary)]/20";
+const primaryButtonClass = "inline-flex min-h-10 items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50";
 
 export function SchedulesPage() {
   const targets = useTargets();
@@ -19,52 +25,111 @@ export function SchedulesPage() {
   const [thresholdMetric, setThresholdMetric] = useState<"cpu_basis_points" | "memory_basis_points" | "storage_basis_points" | "heartbeat_age_seconds">("cpu_basis_points");
   const [thresholdOperator, setThresholdOperator] = useState<"greater_than_or_equal" | "less_than_or_equal">("greater_than_or_equal");
   const [thresholdValue, setThresholdValue] = useState("8000");
-  const [policyName, setPolicyName] = useState("");
-  const [policyTargetId, setPolicyTargetId] = useState("");
-  const [allowedPackages, setAllowedPackages] = useState("");
-  const [maximumRisk, setMaximumRisk] = useState<"low" | "medium" | "high">("high");
-  const [policyStart, setPolicyStart] = useState("00:00");
-  const [policyEnd, setPolicyEnd] = useState("23:59");
-  const [policyTimezone, setPolicyTimezone] = useState("UTC");
+
   const mutation = useMutation({
-    mutationFn: () => createSchedule({ id, operation, timezone, target_ids: [targetId], every_minutes: Number(everyMinutes), enabled: true, threshold: thresholdEnabled ? { metric: thresholdMetric, operator: thresholdOperator, value: Number(thresholdValue) } : null, policy_id: operation === "update_packages" ? policyId : null }),
+    mutationFn: () => createSchedule({
+      id,
+      operation,
+      timezone,
+      target_ids: [targetId],
+      every_minutes: Number(everyMinutes),
+      enabled: true,
+      threshold: thresholdEnabled ? { metric: thresholdMetric, operator: thresholdOperator, value: Number(thresholdValue) } : null,
+      policy_id: operation === "update_packages" ? policyId : null,
+    }),
     onSuccess: () => { setId(""); void queryClient.invalidateQueries({ queryKey: queryKeys.schedules }); },
   });
-  const policyMutation = useMutation({
-    mutationFn: () => createUpdatePolicy({ id: policyName, allowed_targets: [policyTargetId], allowed_packages: allowedPackages.split(",").map((item) => item.trim()).filter(Boolean), maintenance_start_minute: toMinute(policyStart), maintenance_end_minute: toMinute(policyEnd), timezone: policyTimezone, maximum_risk: maximumRisk, enabled: true }),
-    onSuccess: () => { setPolicyName(""); setAllowedPackages(""); void queryClient.invalidateQueries({ queryKey: queryKeys.updatePolicies }); },
-  });
+
   const canSubmit = id.trim() !== "" && targetId !== "" && Number(everyMinutes) > 0 && (operation !== "update_packages" || policyId !== "");
-  return <>
-    <header className={ui.pageHeader}><div><p className={ui.eyebrow}>Automatisierung</p><h1>Zeitpläne</h1><p className={ui.muted}>Wiederkehrende, registrierte Jobs mit Ziel- und Zeitzonenbezug.</p></div></header>
-    <section className={ui.panel}><h2>Update-Policy anlegen</h2><p className={ui.muted}>Legt zulässige Ziele, optionale Paketgruppen und maximales Risiko fest. Das Wartungsfenster gilt in UTC.</p><form onSubmit={(event) => { event.preventDefault(); if (policyName.trim() && policyTargetId) policyMutation.mutate(); }}><div className={ui.workflowGrid}>
-      <label><span>Name</span><input value={policyName} onChange={(event) => setPolicyName(event.target.value)} placeholder="security-updates" required /></label>
-      <label><span>Ziel</span><select value={policyTargetId} onChange={(event) => setPolicyTargetId(event.target.value)} required><option value="">Ziel auswählen</option>{(targets.data ?? []).map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>
-      <label><span>Erlaubte Pakete (Komma-getrennt, leer = alle)</span><input value={allowedPackages} onChange={(event) => setAllowedPackages(event.target.value)} placeholder="curl, openssl" /></label>
-      <label><span>Maximales Risiko</span><select value={maximumRisk} onChange={(event) => setMaximumRisk(event.target.value as typeof maximumRisk)}><option value="low">Niedrig</option><option value="medium">Mittel</option><option value="high">Hoch</option></select></label>
-      <label><span>Wartungsfenster von</span><input type="time" value={policyStart} onChange={(event) => setPolicyStart(event.target.value)} /></label>
-      <label><span>Wartungsfenster bis</span><input type="time" value={policyEnd} onChange={(event) => setPolicyEnd(event.target.value)} /></label>
-      <label><span>Zeitzone</span><input value={policyTimezone} readOnly aria-readonly="true" /></label>
-    </div><button className={ui.button} type="submit" disabled={!policyName.trim() || !policyTargetId || policyMutation.isPending}>{policyMutation.isPending ? "Speichert…" : "Policy speichern"}</button>{policyMutation.error ? <p className={ui.errorState} role="alert">{policyMutation.error.message}</p> : null}</form>{policies.data?.length ? <ul className={ui.auditList}>{policies.data.map((policy) => <li key={policy.id}><strong>{policy.id}</strong><span className={ui.muted}>{policy.enabled ? "aktiv" : "deaktiviert"} · Risiko {policy.maximum_risk} · {policy.allowed_packages.join(", ") || "alle Pakete"}</span></li>)}</ul> : <p className={ui.muted}>Noch keine Policies angelegt.</p>}</section>
-    <section className={ui.panel}><form onSubmit={(event) => { event.preventDefault(); if (canSubmit) mutation.mutate(); }}><div className={ui.workflowGrid}>
-      <label><span>Name</span><input value={id} onChange={(event) => setId(event.target.value)} placeholder="nightly-inventory" /></label>
-      <label><span>Ziel</span><select value={targetId} onChange={(event) => setTargetId(event.target.value)}><option value="">Ziel auswählen</option>{(targets.data ?? []).map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>
-      <label><span>Job</span><select value={operation} onChange={(event) => setOperation(event.target.value)}><option value="collect_package_inventory">Paketinventar</option><option value="health_check">Healthcheck</option><option value="update_packages">Paketupdate</option></select></label>
-      {operation === "update_packages" ? <label><span>Update-Policy</span><select value={policyId} onChange={(event) => setPolicyId(event.target.value)}><option value="">Policy auswählen</option>{(policies.data ?? []).filter((policy) => policy.enabled).map((policy) => <option key={policy.id} value={policy.id}>{policy.id}</option>)}</select></label> : null}
-      <label><span>Intervall (Minuten)</span><input type="number" min="1" max="10080" value={everyMinutes} onChange={(event) => setEveryMinutes(event.target.value)} /></label>
-      <label><span>Zeitzone</span><input value={timezone} onChange={(event) => setTimezone(event.target.value)} /></label>
-      <label className="flex items-center gap-2"><input aria-label="Schwellwert aktivieren" type="checkbox" checked={thresholdEnabled} onChange={(event) => setThresholdEnabled(event.target.checked)} /><span>Schwellwert aktivieren</span></label>
-      {thresholdEnabled ? <>
-        <label><span>Metrik</span><select value={thresholdMetric} onChange={(event) => setThresholdMetric(event.target.value as typeof thresholdMetric)}><option value="cpu_basis_points">CPU (Basispunkte)</option><option value="memory_basis_points">RAM (Basispunkte)</option><option value="storage_basis_points">Speicher (Basispunkte)</option><option value="heartbeat_age_seconds">Heartbeat-Alter (Sekunden)</option></select></label>
-        <label><span>Operator</span><select value={thresholdOperator} onChange={(event) => setThresholdOperator(event.target.value as typeof thresholdOperator)}><option value="greater_than_or_equal">größer/gleich</option><option value="less_than_or_equal">kleiner/gleich</option></select></label>
-        <label><span>Grenzwert</span><input type="number" min="0" value={thresholdValue} onChange={(event) => setThresholdValue(event.target.value)} /></label>
-      </> : null}
-    </div><button className={ui.primaryButton} type="submit" disabled={!canSubmit || mutation.isPending}>{mutation.isPending ? "Speichert…" : "Zeitplan anlegen"}</button>{mutation.error ? <p className={ui.errorState} role="alert">{mutation.error.message}</p> : null}</form></section>
-    <section className={ui.panel}><div className={ui.sectionHeading}><div><h2>Aktive Zeitpläne</h2><p className={ui.muted}>Doppelstarts und Ziel-Exklusivität werden vor dem Einreihen geprüft.</p></div><span className={ui.muted}>{schedules.data?.length ?? 0}</span></div>{schedules.isLoading ? <p className={ui.muted}>Zeitpläne werden geladen…</p> : schedules.error ? <p className={ui.errorState} role="alert">{schedules.error.message}</p> : schedules.data?.length ? <div className={ui.tableWrap}><table><thead><tr><th>Name</th><th>Job</th><th>Zeitzone</th><th>Letzter Lauf</th><th>Nächster Lauf</th><th>Fehler</th><th>Status</th></tr></thead><tbody>{schedules.data.map((schedule) => <tr key={schedule.id}><td>{schedule.id}</td><td>{schedule.operation.replaceAll("_", " ")}</td><td>{schedule.timezone}</td><td>{schedule.last_run_at ? new Date(schedule.last_run_at).toLocaleString() : "Noch nicht ausgeführt"}</td><td>{new Date(schedule.next_run_at).toLocaleString()}</td><td>{schedule.last_error ?? "—"}</td><td><span className={cn(ui.statusBadge, schedule.enabled ? ui.statusSuccess : ui.statusNeutral)}>{schedule.enabled ? "aktiv" : "pausiert"}</span></td></tr>)}</tbody></table></div> : <p className={ui.emptyState}>Noch keine Zeitpläne angelegt.</p>}</section>
-  </>;
+  const targetList = targets.data ?? [];
+  return <div className="grid gap-5">
+    <header className="flex flex-wrap items-end justify-between gap-4 border-b border-[var(--line)] pb-4 max-[720px]:items-start">
+      <div>
+        <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Automatisierung</p>
+        <h1 className="mb-1">Zeitpläne</h1>
+        <p className="mb-0 text-sm text-[var(--muted)]">Wiederkehrende Aufgaben planen und Paketupdates mit klaren Regeln absichern.</p>
+      </div>
+      <div className="flex shrink-0 items-center" aria-label="Zeitplanübersicht">
+        <span className="inline-flex min-h-9 items-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs text-[var(--muted)]"><strong className="mr-1 text-[var(--ink)]">{schedules.data?.length ?? 0}</strong>Zeitpläne</span>
+      </div>
+    </header>
+
+    <section className={panelClass} aria-labelledby="schedule-create-title">
+        <SectionHeading title="Zeitplan erstellen" description="Lege fest, welcher Job für welches Ziel wiederholt ausgeführt wird." id="schedule-create-title" />
+        <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); if (canSubmit) mutation.mutate(); }}>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className={fieldClass}><span>Name</span><input className={inputClass} value={id} onChange={(event) => setId(event.target.value)} placeholder="nightly-inventory" required /></label>
+            <label className={fieldClass}><span>Ziel</span><select className={inputClass} value={targetId} onChange={(event) => setTargetId(event.target.value)} required><option value="">Ziel auswählen</option>{targetList.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>
+            <label className={fieldClass}><span>Aufgabe</span><select className={inputClass} value={operation} onChange={(event) => setOperation(event.target.value)}><option value="collect_package_inventory">Paketinventar erfassen</option><option value="health_check">Healthcheck</option><option value="update_packages">Pakete aktualisieren</option></select></label>
+            <label className={fieldClass}><span>Intervall in Minuten</span><input className={inputClass} type="number" min="1" max="10080" value={everyMinutes} onChange={(event) => setEveryMinutes(event.target.value)} required /><span className="font-normal">Zum Beispiel 60 für eine stündliche Ausführung.</span></label>
+            <label className={fieldClass}><span>Zeitzone</span><input className={inputClass} value={timezone} onChange={(event) => setTimezone(event.target.value)} required /><span className="font-normal">Gilt für die Berechnung der nächsten Ausführung.</span></label>
+            {operation === "update_packages" ? <label className={fieldClass}><span>Update-Policy</span><select className={inputClass} value={policyId} onChange={(event) => setPolicyId(event.target.value)} required><option value="">Policy auswählen</option>{(policies.data ?? []).filter((policy) => policy.enabled).map((policy) => <option key={policy.id} value={policy.id}>{policy.id}</option>)}</select><Link className="w-fit font-semibold text-lxcup-primary hover:underline" to="/update-policies">Policies verwalten →</Link></label> : null}
+          </div>
+
+          <fieldset className="grid gap-3 border border-[var(--line)] bg-[var(--paper-muted)] p-4">
+            <legend className="px-1 text-xs font-bold text-[var(--ink)]">Optionale Ausführungsbedingung</legend>
+            <label className="flex cursor-pointer items-center gap-3 text-sm font-semibold text-[var(--ink)]">
+              <input className="!h-4 !w-4 !shrink-0 accent-lxcup-primary" aria-label="Schwellwert aktivieren" type="checkbox" checked={thresholdEnabled} onChange={(event) => setThresholdEnabled(event.target.checked)} />
+              <span>Nur bei erreichtem Schwellwert starten</span>
+            </label>
+            {thresholdEnabled ? <div className="grid gap-3 sm:grid-cols-3">
+              <label className={fieldClass}><span>Metrik</span><select className={inputClass} value={thresholdMetric} onChange={(event) => setThresholdMetric(event.target.value as typeof thresholdMetric)}><option value="cpu_basis_points">CPU-Auslastung</option><option value="memory_basis_points">RAM-Auslastung</option><option value="storage_basis_points">Speicherauslastung</option><option value="heartbeat_age_seconds">Heartbeat-Alter</option></select></label>
+              <label className={fieldClass}><span>Bedingung</span><select className={inputClass} value={thresholdOperator} onChange={(event) => setThresholdOperator(event.target.value as typeof thresholdOperator)}><option value="greater_than_or_equal">größer oder gleich</option><option value="less_than_or_equal">kleiner oder gleich</option></select></label>
+              <label className={fieldClass}><span>Grenzwert</span><input className={inputClass} type="number" min="0" value={thresholdValue} onChange={(event) => setThresholdValue(event.target.value)} /></label>
+            </div> : <p className="m-0 text-xs text-[var(--muted)]">Ohne Schwellwert läuft der Job ausschließlich nach dem gewählten Intervall.</p>}
+          </fieldset>
+
+          {operation === "update_packages" && !policies.data?.some((policy) => policy.enabled) ? <output className="m-0 block border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--ink)]">Es gibt noch keine aktive Update-Policy. <Link className="font-semibold text-lxcup-primary hover:underline" to="/update-policies">Zuerst eine Policy erstellen →</Link></output> : null}
+
+          {mutation.error ? <p className="m-0 font-semibold text-[var(--error)]" role="alert">{mutation.error.message}</p> : null}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line)] pt-4">
+            <p className="m-0 text-xs text-[var(--muted)]">{targetList.length ? `${targetList.length} Ziele verfügbar` : "Lege zuerst ein Ziel an, um einen Zeitplan zu erstellen."}</p>
+            <button className={primaryButtonClass} type="submit" disabled={!canSubmit || mutation.isPending || !targetList.length}>{mutation.isPending ? "Wird gespeichert…" : "Zeitplan speichern"}<span aria-hidden="true">→</span></button>
+          </div>
+        </form>
+    </section>
+
+    <section className={panelClass} aria-labelledby="active-schedules-title">
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3 border-b border-[var(--line)] pb-4">
+        <div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Übersicht</p><h2 id="active-schedules-title" className="mb-1">Zeitplan-Ausführungen</h2><p className="mb-0 text-sm text-[var(--muted)]">Nächste Läufe, letzte Ergebnisse und Fehler auf einen Blick.</p></div>
+        <span className="border border-[var(--line)] bg-[var(--paper-muted)] px-3 py-1.5 text-xs font-semibold text-[var(--muted)]">{schedules.data?.length ?? 0} gesamt</span>
+      </div>
+      <ScheduleContent schedules={schedules} targets={targetList} />
+    </section>
+  </div>;
 }
 
-function toMinute(time: string) {
-  const [hours, minutes] = time.split(":").map(Number);
-  return hours * 60 + minutes;
+function SectionHeading({ title, description, id }: Readonly<{ title: string; description: string; id: string }>) {
+  return <div className="mb-5 flex gap-3 border-b border-[var(--line)] pb-4">
+    <div><h2 id={id} className="mb-1">{title}</h2><p className="mb-0 text-sm leading-relaxed text-[var(--muted)]">{description}</p></div>
+  </div>;
+}
+
+function ScheduleContent({ schedules, targets }: Readonly<{ schedules: ReturnType<typeof useSchedules>; targets: NonNullable<ReturnType<typeof useTargets>["data"]> }>) {
+  if (schedules.isLoading) return <p className="m-0 py-8 text-center text-sm text-[var(--muted)]">Zeitpläne werden geladen…</p>;
+  if (schedules.error) return <p className="m-0 py-4 font-semibold text-[var(--error)]" role="alert">{schedules.error.message}</p>;
+  if (!schedules.data?.length) return <div className="grid min-h-36 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-4 py-8 text-center"><div><span className="mx-auto mb-3 grid h-9 w-9 place-items-center border border-[var(--line)] bg-[var(--panel)] text-lg text-[var(--muted)]" aria-hidden="true">↻</span><strong className="block text-sm">Noch keine Zeitpläne</strong><span className="mt-1 block text-xs text-[var(--muted)]">Erstelle oben einen Zeitplan, um wiederkehrende Jobs automatisch auszuführen.</span></div></div>;
+  return <div className="overflow-x-auto">
+    <table><thead><tr><th>Name</th><th>Aufgabe</th><th>Ziel</th><th>Intervall</th><th>Nächster Lauf</th><th>Letzter Lauf</th><th>Status</th><th>Letzter Fehler</th></tr></thead><tbody>
+      {schedules.data.map((schedule) => <tr key={schedule.id}>
+        <td><strong>{schedule.id}</strong><span className="mt-1 block text-xs text-[var(--muted)]">{schedule.timezone}</span></td>
+        <td>{operationLabel(schedule.operation)}</td>
+        <td>{schedule.target_ids.map((targetId) => targets.find((target) => target.id === targetId)?.name ?? targetId).join(", ")}</td>
+        <td>Alle {schedule.every_minutes} Min.</td>
+        <td>{new Date(schedule.next_run_at).toLocaleString()}</td>
+        <td>{schedule.last_run_at ? new Date(schedule.last_run_at).toLocaleString() : "Noch nicht ausgeführt"}</td>
+        <td><span className={cn("inline-flex items-center px-2 py-1 text-xs font-bold", schedule.enabled ? "bg-[var(--success-soft)] text-[var(--success)]" : "bg-[var(--paper-muted)] text-[var(--muted)]")}>{schedule.enabled ? "Aktiv" : "Pausiert"}</span></td>
+        <td>{schedule.last_error ? <span className="font-semibold text-[var(--error)]">{schedule.last_error}</span> : "—"}</td>
+      </tr>)}
+    </tbody></table>
+  </div>;
+}
+
+function operationLabel(operation: string) {
+  const labels: Record<string, string> = {
+    collect_package_inventory: "Paketinventar",
+    health_check: "Healthcheck",
+    update_packages: "Paketupdate",
+  };
+  return labels[operation] ?? operation.replaceAll("_", " ");
 }
