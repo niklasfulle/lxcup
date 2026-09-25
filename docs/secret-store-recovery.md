@@ -63,6 +63,18 @@ explizite Bestätigung und akzeptiert nur Datenbanknamen mit `test` oder
 .\scripts\restore-backup-test.ps1 -BackupFile .\backups\lxcup-<timestamp>.tar.age -AgeIdentity $env:LXCUP_BACKUP_AGE_IDENTITY -ConfirmIsolatedDatabase
 ```
 
+Wenn `age` lokal verfügbar ist, aber `pg_restore` und `psql` nicht installiert
+sind, können die PostgreSQL-Werkzeuge aus dem bereits laufenden Compose-
+PostgreSQL-Container verwendet werden:
+
+```powershell
+.\scripts\restore-backup-test.ps1 -BackupFile .\backups\lxcup-<timestamp>.tar.age -AgeIdentity $env:LXCUP_BACKUP_AGE_IDENTITY -ConfirmIsolatedDatabase -PostgresToolsContainer lxcup-postgres-test-1
+```
+
+`PostgresToolsContainer` muss auf den Container zeigen, der die in
+`DATABASE_TEST_URL` benannte isolierte Restore-Datenbank enthält. Das Skript
+prüft die Verbindung zur richtigen Datenbank vor der Integritätsprüfung.
+
 Der Restore-Test spielt die Datenbank wieder ein, führt ausstehende SQLx-
 Migrationen aus, prüft die Ziel-/Agent-Secret-Referenzen gegen das
 wiederhergestellte Secret-Store-Verzeichnis, validiert die verschlüsselten

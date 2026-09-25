@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$AgeRecipient,
     [string]$BackupDirectory = ".\backups",
+    [string]$StagingDirectory = [IO.Path]::GetTempPath(),
     [ValidateRange(1, 3650)]
     [int]$RetentionDays = 30
 )
@@ -21,7 +22,8 @@ function Protect-PrivateDirectory([string]$Path) {
 if ([string]::IsNullOrWhiteSpace($AgeRecipient)) { throw "AgeRecipient must be provided; the private key is never read by this script." }
 if (-not (Get-Command age -ErrorAction SilentlyContinue)) { throw "age is required for encrypted backups." }
 
-$staging = Join-Path ([IO.Path]::GetTempPath()) ("lxcup-backup-" + [guid]::NewGuid())
+$stagingRoot = Resolve-Path (New-Item -ItemType Directory -Force -Path $StagingDirectory)
+$staging = Join-Path $stagingRoot ("lxcup-backup-" + [guid]::NewGuid())
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $output = Join-Path (Resolve-Path (New-Item -ItemType Directory -Force -Path $BackupDirectory)) "lxcup-$timestamp.tar.age"
 try {
