@@ -646,6 +646,19 @@ describe("onboarding and secret pages", () => {
     }
   });
 
+  it("shows package inventory and telemetry health in each resource card", () => {
+    mocks.targets.data = [target];
+    mocks.packageInventory.data = { target_id: target.id, status: "complete", collected_at: "2099-01-01T00:00:00Z", packages: [{ name: "curl", installed_version: "8.5.0", architecture: "amd64", source: "apt" }] };
+    mocks.telemetry.data = { target_id: target.id, collected_at: "2099-01-01T00:00:00Z", samples: [{ collected_at: "2099-01-01T00:00:00Z", cpu_basis_points: 2500, memory_basis_points: 4000, storage_basis_points: 5000, load_1_milli: 100, network_rx_bytes: 10, network_tx_bytes: 20, process_count: 5 }] };
+
+    renderPage(<TargetsPage area="lxc" />);
+
+    expect(screen.getByRole("link", { name: "Paketinventar für test-target" })).toHaveAttribute("href", "/targets/target-1/packages");
+    expect(screen.getByText(/1 Pakete/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Systemauslastung für test-target" })).toHaveAttribute("href", "/targets/target-1");
+    expect(screen.getByText(/Aktuell/)).toBeInTheDocument();
+  });
+
   it("starts enrollment and displays a failed state", async () => {
     mocks.containers.data = [container];
     mocks.targets.data = [target];

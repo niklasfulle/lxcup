@@ -3,9 +3,10 @@ import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createAnsibleJob, createSecret, createTarget, listSecrets, type SecretKind, type SecretMetadata, type TargetKind, type TargetTransport } from "../api";
-import { queryKeys, useAnsibleJob, useAnsibleJobs, useTargets } from "../queries";
+import { createAnsibleJob, createSecret, createTarget, listSecrets, type AnsibleJobDto, type SecretKind, type SecretMetadata, type TargetDto, type TargetKind, type TargetTransport } from "../api";
+import { queryKeys, useAnsibleJob, useAnsibleJobs, usePackageInventory, useTargetTelemetry, useTargets } from "../queries";
 import { TargetLifecycle } from "../components/TargetLifecycle";
+import { isTelemetryStale } from "../telemetryFreshness";
 
 const kinds: Array<{ value: TargetKind; label: string; transport: TargetTransport }> = [
   { value: "lxc", label: "LXC", transport: "ssh" },
@@ -361,11 +362,36 @@ function mutationError(error: unknown) {
   return error instanceof Error ? <p className="font-semibold text-[var(--error)]">{error.message}</p> : null;
 }
 
-function TargetInventory({ targets, isLoading, jobs }: Readonly<{ targets: import("../api").TargetDto[]; isLoading: boolean; jobs: import("../api").AnsibleJobDto[] }>) {
+function TargetInventory({ targets, isLoading, jobs }: Readonly<{ targets: TargetDto[]; isLoading: boolean; jobs: AnsibleJobDto[] }>) {
   if (isLoading) return <p className="text-[var(--muted)]">Lade Zugangsprofile…</p>;
   if (targets.length === 0) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Noch keine Zugangsprofile für diese Ressourcenart angelegt.</p>;
   return <ul className="m-0 grid list-none gap-3 p-0" aria-label="Ressourcen">
-    {targets.map((target) => <li key={target.id}>
+    {targets.map((target) => <TargetInventoryCard key={target.id} target={target} jobs={jobs} />)}
+  </ul>;
+}
+
+function TargetInventoryCard({ target, jobs }: Readonly<{ target: TargetDto; jobs: AnsibleJobDto[] }>) {
+  const inventory = usePackageInventory(target.id);
+  const telemetry = useTargetTelemetry(target.id);
+  const latestSample = telemetry.data?.samples.at(-1);
+  const telemetryTime = telemetry.data?.collected_at ?? latestSample?.collected_at;
+  const telemetryStale = telemetryTime ? isTelemetryStale(telemetryTime) : false;
+  const inventorySummary = inventory.isLoading
+    ? "Wird geladen…"
+    : inventory.error
+      ? "Fehler beim Laden"
+      : inventory.data?.status === "complete"
+        ? `${inventory.data.packages.length} Pakete · ${inventory.data.collected_at ? new Date(inventory.data.collected_at).toLocaleString() : "Zeitpunkt unbekannt"}`
+        : "Noch nicht erhoben";
+  const telemetrySummary = telemetry.isLoading
+    ? "Wird geladen…"
+    : telemetry.error
+      ? "Fehler beim Laden"
+      : !telemetryTime
+        ? "Noch keine Telemetrie"
+        : `${telemetryStale ? "Veraltet" : "Aktuell"} · ${new Date(telemetryTime).toLocaleString()}`;
+
+  return <li>
       <article className="border border-[var(--line)] bg-[var(--paper-muted)] p-4 transition-colors hover:border-[var(--primary)]">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex min-w-0 items-start gap-3">
@@ -381,7 +407,7 @@ function TargetInventory({ targets, isLoading, jobs }: Readonly<{ targets: impor
           </div>
         </div>
 
-        <div className="mt-4 grid gap-4 border-t border-[var(--line)] pt-3 md:grid-cols-[minmax(8rem,0.7fr)_minmax(0,2fr)_auto] md:items-center">
+        <div className="mt-4 grid gap-4 border-t border-[var(--line)] pt-3 md:grid-cols-[minmax(8rem,0.7fr)_minmax(0,2fr)] xl:grid-cols-[minmax(8rem,0.7fr)_minmax(0,2fr)_minmax(14rem,1fr)] xl:items-center">
           <div>
             <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Installierte Agent-Version</p>
             <p className="mb-0 text-sm font-semibold" title="Wird vom letzten authentifizierten Heartbeat des Zielsystems gemeldet.">{target.agent_version ? `v${target.agent_version}` : <span className="font-normal text-[var(--muted)]">Noch keine Meldung</span>}</p>
@@ -390,11 +416,27 @@ function TargetInventory({ targets, isLoading, jobs }: Readonly<{ targets: impor
             <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Onboarding</p>
             <TargetOnboardingProtocols target={target} jobs={jobs} />
           </div>
-          <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/targets/${target.id}/packages`} aria-label={`Paketinventar für ${target.name}`}>Paketinventar <span className="ml-2" aria-hidden="true">→</span></Link>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
+            <TargetSignalLink to={`/targets/${target.id}/packages`} label="Paketinventar" value={inventorySummary} status={inventory.error ? "error" : inventory.data?.status === "complete" ? "success" : "neutral"} accessibleName={`Paketinventar für ${target.name}`} />
+            <TargetSignalLink to={`/targets/${target.id}`} label="Systemauslastung" value={telemetrySummary} status={telemetry.error ? "error" : telemetryStale ? "warning" : telemetryTime ? "success" : "neutral"} accessibleName={`Systemauslastung für ${target.name}`} />
+          </div>
         </div>
       </article>
-    </li>)}
-  </ul>;
+    </li>;
+}
+
+function TargetSignalLink({ to, label, value, status, accessibleName }: Readonly<{ to: string; label: string; value: string; status: "error" | "success" | "warning" | "neutral"; accessibleName: string }>) {
+  const statusClass = status === "success"
+    ? "border-[var(--success)]/40 bg-[var(--success-soft)] text-[var(--success)]"
+    : status === "warning"
+      ? "border-[var(--warning)]/40 bg-[var(--warning-soft)] text-[var(--warning)]"
+      : status === "error"
+        ? "border-[var(--error)]/40 bg-[var(--error-soft)] text-[var(--error)]"
+        : "border-[var(--line)] bg-[var(--panel)] text-[var(--muted)]";
+  return <Link className="grid min-w-0 gap-1 border border-[var(--line)] bg-[var(--panel)] px-3 py-2 hover:border-[var(--primary)] hover:bg-[var(--primary-soft)]" to={to} aria-label={accessibleName}>
+    <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">{label}</span>
+    <span className={cn("truncate border px-2 py-1 text-xs font-semibold", statusClass)} title={value}>{value}</span>
+  </Link>;
 }
 
 function targetKindShortLabel(kind: TargetKind) {
