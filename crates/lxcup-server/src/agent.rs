@@ -270,7 +270,13 @@ mod tests {
     use super::*;
     use axum::{Json, routing::get};
     use lxcup_secrets::{CreateSecret, SecretStore};
-    use std::{collections::VecDeque, sync::Arc};
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
     use tokio::sync::Mutex as AsyncMutex;
 
     fn secret_request(name: &str, kind: SecretKind, value: &str) -> CreateSecretRequest {
@@ -308,6 +314,22 @@ mod tests {
         State(queue): State<Arc<AsyncMutex<VecDeque<lxcup_agent::DockerDiscovery>>>>,
     ) -> Json<lxcup_agent::DockerDiscovery> {
         Json(queue.lock().await.pop_front().expect("test result queued"))
+    }
+
+    #[derive(Clone)]
+    struct DiscoveryConcurrency {
+        active: Arc<AtomicUsize>,
+        maximum: Arc<AtomicUsize>,
+    }
+
+    async fn slow_docker_result(
+        State(counter): State<DiscoveryConcurrency>,
+    ) -> Json<lxcup_agent::DockerDiscovery> {
+        let active = counter.active.fetch_add(1, Ordering::SeqCst) + 1;
+        counter.maximum.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        counter.active.fetch_sub(1, Ordering::SeqCst);
+        Json(docker_result(vec![docker_info("web", "nginx:1")]))
     }
 
     #[test]
@@ -728,6 +750,138 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(listed.data.len(), 1);
+        agent_task.abort();
+    }
+
+    #[tokio::test]
+    async fn scheduled_docker_discovery_records_failures_and_later_recovers() {
+        let mut unavailable = docker_result(Vec::new());
+        unavailable.available = false;
+        unavailable.reason = Some("docker unavailable".to_owned());
+        let results = Arc::new(AsyncMutex::new(VecDeque::from([
+            unavailable,
+            docker_result(vec![docker_info("web", "nginx:1")]),
+        ])));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let agent_task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new()
+                    .route("/docker/containers", get(next_docker_result))
+                    .with_state(results),
+            )
+            .await
+            .unwrap();
+        });
+
+        let state = ApiState::new();
+        let mut target = lxcup_core::Target::new(
+            "scheduled-lxc",
+            lxcup_core::TargetKind::Lxc,
+            "127.0.0.1",
+            lxcup_core::TargetTransport::Ssh,
+            SecretId::new(),
+            SecretId::new(),
+        )
+        .unwrap();
+        target.mark_managed();
+        let target_id = target.id;
+        let container_id = ContainerId::new(810);
+        let mut enrollment = lxcup_core::Enrollment::new(container_id, "scheduled-docker").unwrap();
+        enrollment.target_id = Some(target_id);
+        enrollment.state = lxcup_core::EnrollmentState::Connected;
+        state.store.write().await.targets.push(target);
+        state.store.write().await.enrollments.push(enrollment);
+        state
+            .store
+            .write()
+            .await
+            .schedules
+            .push(lxcup_core::JobSchedule {
+                id: "docker-every-hour".to_owned(),
+                operation: "docker_discovery".to_owned(),
+                timezone: "UTC".to_owned(),
+                target_ids: vec![target_id],
+                frequency: lxcup_core::ScheduleFrequency::EveryMinutes(60),
+                enabled: true,
+                threshold: None,
+                policy_id: None,
+                last_run_at: None,
+                next_run_at: chrono::Utc::now() - chrono::Duration::minutes(1),
+                last_error: None,
+            });
+        let client = AgentClient::new(
+            AgentClientConfig::new(format!("http://{address}"), "docker-schedule-token").unwrap(),
+        )
+        .unwrap();
+        state
+            .agents
+            .write()
+            .await
+            .insert(container_id, RegisteredAgent { client });
+
+        assert_eq!(state.dispatch_due_schedules().await, 0);
+        let first = state.store.read().await;
+        assert_eq!(
+            first.docker_discovery_runs[0].status,
+            lxcup_core::DockerDiscoveryStatus::Failed
+        );
+        assert!(first.schedules[0].last_error.is_some());
+        drop(first);
+
+        state.store.write().await.schedules[0].next_run_at =
+            chrono::Utc::now() - chrono::Duration::minutes(1);
+        assert_eq!(state.dispatch_due_schedules().await, 1);
+        let recovered = state.store.read().await;
+        assert_eq!(
+            recovered.docker_discovery_runs[1].status,
+            lxcup_core::DockerDiscoveryStatus::Succeeded
+        );
+        assert_eq!(recovered.docker_workloads.len(), 1);
+        assert!(recovered.schedules[0].last_error.is_none());
+        drop(recovered);
+        agent_task.abort();
+    }
+
+    #[tokio::test]
+    async fn simultaneous_docker_discoveries_are_serialized() {
+        let counter = DiscoveryConcurrency {
+            active: Arc::new(AtomicUsize::new(0)),
+            maximum: Arc::new(AtomicUsize::new(0)),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let maximum = counter.maximum.clone();
+        let agent_task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new()
+                    .route("/docker/containers", get(slow_docker_result))
+                    .with_state(counter),
+            )
+            .await
+            .unwrap();
+        });
+
+        let container_id = ContainerId::new(811);
+        let state = ApiState::new();
+        let client = AgentClient::new(
+            AgentClientConfig::new(format!("http://{address}"), "docker-parallel-token").unwrap(),
+        )
+        .unwrap();
+        state
+            .agents
+            .write()
+            .await
+            .insert(container_id, RegisteredAgent { client });
+        let first = run_docker_discovery(&state, container_id);
+        let second = run_docker_discovery(&state, container_id);
+        let (first, second) = tokio::join!(first, second);
+        assert!(first.is_ok() && second.is_ok());
+        assert_eq!(state.store.read().await.docker_discovery_runs.len(), 2);
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
+
         agent_task.abort();
     }
 

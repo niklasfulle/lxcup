@@ -5,8 +5,8 @@ use lxcup_ansible::{
     AnsibleJobRequest, AnsibleOperation, AnsibleParameters, ExecutionMode, JobSubmission,
 };
 use lxcup_core::{
-    ActorRole, ResourceLifecycle, ResourceTarget, SecretId, Target, TargetId, TargetState,
-    ThresholdMetric, ThresholdRule, UpdateRisk,
+    ActorRole, EnrollmentState, ResourceLifecycle, ResourceTarget, SecretId, Target, TargetId,
+    TargetKind, TargetState, ThresholdMetric, ThresholdRule, UpdateRisk,
 };
 
 pub(crate) async fn scheduled_target(
@@ -68,6 +68,9 @@ pub(crate) async fn dispatch_scheduled_target(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, String> {
     let target = scheduled_target(state, schedule, target_id).await?;
+    if schedule.operation == "docker_discovery" {
+        return dispatch_scheduled_docker_discovery(state, target_id, &target).await;
+    }
     let request = scheduled_job_request(state, schedule, target_id, &target, now).await?;
     let submission = state.ansible.write().await.submit(request);
     match submission {
@@ -85,6 +88,33 @@ pub(crate) async fn dispatch_scheduled_target(
         Ok(JobSubmission::Duplicate(_)) => Ok(false),
         Err(error) => Err(error.to_string()),
     }
+}
+
+async fn dispatch_scheduled_docker_discovery(
+    state: &ApiState,
+    target_id: TargetId,
+    target: &Target,
+) -> Result<bool, String> {
+    if target.kind != TargetKind::Lxc {
+        return Err("Docker discovery schedules require an LXC target".to_owned());
+    }
+    let container_id = state
+        .store
+        .read()
+        .await
+        .enrollments
+        .iter()
+        .rev()
+        .find(|enrollment| {
+            enrollment.target_id == Some(target_id)
+                && enrollment.state == EnrollmentState::Connected
+        })
+        .map(|enrollment| enrollment.container_id)
+        .ok_or_else(|| "LXC target has no connected Docker discovery host".to_owned())?;
+    crate::run_docker_discovery(state, container_id)
+        .await
+        .map(|_| true)
+        .map_err(|error| format!("scheduled Docker discovery failed ({})", error.code))
 }
 
 async fn scheduled_job_request(

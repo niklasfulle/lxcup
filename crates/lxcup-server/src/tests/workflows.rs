@@ -83,6 +83,110 @@ async fn schedules_validate_registered_targets_and_intervals() {
 }
 
 #[tokio::test]
+async fn docker_discovery_schedule_can_be_created_and_paused_or_resumed() {
+    let state = ApiState::new();
+    let mut target = Target::new(
+        "docker-host",
+        TargetKind::Lxc,
+        "192.0.2.90",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    target.mark_managed();
+    let target_id = target.id;
+    state.store.write().await.targets.push(target);
+    let create = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/schedules")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "id": "docker-nightly",
+                "operation": "docker_discovery",
+                "timezone": "Europe/Berlin",
+                "target_ids": [target_id],
+                "every_minutes": 30,
+                "enabled": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        router(state.clone())
+            .oneshot(create)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+
+    let pause = Request::builder()
+        .method(Method::PATCH)
+        .uri("/api/v1/schedules/docker-nightly")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"enabled":false}"#))
+        .unwrap();
+    assert_eq!(
+        router(state.clone()).oneshot(pause).await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert!(!state.store.read().await.schedules[0].enabled);
+
+    let resume = Request::builder()
+        .method(Method::PATCH)
+        .uri("/api/v1/schedules/docker-nightly")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"enabled":true}"#))
+        .unwrap();
+    assert_eq!(
+        router(state.clone())
+            .oneshot(resume)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(state.store.read().await.schedules[0].enabled);
+}
+
+#[tokio::test]
+async fn docker_discovery_schedule_rejects_non_lxc_targets() {
+    let state = ApiState::new();
+    let target = Target::new(
+        "linux-host",
+        TargetKind::LinuxServer,
+        "192.0.2.91",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    let target_id = target.id;
+    state.store.write().await.targets.push(target);
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/schedules")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "id": "docker-invalid",
+                "operation": "docker_discovery",
+                "timezone": "UTC",
+                "target_ids": [target_id],
+                "every_minutes": 30
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        router(state).oneshot(request).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn scheduler_dispatches_due_inventory_once_and_advances_slot() {
     let state = ApiState::new();
     let mut target = Target::new(

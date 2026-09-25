@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { createSchedule } from "../api";
+import { createSchedule, setScheduleEnabled } from "../api";
 import { queryKeys, useSchedules, useTargets, useUpdatePolicies } from "../queries";
 import { cn } from "../classnames";
 
@@ -39,6 +39,10 @@ export function SchedulesPage() {
     }),
     onSuccess: () => { setId(""); void queryClient.invalidateQueries({ queryKey: queryKeys.schedules }); },
   });
+  const enabledMutation = useMutation({
+    mutationFn: ({ scheduleId, enabled }: { scheduleId: string; enabled: boolean }) => setScheduleEnabled(scheduleId, enabled),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: queryKeys.schedules }); },
+  });
 
   const canSubmit = id.trim() !== "" && targetId !== "" && Number(everyMinutes) > 0 && (operation !== "update_packages" || policyId !== "");
   const targetList = targets.data ?? [];
@@ -59,8 +63,8 @@ export function SchedulesPage() {
         <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); if (canSubmit) mutation.mutate(); }}>
           <div className="grid gap-4 sm:grid-cols-2">
             <label className={fieldClass}><span>Name</span><input className={inputClass} value={id} onChange={(event) => setId(event.target.value)} placeholder="nightly-inventory" required /></label>
-            <label className={fieldClass}><span>Ziel</span><select className={inputClass} value={targetId} onChange={(event) => setTargetId(event.target.value)} required><option value="">Ziel auswählen</option>{targetList.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>
-            <label className={fieldClass}><span>Aufgabe</span><select className={inputClass} value={operation} onChange={(event) => setOperation(event.target.value)}><option value="collect_package_inventory">Paketinventar erfassen</option><option value="health_check">Healthcheck</option><option value="update_packages">Pakete aktualisieren</option></select></label>
+            <label className={fieldClass}><span>Ziel</span><select className={inputClass} value={targetId} onChange={(event) => { setTargetId(event.target.value); if (targetList.find((target) => target.id === event.target.value)?.kind !== "lxc") setOperation((current) => current === "docker_discovery" ? "collect_package_inventory" : current); }} required><option value="">Ziel auswählen</option>{targetList.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>
+            <label className={fieldClass}><span>Aufgabe</span><select className={inputClass} value={operation} onChange={(event) => setOperation(event.target.value)}><option value="collect_package_inventory">Paketinventar erfassen</option><option value="health_check">Healthcheck</option><option value="update_packages">Pakete aktualisieren</option>{targetList.find((target) => target.id === targetId)?.kind === "lxc" ? <option value="docker_discovery">Docker-Container erkennen</option> : null}</select></label>
             <label className={fieldClass}><span>Intervall in Minuten</span><input className={inputClass} type="number" min="1" max="10080" value={everyMinutes} onChange={(event) => setEveryMinutes(event.target.value)} required /><span className="font-normal">Zum Beispiel 60 für eine stündliche Ausführung.</span></label>
             <label className={fieldClass}><span>Zeitzone</span><input className={inputClass} value={timezone} onChange={(event) => setTimezone(event.target.value)} required /><span className="font-normal">Gilt für die Berechnung der nächsten Ausführung.</span></label>
             {operation === "update_packages" ? <label className={fieldClass}><span>Update-Policy</span><select className={inputClass} value={policyId} onChange={(event) => setPolicyId(event.target.value)} required><option value="">Policy auswählen</option>{(policies.data ?? []).filter((policy) => policy.enabled).map((policy) => <option key={policy.id} value={policy.id}>{policy.id}</option>)}</select><Link className="w-fit font-semibold text-lxcup-primary hover:underline" to="/update-policies">Policies verwalten →</Link></label> : null}
@@ -94,7 +98,8 @@ export function SchedulesPage() {
         <div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Übersicht</p><h2 id="active-schedules-title" className="mb-1">Zeitplan-Ausführungen</h2><p className="mb-0 text-sm text-[var(--muted)]">Nächste Läufe, letzte Ergebnisse und Fehler auf einen Blick.</p></div>
         <span className="border border-[var(--line)] bg-[var(--paper-muted)] px-3 py-1.5 text-xs font-semibold text-[var(--muted)]">{schedules.data?.length ?? 0} gesamt</span>
       </div>
-      <ScheduleContent schedules={schedules} targets={targetList} />
+      {enabledMutation.error ? <p className="mb-3 font-semibold text-[var(--error)]" role="alert">{enabledMutation.error.message}</p> : null}
+      <ScheduleContent schedules={schedules} targets={targetList} pending={enabledMutation.isPending} onToggle={(scheduleId, enabled) => enabledMutation.mutate({ scheduleId, enabled })} />
     </section>
   </div>;
 }
@@ -105,7 +110,7 @@ function SectionHeading({ title, description, id }: Readonly<{ title: string; de
   </div>;
 }
 
-function ScheduleContent({ schedules, targets }: Readonly<{ schedules: ReturnType<typeof useSchedules>; targets: NonNullable<ReturnType<typeof useTargets>["data"]> }>) {
+function ScheduleContent({ schedules, targets, onToggle, pending }: Readonly<{ schedules: ReturnType<typeof useSchedules>; targets: NonNullable<ReturnType<typeof useTargets>["data"]>; onToggle: (scheduleId: string, enabled: boolean) => void; pending: boolean }>) {
   if (schedules.isLoading) return <p className="m-0 py-8 text-center text-sm text-[var(--muted)]">Zeitpläne werden geladen…</p>;
   if (schedules.error) return <p className="m-0 py-4 font-semibold text-[var(--error)]" role="alert">{schedules.error.message}</p>;
   if (!schedules.data?.length) return <div className="grid min-h-36 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-4 py-8 text-center"><div><span className="mx-auto mb-3 grid h-9 w-9 place-items-center border border-[var(--line)] bg-[var(--panel)] text-lg text-[var(--muted)]" aria-hidden="true">↻</span><strong className="block text-sm">Noch keine Zeitpläne</strong><span className="mt-1 block text-xs text-[var(--muted)]">Erstelle oben einen Zeitplan, um wiederkehrende Jobs automatisch auszuführen.</span></div></div>;
@@ -118,7 +123,7 @@ function ScheduleContent({ schedules, targets }: Readonly<{ schedules: ReturnTyp
         <td>Alle {schedule.every_minutes} Min.</td>
         <td>{new Date(schedule.next_run_at).toLocaleString()}</td>
         <td>{schedule.last_run_at ? new Date(schedule.last_run_at).toLocaleString() : "Noch nicht ausgeführt"}</td>
-        <td><span className={cn("inline-flex items-center px-2 py-1 text-xs font-bold", schedule.enabled ? "bg-[var(--success-soft)] text-[var(--success)]" : "bg-[var(--paper-muted)] text-[var(--muted)]")}>{schedule.enabled ? "Aktiv" : "Pausiert"}</span></td>
+        <td><span className={cn("inline-flex items-center px-2 py-1 text-xs font-bold", schedule.enabled ? "bg-[var(--success-soft)] text-[var(--success)]" : "bg-[var(--paper-muted)] text-[var(--muted)]")}>{schedule.enabled ? "Aktiv" : "Pausiert"}</span><button className="ml-2 border border-[var(--line)] px-2 py-1 text-xs font-semibold hover:border-lxcup-primary disabled:opacity-50" type="button" disabled={pending} onClick={() => onToggle(schedule.id, !schedule.enabled)}>{schedule.enabled ? "Pausieren" : "Aktivieren"}</button></td>
         <td>{schedule.last_error ? <span className="font-semibold text-[var(--error)]">{schedule.last_error}</span> : "—"}</td>
       </tr>)}
     </tbody></table>
@@ -130,6 +135,7 @@ function operationLabel(operation: string) {
     collect_package_inventory: "Paketinventar",
     health_check: "Healthcheck",
     update_packages: "Paketupdate",
+    docker_discovery: "Docker-Container erkennen",
   };
   return labels[operation] ?? operation.replaceAll("_", " ");
 }

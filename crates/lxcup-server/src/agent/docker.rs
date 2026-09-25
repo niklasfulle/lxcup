@@ -149,6 +149,16 @@ pub(crate) async fn discover_docker_containers(
     Path(container_id): Path<String>,
 ) -> Result<Json<ApiEnvelope<DockerDiscoveryResultDto>>, ApiError> {
     let container_id = parse_container_id(&container_id)?;
+    Ok(Json(envelope(
+        run_docker_discovery(&state, container_id).await?,
+    )))
+}
+
+pub(crate) async fn run_docker_discovery(
+    state: &ApiState,
+    container_id: ContainerId,
+) -> Result<DockerDiscoveryResultDto, ApiError> {
+    let _guard = state.docker_discovery_lock.lock().await;
     let mut run = start_docker_discovery(&state, container_id).await?;
     state.publish(ApiEvent::status(
         "docker_discovery",
@@ -163,11 +173,11 @@ pub(crate) async fn discover_docker_containers(
             persist_docker_inventory(&state, repositories, container_id, &discovered, &mut run)
                 .await?;
         let run = finish_docker_discovery(&state, &mut run, container_count, None).await?;
-        return Ok(Json(envelope(DockerDiscoveryResultDto { run, workloads })));
+        return Ok(DockerDiscoveryResultDto { run, workloads });
     }
     let workloads = reconcile_memory_docker_inventory(&state, container_id, discovered).await;
     let run = finish_docker_discovery(&state, &mut run, container_count, None).await?;
-    Ok(Json(envelope(DockerDiscoveryResultDto { run, workloads })))
+    Ok(DockerDiscoveryResultDto { run, workloads })
 }
 
 async fn start_docker_discovery(

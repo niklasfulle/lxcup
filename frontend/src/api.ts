@@ -277,6 +277,15 @@ export class ApiClient {
     };
   }
 
+  async patch<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+    return this.request<T>(path, {
+      method: "PATCH",
+      signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     const maxAttempts = 3;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -401,6 +410,7 @@ export function getPackageInventory(targetId: string, signal?: AbortSignal) { re
 export function getTargetTelemetry(targetId: string, signal?: AbortSignal) { return apiClient.get<TelemetryDto>(`/api/v1/targets/${targetId}/telemetry`, signal); }
 export function listSchedules(signal?: AbortSignal) { return apiClient.get<ScheduleDto[]>("/api/v1/schedules", signal); }
 export function createSchedule(request: Omit<ScheduleDto, "last_run_at" | "next_run_at" | "last_error">, signal?: AbortSignal) { return apiClient.post<ScheduleDto>("/api/v1/schedules", request, signal); }
+export function setScheduleEnabled(id: string, enabled: boolean, signal?: AbortSignal) { return apiClient.patch<ScheduleDto>(`/api/v1/schedules/${encodeURIComponent(id)}`, { enabled }, signal); }
 export function listUpdatePolicies(signal?: AbortSignal) { return apiClient.get<UpdatePolicyDto[]>("/api/v1/update-policies", signal); }
 export function createUpdatePolicy(request: Omit<UpdatePolicyDto, "enabled"> & { enabled?: boolean }, signal?: AbortSignal) { return apiClient.post<UpdatePolicyDto>("/api/v1/update-policies", request, signal); }
 

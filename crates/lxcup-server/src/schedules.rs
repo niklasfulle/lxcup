@@ -22,6 +22,11 @@ pub(crate) struct CreateScheduleRequest {
     pub policy_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct SetScheduleEnabledRequest {
+    enabled: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ScheduleDto {
     pub id: String,
@@ -119,6 +124,42 @@ pub(super) async fn create_schedule(
     Ok((axum::http::StatusCode::CREATED, Json(envelope(dto))))
 }
 
+pub(super) async fn set_schedule_enabled(
+    State(state): State<ApiState>,
+    axum::Extension(actor_role): axum::Extension<ActorRole>,
+    axum::extract::Path(schedule_id): axum::extract::Path<String>,
+    JsonBody(request): JsonBody<SetScheduleEnabledRequest>,
+) -> Result<Json<ApiEnvelope<ScheduleDto>>, ApiError> {
+    require_permission(actor_role, Permission::Configure)?;
+    let updated = {
+        let mut store = state.store.write().await;
+        let schedule = store
+            .schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == schedule_id)
+            .ok_or_else(|| ApiError::not_found("schedule not found"))?;
+        schedule.enabled = request.enabled;
+        schedule.clone()
+    };
+    if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .schedules
+            .update(&updated)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    state.publish(super::ApiEvent::status(
+        "schedule",
+        updated.id.clone(),
+        if updated.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+    ));
+    Ok(Json(envelope(ScheduleDto::from(&updated))))
+}
+
 fn validate_schedule_fields(request: &CreateScheduleRequest) -> Result<(), ApiError> {
     if request.id.trim().is_empty() || request.id.len() > 128 {
         return Err(ApiError::bad_request(
@@ -140,7 +181,7 @@ fn validate_schedule_fields(request: &CreateScheduleRequest) -> Result<(), ApiEr
     }
     if !matches!(
         request.operation.as_str(),
-        "health_check" | "collect_package_inventory" | "update_packages"
+        "health_check" | "collect_package_inventory" | "update_packages" | "docker_discovery"
     ) {
         return Err(ApiError::bad_request(
             "invalid_operation",
@@ -151,6 +192,12 @@ fn validate_schedule_fields(request: &CreateScheduleRequest) -> Result<(), ApiEr
         return Err(ApiError::bad_request(
             "update_policy_required",
             "package updates require an explicit update policy",
+        ));
+    }
+    if request.operation == "docker_discovery" && request.threshold.is_some() {
+        return Err(ApiError::bad_request(
+            "invalid_threshold",
+            "Docker discovery does not support telemetry thresholds",
         ));
     }
     Ok(())
@@ -182,6 +229,19 @@ fn validate_schedule_resources(
         .any(|id| !store.targets.iter().any(|target| target.id == *id))
     {
         return Err(ApiError::not_found("schedule target not found"));
+    }
+    if request.operation == "docker_discovery"
+        && request.target_ids.iter().any(|target_id| {
+            !store
+                .targets
+                .iter()
+                .any(|target| target.id == *target_id && target.kind == lxcup_core::TargetKind::Lxc)
+        })
+    {
+        return Err(ApiError::bad_request(
+            "docker_discovery_requires_lxc",
+            "Docker discovery schedules require LXC targets",
+        ));
     }
     validate_schedule_policy_targets(request, store)
 }

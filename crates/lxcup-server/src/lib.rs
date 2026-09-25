@@ -54,7 +54,7 @@ pub(crate) use package_inventory::get_package_inventory;
 mod telemetry;
 pub(crate) use telemetry::get_target_telemetry;
 mod schedules;
-pub(crate) use schedules::{create_schedule, list_schedules};
+pub(crate) use schedules::{create_schedule, list_schedules, set_schedule_enabled};
 mod policies;
 pub(crate) use policies::{create_update_policy, list_update_policies};
 mod inventory;
@@ -70,6 +70,7 @@ pub(crate) use agent::{
     discover_docker_containers, get_agent_health, get_agent_metrics, get_docker_discovery,
     get_secret, list_docker_containers, list_secret_audit, list_secrets, map_secret_error,
     register_agent, remove_docker_container, revoke_agent, revoke_secret, rotate_secret,
+    run_docker_discovery,
 };
 
 mod errors;
@@ -98,6 +99,7 @@ pub struct ApiState {
     ansible: Arc<RwLock<AnsibleJobCoordinator>>,
     secrets: Arc<dyn SecretStore>,
     scheduler_lock: Arc<Mutex<()>>,
+    docker_discovery_lock: Arc<Mutex<()>>,
 }
 
 impl ApiState {
@@ -114,6 +116,7 @@ impl ApiState {
             ansible: Arc::new(RwLock::new(AnsibleJobCoordinator::default())),
             secrets: Arc::new(InMemorySecretStore::default()),
             scheduler_lock: Arc::new(Mutex::new(())),
+            docker_discovery_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -177,19 +180,6 @@ impl ApiState {
     /// worker operation.
     pub async fn dispatch_due_schedules(&self) -> usize {
         let _guard = self.scheduler_lock.lock().await;
-        if let Some(repositories) = self.repositories.clone() {
-            let cutoff = chrono::Utc::now() - chrono::Duration::seconds(10);
-            let worker_available = repositories
-                .worker_heartbeats
-                .latest_since(cutoff)
-                .await
-                .ok()
-                .flatten()
-                .is_some();
-            if !worker_available {
-                return 0;
-            }
-        }
         let now = chrono::Utc::now();
         let due = self
             .store
@@ -202,6 +192,10 @@ impl ApiState {
             .collect::<Vec<_>>();
         let mut dispatched = 0;
         for schedule in due {
+            if schedule.operation != "docker_discovery" && !self.scheduled_worker_available().await
+            {
+                continue;
+            }
             let mut failure = None;
             for target_id in &schedule.target_ids {
                 match dispatch_scheduled_target(self, &schedule, *target_id, now).await {
@@ -227,6 +221,19 @@ impl ApiState {
             }
         }
         dispatched
+    }
+
+    async fn scheduled_worker_available(&self) -> bool {
+        let Some(repositories) = self.repositories.as_ref() else {
+            return true;
+        };
+        repositories
+            .worker_heartbeats
+            .latest_since(chrono::Utc::now() - chrono::Duration::seconds(10))
+            .await
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     /// Resumes the dependent jobs for completed onboarding deployments.
@@ -406,6 +413,10 @@ pub fn router(state: ApiState) -> Router {
             get(list_schedules).post(create_schedule),
         )
         .route(
+            "/api/v1/schedules/{schedule_id}",
+            axum::routing::patch(set_schedule_enabled),
+        )
+        .route(
             "/api/v1/update-policies",
             get(list_update_policies).post(create_update_policy),
         )
@@ -583,6 +594,9 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/api/v1/containers/{container_id}/agent/health": {"get": {}},
     "/api/v1/containers/{container_id}/agent/metrics": {"get": {}},
     "/api/v1/containers/{container_id}/docker/discovery": {"get": {"responses": {"200": {"description": "Latest Docker discovery workflow"}}}},
+    "/api/v1/containers/{container_id}/docker/discover": {"post": {"responses": {"200": {"description": "Discover Docker workloads"}}}},
+    "/api/v1/schedules": {"get": {}, "post": {}},
+    "/api/v1/schedules/{schedule_id}": {"patch": {"description": "Enable or pause a recurring schedule"}},
     "/api/v1/events": {"get": {"description": "Typed task, log and status SSE"}}
   }
 }"#;
