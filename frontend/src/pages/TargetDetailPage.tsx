@@ -149,8 +149,14 @@ function targetDockerContent(host: ContainerItem | undefined, workloads: DockerW
 function DockerDiscoveryState({ discovery }: Readonly<{ discovery: DockerDiscoveryQuery }>) {
   if (!discovery.data) return null;
   const run = discovery.data;
-  const status = run.status === "running" ? "Läuft" : run.status === "succeeded" ? "Erfolgreich" : "Fehlgeschlagen";
+  const status = dockerDiscoveryStatusLabel(run.status);
   return <p className="mb-3 text-sm text-[var(--muted)]">Letzte Erkennung: <strong className="text-[var(--ink)]">{status}</strong> · {new Date(run.started_at).toLocaleString()} · {run.container_count} Container{run.error_code ? ` · ${dockerDiscoveryFailureLabel(run.error_code)}` : ""}</p>;
+}
+
+function dockerDiscoveryStatusLabel(status: string) {
+  if (status === "running") return "Läuft";
+  if (status === "succeeded") return "Erfolgreich";
+  return "Fehlgeschlagen";
 }
 
 function DockerStaleNotice({ stale }: Readonly<{ stale: boolean }>) {

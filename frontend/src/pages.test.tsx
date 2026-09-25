@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -76,7 +77,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { ContainerDetailPage } from "./pages/ContainerDetailPage";
 import { DockerPage } from "./pages/DockerPage";
 import { SecretsPage } from "./pages/SecretsPage";
-import { TargetsPage, buildBootstrapCommand } from "./pages/TargetsPage";
+import { TargetsPage } from "./pages/TargetsPage";
 import { EnrollmentPage } from "./pages/EnrollmentPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { WorkflowDetailPage } from "./pages/WorkflowDetailPage";
@@ -93,7 +94,12 @@ function renderPage(element: React.ReactElement, route = "/") {
   return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[route]}><Routes><Route path="/containers/:containerId/*" element={element} /><Route path="/workflows/:jobId/*" element={element} /><Route path="/targets/:targetId/*" element={element} /><Route path="*" element={element} /></Routes></MemoryRouter></QueryClientProvider>);
 }
 
-afterEach(() => cleanup());
+function TargetAreaSwitcher() {
+  const [area, setArea] = useState<"linux_server" | "lxc">("linux_server");
+  return <><button type="button" onClick={() => setArea("linux_server")}>Serverbereich</button><button type="button" onClick={() => setArea("lxc")}>LXC-Bereich</button><TargetsPage area={area} /></>;
+}
+
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 beforeEach(() => {
   mocks.targets.data = [];
@@ -618,6 +624,21 @@ describe("onboarding and secret pages", () => {
     }
   });
 
+  it("keeps the server and LXC add-form expansion state independent", async () => {
+    renderPage(<TargetAreaSwitcher />);
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
+    expect(screen.getByRole("button", { name: "Schließen" })).toHaveAttribute("aria-expanded", "true");
+
+    await userEvent.click(screen.getByRole("button", { name: "LXC-Bereich" }));
+    expect(screen.getByRole("button", { name: "Hinzufügen" })).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Serverbereich" }));
+    expect(screen.getByRole("button", { name: "Schließen" })).toHaveAttribute("aria-expanded", "true");
+    await userEvent.click(screen.getByRole("button", { name: "LXC-Bereich" }));
+    expect(screen.getByRole("button", { name: "Schließen" })).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("creates and rotates a secret", async () => {
     renderPage(<SecretsPage />);
     expect(await screen.findByText("SSH-Passwort")).toBeInTheDocument();
@@ -657,16 +678,18 @@ describe("onboarding and secret pages", () => {
     await waitFor(() => expect(mocks.createSecret).toHaveBeenCalled());
   });
 
-  it("copies the target host bootstrap command and installs curl when needed", async () => {
-    expect(buildBootstrapCommand("http://192.168.1.20:5173")).toContain("bootstrap-lxcup-user.sh");
-    expect(buildBootstrapCommand("http://192.168.1.20:5173")).toContain("apt-get install --yes curl");
+  it("copies the complete target host preparation script including curl installation", async () => {
+    const script = '#!/usr/bin/env bash\ninstall_package() { apt-get install --yes "$package"; }\nuseradd --create-home --shell /bin/bash "${username}"\n';
+    const fetchScript = vi.fn(async () => ({ ok: true, text: async () => script }));
+    vi.stubGlobal("fetch", fetchScript);
     const writeText = vi.fn(async () => undefined);
     Object.assign(navigator, { clipboard: { writeText } });
     renderPage(<TargetsPage />);
     await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
-    await userEvent.click(screen.getByRole("button", { name: /Installationsbefehl kopieren/ }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("bootstrap-lxcup-user.sh")));
-    expect(screen.getByRole("button", { name: /Befehl kopiert/ })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Vorbereitungsskript kopieren" }));
+    expect(fetchScript).toHaveBeenCalledWith("/bootstrap-lxcup-user.sh");
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(script));
+    expect(screen.getByRole("button", { name: /Skript kopiert/ })).toBeInTheDocument();
   });
 
   it("renders pending targets and submits a target with onboarding disabled", async () => {

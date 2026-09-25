@@ -73,10 +73,17 @@ function WorkflowRetryAction({ status, allowed, pending, onRetry }: Readonly<{ s
 
 function WorkflowReconcileAction({ status, mode, pending, createdJobId, onReconcile }: Readonly<{ status: string; mode: string; pending: boolean; createdJobId: string | undefined; onReconcile: () => void }>) {
   if (status !== "reconcile_required" || mode !== "apply") return null;
+  const buttonLabel = reconcileButtonLabel(pending, createdJobId);
   return <div className="flex flex-wrap items-center gap-2">
-    <button className="inline-flex items-center justify-center border border-[var(--error)] bg-[var(--error-soft)] px-2 py-1.5 text-xs font-semibold text-[var(--error)] hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={pending || Boolean(createdJobId)} onClick={onReconcile}>{pending ? "Abgleich wird eingereiht…" : createdJobId ? "Abgleich eingereiht" : "Ist-Zustand abgleichen"}</button>
+    <button className="inline-flex items-center justify-center border border-[var(--error)] bg-[var(--error-soft)] px-2 py-1.5 text-xs font-semibold text-[var(--error)] hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={pending || Boolean(createdJobId)} onClick={onReconcile}>{buttonLabel}</button>
     {createdJobId ? <Link className="text-xs font-semibold text-lxcup-primary hover:underline" to={`/workflows/${createdJobId}`}>Abgleich öffnen</Link> : null}
   </div>;
+}
+
+function reconcileButtonLabel(pending: boolean, createdJobId: string | undefined) {
+  if (pending) return "Abgleich wird eingereiht…";
+  if (createdJobId) return "Abgleich eingereiht";
+  return "Ist-Zustand abgleichen";
 }
 
 function guidanceClass(level: string) {

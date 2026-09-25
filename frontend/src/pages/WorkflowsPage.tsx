@@ -3,7 +3,7 @@ import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
 import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { createAnsibleJob, type AnsibleExecutionMode, type AnsibleOperation, type CreateAnsibleJobRequest } from "../api";
+import { createAnsibleJob, type AnsibleExecutionMode, type AnsibleJobDto, type AnsibleOperation, type CreateAnsibleJobRequest, type TargetDto } from "../api";
 import { queryKeys, useAnsibleJobEvents, useAnsibleJobs, useTargets, useUpdatePolicies } from "../queries";
 import workflowModeMatrix from "../../workflow-modes.json";
 
@@ -91,11 +91,62 @@ export function WorkflowsPage() {
     mutation.mutate(buildWorkflowRequest(targetId, operation, mode, packages, confirmed, policyId || undefined, approvedPlanJobId || undefined));
   }
 
-  return (
-    <>
+  return <>
       <header className="mb-3 flex items-end justify-between gap-4 border-b border-[var(--line)] pb-3 max-[720px]:flex-col max-[720px]:items-start"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Ansible Worker</p><h1>Automatisierung</h1><p className="text-[var(--muted)]">Freigegebene Workflows für Agenten und Paketpläne.</p></div></header>
-      <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)] shadow-sm">
-        <form className="space-y-4" onSubmit={submit}>
+      <WorkflowControlPanel
+        targets={targets.data ?? []} targetId={targetId} onTargetChange={setTargetId}
+        operation={operation} onOperationChange={(next) => { setOperation(next); setMode(operationModes[next][0] ?? "check"); }}
+        mode={mode} onModeChange={setMode} packages={packages} onPackagesChange={setPackages}
+        policies={policies.data ?? []} policyId={policyId} onPolicyChange={setPolicyId}
+        approvedPlanJobId={approvedPlanJobId} onApprovedPlanChange={setApprovedPlanJobId}
+        packagePlans={packagePlans} modifying={isModifyingOperation} confirmed={confirmed}
+        onConfirmedChange={setConfirmed} selectedTarget={selectedTarget} selectedOperation={selectedOperation}
+        selectedMode={selectedMode} pending={mutation.isPending} error={mutation.error}
+        createdJob={mutation.data} onSubmit={submit}
+      />
+      <section className="mb-3 overflow-hidden border border-[var(--line)] bg-[var(--panel)] text-[var(--ink)] shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] px-4 py-3">
+          <div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Ausführungsverlauf</p><h2 className="m-0">Workflow-Protokolle</h2><p className="mt-1 text-sm text-[var(--muted)]">{workflowHistoryDescription(targetFilter, targets.data ?? [])}</p></div>
+          <span className="border border-[var(--line)] bg-[var(--paper-muted)] px-2.5 py-1 text-xs font-semibold text-[var(--muted)]">{visibleJobs?.length ?? 0} Jobs</span>
+        </div>
+        {workflowSummary(visibleJobs)}
+        {workflowJobsContent(jobs, visibleJobs, targets.data ?? [])}
+      </section>
+    </>;
+}
+
+type WorkflowControlPanelProps = Readonly<{
+  targets: NonNullable<ReturnType<typeof useTargets>["data"]>;
+  targetId: string;
+  onTargetChange: (value: string) => void;
+  operation: AnsibleOperation;
+  onOperationChange: (value: AnsibleOperation) => void;
+  mode: AnsibleExecutionMode;
+  onModeChange: (value: AnsibleExecutionMode) => void;
+  packages: string;
+  onPackagesChange: (value: string) => void;
+  policies: NonNullable<ReturnType<typeof useUpdatePolicies>["data"]>;
+  policyId: string;
+  onPolicyChange: (value: string) => void;
+  approvedPlanJobId: string;
+  onApprovedPlanChange: (value: string) => void;
+  packagePlans: NonNullable<ReturnType<typeof useAnsibleJobs>["data"]>;
+  modifying: boolean;
+  confirmed: boolean;
+  onConfirmedChange: (value: boolean) => void;
+  selectedTarget: TargetDto | undefined;
+  selectedOperation: typeof operations[number] | undefined;
+  selectedMode: typeof modes[number] | undefined;
+  pending: boolean;
+  error: unknown;
+  createdJob: AnsibleJobDto | undefined;
+  onSubmit: (event: Readonly<{ preventDefault: () => void }>) => void;
+}>;
+
+function WorkflowControlPanel(props: WorkflowControlPanelProps) {
+  const { targets, targetId, onTargetChange, operation, onOperationChange, mode, onModeChange, packages, onPackagesChange, policies, policyId, onPolicyChange, approvedPlanJobId, onApprovedPlanChange, packagePlans, modifying, confirmed, onConfirmedChange, selectedTarget, selectedOperation, selectedMode, pending, error, createdJob, onSubmit } = props;
+  return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)] shadow-sm">
+        <form className="space-y-4" onSubmit={onSubmit}>
           <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] pb-3">
             <div>
               <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Workflow-Steuerung</p>
@@ -106,29 +157,29 @@ export function WorkflowsPage() {
           </div>
           <div className="grid grid-cols-1 gap-4 rounded border border-[var(--line)] bg-[var(--paper-muted)] p-4 md:grid-cols-2 xl:grid-cols-3">
             <label className="grid content-start gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Das registrierte Ziel, gegen das der freigegebene Workflow ausgeführt wird."><span>Ziel</span>
-              <select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
+                <select value={targetId} onChange={(event) => onTargetChange(event.target.value)}>
                 <option value="">Ziel auswählen</option>
-                {(targets.data ?? []).map((target) => <option key={target.id} value={target.id}>{target.name} · {target.kind} · {target.address}</option>)}
+                {targets.map((target) => <option key={target.id} value={target.id}>{target.name} · {target.kind} · {target.address}</option>)}
               </select>
             </label>
             <label className="grid content-start gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Die erlaubte, fest registrierte Aktion des Workers."><span>Operation</span>
-              <select value={operation} onChange={(event) => { const next = event.target.value as AnsibleOperation; setOperation(next); setMode(operationModes[next][0] ?? "check"); }}>
+                <select value={operation} onChange={(event) => onOperationChange(event.target.value as AnsibleOperation)}>
                 {operations.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
               </select>
             </label>
             <label className="grid content-start gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Check prüft, Plan erstellt eine Vorschau, Apply führt aus und Reconcile gleicht einen unklaren Zustand ab."><span>Modus</span>
-              <select value={mode} onChange={(event) => setMode(event.target.value as AnsibleExecutionMode)} aria-describedby="mode-help">
+              <select value={mode} onChange={(event) => onModeChange(event.target.value as AnsibleExecutionMode)} aria-describedby="mode-help">
               {modes.filter((item) => operationModes[operation].includes(item.value)).map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
               </select>
             </label>
           </div>
           {operation === "update_packages" ? <label className="grid max-w-lg gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Nur Pakete verwenden, die bereits durch einen Update-Plan validiert wurden."><span>Validierte Pakete aus dem Plan</span>
-            <input value={packages} onChange={(event) => setPackages(event.target.value)} placeholder="z. B. nginx,curl" aria-describedby="package-help" />
+            <input value={packages} onChange={(event) => onPackagesChange(event.target.value)} placeholder="z. B. nginx,curl" aria-describedby="package-help" />
             <small id="package-help" className="text-[var(--muted)]">Die Policy begrenzt die Pakete. Plan prüft ohne Änderung; Apply benötigt denselben erfolgreichen Plan.</small>
           </label> : null}
           {operation === "update_packages" ? <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-            <label><span>Freigegebene Update-Policy</span><select value={policyId} onChange={(event) => setPolicyId(event.target.value)}><option value="">Policy auswählen</option>{(policies.data ?? []).filter((policy) => policy.enabled).map((policy) => <option key={policy.id} value={policy.id}>{policy.id} · max. Risiko {policy.maximum_risk}</option>)}</select></label>
-            {mode === "apply" ? <label><span>Erfolgreicher Plan zur Bestätigung</span><select value={approvedPlanJobId} onChange={(event) => setApprovedPlanJobId(event.target.value)}><option value="">Plan auswählen</option>{packagePlans.map((job) => <option key={job.id} value={job.id}>{job.id} · {new Date(job.updated_at).toLocaleString()}</option>)}</select></label> : null}
+            <label><span>Freigegebene Update-Policy</span><select value={policyId} onChange={(event) => onPolicyChange(event.target.value)}><option value="">Policy auswählen</option>{policies.filter((policy) => policy.enabled).map((policy) => <option key={policy.id} value={policy.id}>{policy.id} · max. Risiko {policy.maximum_risk}</option>)}</select></label>
+            {mode === "apply" ? <label><span>Erfolgreicher Plan zur Bestätigung</span><select value={approvedPlanJobId} onChange={(event) => onApprovedPlanChange(event.target.value)}><option value="">Plan auswählen</option>{packagePlans.map((job) => <option key={job.id} value={job.id}>{job.id} · {new Date(job.updated_at).toLocaleString()}</option>)}</select></label> : null}
             {mode === "plan" ? <p className={cn("border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-[var(--ink)]", "border-[#bad0fa] bg-[var(--primary-soft)]")}>Nach erfolgreichem Plan kannst du denselben Ziel- und Paketumfang mit Apply ausdrücklich bestätigen.</p> : null}
           </div> : null}
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.8fr)]">
@@ -137,23 +188,25 @@ export function WorkflowsPage() {
           </div>
           {selectedTarget?.state === "pending" ? <output className="block border border-[#bad0fa] bg-[var(--primary-soft)] p-3 text-[var(--ink)]"><strong>Onboarding für {selectedTarget.name}</strong><span className="mt-1 block text-sm text-[var(--muted)]">Dieses Ziel wartet noch auf seinen Agenten. Mit „Agent installieren“ startest du den nächsten nachvollziehbaren Schritt.</span></output> : null}
           <div className="flex flex-col gap-3 border-t border-[var(--line)] pt-4 sm:flex-row sm:items-center sm:justify-between">
-            {isModifyingOperation ? <label className="flex items-center gap-2 text-sm font-medium"><input className="h-4 w-4 accent-lxcup-primary" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /> {mode === "apply" ? "Ich bestätige Ziel, Umfang und Risiko dieser Änderung." : mode === "plan" ? "Ich bestätige Ziel und Umfang dieser Vorschau." : "Ich bestätige die Prüfung dieses Ziels."}</label> : <span className="text-xs text-[var(--muted)]">Dieser Workflow führt keine freigegebene Änderung aus.</span>}
-            <button className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={canSubmit === false || mutation.isPending}>{mutation.isPending ? "Wird gestartet…" : "Workflow starten"}<span aria-hidden="true">→</span></button>
+            {modifying ? <label className="flex items-center gap-2 text-sm font-medium"><input className="h-4 w-4 accent-lxcup-primary" type="checkbox" checked={confirmed} onChange={(event) => onConfirmedChange(event.target.checked)} /> {workflowConfirmationLabel(mode)}</label> : <span className="text-xs text-[var(--muted)]">Dieser Workflow führt keine freigegebene Änderung aus.</span>}
+            <button className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={!canSubmitWorkflow({ targetId, isModifyingOperation: modifying, confirmed, operation, packages, policyId, mode, approvedPlanJobId, packagePlans, supportedModes: operationModes[operation] }) || pending}>{pending ? "Wird gestartet…" : "Workflow starten"}<span aria-hidden="true">→</span></button>
           </div>
-          {mutation.error ? <p className="m-0 border border-[var(--error)] bg-[var(--error-soft)] px-3 py-2 font-semibold text-[var(--error)]" role="alert">Workflow konnte nicht gestartet werden: {mutation.error.message}</p> : null}
-          {mutation.data ? <output className="flex flex-wrap items-center justify-between gap-2 border border-[#b7e7d0] bg-[var(--success-soft)] px-3 py-2.5 text-sm text-[var(--success)]"><span><strong>Workflow angenommen</strong><span className="ml-2 text-[var(--muted)]">{mutation.data.id} · {jobStatusLabel(mutation.data.status)}</span></span><Link className="font-semibold underline underline-offset-2" to={`/workflows/${mutation.data.id}`}>Protokoll öffnen →</Link></output> : null}
+          {error instanceof Error ? <p className="m-0 border border-[var(--error)] bg-[var(--error-soft)] px-3 py-2 font-semibold text-[var(--error)]" role="alert">Workflow konnte nicht gestartet werden: {error.message}</p> : null}
+          {createdJob ? <output className="flex flex-wrap items-center justify-between gap-2 border border-[#b7e7d0] bg-[var(--success-soft)] px-3 py-2.5 text-sm text-[var(--success)]"><span><strong>Workflow angenommen</strong><span className="ml-2 text-[var(--muted)]">{createdJob.id} · {jobStatusLabel(createdJob.status)}</span></span><Link className="font-semibold underline underline-offset-2" to={`/workflows/${createdJob.id}`}>Protokoll öffnen →</Link></output> : null}
         </form>
-      </section>
-      <section className="mb-3 overflow-hidden border border-[var(--line)] bg-[var(--panel)] text-[var(--ink)] shadow-sm">
-        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] px-4 py-3">
-          <div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Ausführungsverlauf</p><h2 className="m-0">Workflow-Protokolle</h2><p className="mt-1 text-sm text-[var(--muted)]">{targetFilter ? `Ausführungen für ${targets.data?.find((target) => target.id === targetFilter)?.name ?? "dieses Ziel"}.` : "Nachvollziehbare Ausführungen und ihre Ergebnisse."}</p></div>
-          <span className="border border-[var(--line)] bg-[var(--paper-muted)] px-2.5 py-1 text-xs font-semibold text-[var(--muted)]">{visibleJobs?.length ?? 0} Jobs</span>
-        </div>
-        {workflowSummary(visibleJobs)}
-        {workflowJobsContent(jobs, visibleJobs, targets.data ?? [])}
-      </section>
-    </>
-  );
+      </section>;
+}
+
+function workflowConfirmationLabel(mode: AnsibleExecutionMode) {
+  if (mode === "apply") return "Ich bestätige Ziel, Umfang und Risiko dieser Änderung.";
+  if (mode === "plan") return "Ich bestätige Ziel und Umfang dieser Vorschau.";
+  return "Ich bestätige die Prüfung dieses Ziels.";
+}
+
+function workflowHistoryDescription(targetId: string | null, targets: TargetDto[]) {
+  if (!targetId) return "Nachvollziehbare Ausführungen und ihre Ergebnisse.";
+  const targetName = targets.find((target) => target.id === targetId)?.name ?? "dieses Ziel";
+  return `Ausführungen für ${targetName}.`;
 }
 
 function canSubmitWorkflow({ targetId, isModifyingOperation, confirmed, operation, packages, policyId, mode, approvedPlanJobId, packagePlans, supportedModes }: {

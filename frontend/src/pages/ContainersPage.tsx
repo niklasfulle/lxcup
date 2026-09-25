@@ -22,8 +22,15 @@ function ContainerDockerDiscovery({ container }: Readonly<{ container: Container
     },
   });
   const last = discovery.data;
-  const label = discover.isPending || last?.status === "running" ? "Läuft" : last?.status === "succeeded" ? `${last.container_count} Container` : last?.status === "failed" ? dockerDiscoveryFailureLabel(last.error_code ?? "Docker-Erkennung fehlgeschlagen") : "Noch nicht geprüft";
+  const label = dockerDiscoveryLabel(discover.isPending, last);
   return <div className="flex flex-wrap items-center gap-2"><span className="text-xs text-[var(--muted)]">{discovery.isLoading ? "Lädt…" : label}</span><button className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discover.isPending} onClick={() => discover.mutate()}>{discover.isPending ? "Erkennung läuft…" : "Erkennen"}</button><Link className="text-xs font-semibold text-lxcup-primary hover:underline" to={`/docker?host=${container.id}`}>Öffnen</Link>{discover.error ? <span className="basis-full text-xs text-[var(--error)]" role="alert">{dockerDiscoveryFailureLabel(discover.error.message)}</span> : null}</div>;
+}
+
+function dockerDiscoveryLabel(discovering: boolean, last: ReturnType<typeof useDockerDiscovery>["data"]) {
+  if (discovering || last?.status === "running") return "Läuft";
+  if (last?.status === "succeeded") return `${last.container_count} Container`;
+  if (last?.status === "failed") return dockerDiscoveryFailureLabel(last.error_code ?? "Docker-Erkennung fehlgeschlagen");
+  return "Noch nicht geprüft";
 }
 
 export function ContainersPage() {

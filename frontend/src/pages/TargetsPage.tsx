@@ -37,23 +37,6 @@ function targetsForArea(targets: import("../api").TargetDto[], area: TargetArea)
   return area === undefined ? targets : targets.filter((target) => target.kind === area);
 }
 
-export function buildBootstrapCommand(baseUrl?: string) {
-  const configuredBase = baseUrl?.trim() || import.meta.env.VITE_BOOTSTRAP_BASE_URL?.trim() || globalThis.location?.origin || "http://localhost:5173";
-  const scriptUrl = new URL("/bootstrap-lxcup-user.sh", configuredBase).toString();
-  const shellUrl = `'${scriptUrl}'`;
-  return [
-    "set -Eeuo pipefail",
-    'SUDO=""; if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi',
-    'if ! command -v curl >/dev/null 2>&1; then',
-    '  if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive $SUDO apt-get update && DEBIAN_FRONTEND=noninteractive $SUDO apt-get install --yes curl',
-    '  elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install --assumeyes curl',
-    '  elif command -v yum >/dev/null 2>&1; then $SUDO yum install --assumeyes curl',
-    '  else echo "curl konnte nicht automatisch installiert werden." >&2; exit 1; fi',
-    "fi",
-    `curl -fsSL ${shellUrl} | $SUDO bash -s -- lxcup`,
-  ].join("\n");
-}
-
 export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
   const queryClient = useQueryClient();
   const targets = useTargets();
@@ -71,7 +54,7 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
   const [newSecretKind, setNewSecretKind] = useState<SecretKind>("ssh_password");
   const [newSecretValue, setNewSecretValue] = useState("");
   const [createdTargetId, setCreatedTargetId] = useState<string>();
-  const [addFormOpen, setAddFormOpen] = useState(false);
+  const [addFormOpenByArea, setAddFormOpenByArea] = useState<Partial<Record<TargetKind | "profiles", boolean>>>({});
   const [startOnboarding, setStartOnboarding] = useState(true);
   const [deploymentJobId, setDeploymentJobId] = useState<string>();
   const [healthJobId, setHealthJobId] = useState<string>();
@@ -79,6 +62,8 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
   const healthStartedFor = useRef<string | undefined>(undefined);
   const inventoryStartedFor = useRef<string | undefined>(undefined);
   const content = contentForArea(area);
+  const areaKey = area ?? "profiles";
+  const addFormOpen = addFormOpenByArea[areaKey] ?? false;
   const availableKinds = kindsForArea(area);
   const selectedKind = kinds.find((item) => item.value === kind)!;
   const activeSecrets = (secrets.data ?? []).filter((item) => item.metadata.status === "active");
@@ -126,7 +111,7 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
       setHealthJobId(undefined);
       setName("");
       setAddress("");
-      setAddFormOpen(false);
+      setAddFormOpenByArea((current) => ({ ...current, [areaKey]: false }));
       void queryClient.invalidateQueries({ queryKey: queryKeys.targets });
       if (startOnboarding) deployment.mutate(target.id);
     },
@@ -136,9 +121,11 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
   const visibleTargets = targetsForArea(targets.data ?? [], area);
   const pendingTargets = visibleTargets.filter((target) => target.state === "pending" && target.id !== createdTargetId);
 
-  async function copyBootstrapCommand() {
+  async function copyBootstrapScript() {
     try {
-      await copyText(buildBootstrapCommand());
+      const response = await fetch("/bootstrap-lxcup-user.sh");
+      if (!response.ok) throw new Error("Das Vorbereitungsskript konnte nicht geladen werden.");
+      await copyText(await response.text());
       setBootstrapCopied(true);
       globalThis.setTimeout(() => setBootstrapCopied(false), 2500);
     } catch {
@@ -170,7 +157,7 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
           type="button"
           aria-expanded={addFormOpen}
           aria-controls="target-registration"
-          onClick={() => setAddFormOpen((open) => !open)}
+          onClick={() => setAddFormOpenByArea((current) => ({ ...current, [areaKey]: !current[areaKey] }))}
         >
           {addFormOpen ? "Schließen" : "Hinzufügen"}
         </button>
@@ -178,25 +165,26 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
 
       {area === undefined ? <ResourceRelationshipMap /> : null}
 
-      {addFormOpen ? <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]" id="target-registration">
-        <div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start">
-          <div>
-            <h2>{content.registrationTitle}</h2>
-            <p className="text-[var(--muted)]">Verbindungsdaten und Secret-Referenzen bleiben auf diese Ressourcenart begrenzt.</p>
-          </div>
-          <span className="shrink-0 border border-[var(--primary)] bg-[var(--primary-soft)] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[var(--primary)]">Schritt 1 · Zugang</span>
-        </div>
-        <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,22rem)]">
+      {addFormOpen ? <section className="mb-3 overflow-hidden border border-[var(--line)] bg-[var(--panel)] text-[var(--ink)]" id="target-registration" aria-labelledby="target-registration-title">
+        <header className="flex items-center justify-between gap-4 border-b border-[var(--line)] bg-[var(--paper-muted)] px-4 py-3 max-[720px]:items-start">
           <div className="min-w-0">
-            <div className="mb-4 flex items-start justify-between gap-4 border-b border-[var(--line)] pb-3 max-[720px]:flex-col">
-              <div>
-                <h3>Verbindungsdaten</h3>
-                <p className="text-[var(--muted)]">Diese Angaben verwendet der Worker für SSH und das Agent-Onboarding.</p>
-              </div>
+            <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Ressource einrichten</p>
+            <h2 id="target-registration-title">{content.registrationTitle}</h2>
+            <p className="text-sm text-[var(--muted)]">Zugang, Anmeldung und optionale Automatisierung konfigurieren.</p>
+          </div>
+          <span className="inline-flex shrink-0 items-center gap-2 border border-[var(--primary)] bg-[var(--primary-soft)] px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-[var(--primary)]"><span className="grid h-5 w-5 place-items-center bg-lxcup-primary text-white">1</span>Zugang</span>
+        </header>
+        <div className="grid items-stretch xl:grid-cols-[minmax(0,1fr)_22rem]">
+          <div className="min-w-0 p-4">
+            <div className="mb-4 border-b border-[var(--line)] pb-3">
+              <h3>Verbindungsdaten</h3>
+              <p className="text-sm text-[var(--muted)]">Der Worker verwendet diese Angaben für die Verbindung zum Ziel.</p>
             </div>
             <TargetForm availableKinds={availableKinds} selectedKind={selectedKind} activeSecrets={activeSecrets} name={name} address={address} sshUser={sshUser} kind={kind} credentialSecret={credentialSecret} agentSecret={agentSecret} knownHostsSecret={knownHostsSecret} newSecretFor={newSecretFor} newSecretName={newSecretName} newSecretKind={newSecretKind} newSecretValue={newSecretValue} startOnboarding={startOnboarding} onboardingAvailable={area !== "lxc"} submitLabel="Hinzufügen" inlineSecretPending={inlineSecret.isPending} inlineSecretError={inlineSecret.error instanceof Error ? inlineSecret.error.message : undefined} createPending={create.isPending} createError={create.error instanceof Error ? create.error.message : undefined} onSubmit={(event) => { event.preventDefault(); create.mutate(); }} onNameChange={setName} onAddressChange={setAddress} onSshUserChange={setSshUser} onKindChange={setKind} onCredentialChange={setCredentialSecret} onAgentChange={setAgentSecret} onKnownHostsChange={setKnownHostsSecret} onSecretForChange={setNewSecretFor} onSecretNameChange={setNewSecretName} onSecretKindChange={setNewSecretKind} onSecretValueChange={setNewSecretValue} onStartOnboardingChange={setStartOnboarding} onCreateSecret={() => inlineSecret.mutate()} />
           </div>
-          {selectedKind.transport === "ssh" ? <BootstrapCard copied={bootstrapCopied} onCopy={() => void copyBootstrapCommand()} /> : <WindowsSetupCard />}
+          <div className="border-t border-[var(--line)] bg-[var(--paper-muted)] p-4 xl:border-l xl:border-t-0">
+            {selectedKind.transport === "ssh" ? <BootstrapCard copied={bootstrapCopied} onCopy={() => void copyBootstrapScript()} /> : <WindowsSetupCard />}
+          </div>
         </div>
       </section> : null}
 
@@ -234,32 +222,31 @@ function generateSecretValue() {
 }
 
 function BootstrapCard({ copied, onCopy }: Readonly<{ copied: boolean; onCopy: () => void }>) {
-  return <aside className="grid gap-3 border border-[var(--line)] bg-[var(--paper-muted)] p-4" aria-labelledby="bootstrap-card-title">
+  return <aside className="grid content-start gap-3" aria-labelledby="bootstrap-card-title">
     <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Host vorbereiten</p>
     <h3 id="bootstrap-card-title">lxcup-Benutzer anlegen</h3>
-    <p className="text-[var(--muted)]">Führe den vorbereiteten Befehl einmal als root auf dem Zielhost aus. Er installiert bei Bedarf curl und legt danach den eingeschränkten SSH-Benutzer an.</p>
-    <ol className="m-0 grid list-none gap-2 border-y border-[var(--line)] py-3 pl-0">
-      <li><span>1</span><span>Auf dem Zielhost anmelden</span></li>
-      <li><span>2</span><span>Befehl kopieren und ausführen</span></li>
-      <li><span>3</span><span>Passwort im Deployment-Secret hinterlegen</span></li>
+    <p className="text-[var(--muted)]">Kopiere das vollständige Bash-Skript, speichere es auf dem Zielhost und führe es dort als root aus. Es installiert bei Bedarf curl und sudo und legt danach den eingeschränkten SSH-Benutzer an.</p>
+    <ol className="m-0 grid list-none gap-3 border-y border-[var(--line)] py-4 pl-0">
+      <li className="flex items-center gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center bg-[var(--panel)] text-[10px] font-bold text-lxcup-primary">1</span><span>Auf dem Zielhost anmelden</span></li>
+      <li className="flex items-center gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center bg-[var(--panel)] text-[10px] font-bold text-lxcup-primary">2</span><span>Skript als Datei speichern und ausführen</span></li>
+      <li className="flex items-center gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center bg-[var(--panel)] text-[10px] font-bold text-lxcup-primary">3</span><span>Passwort im Deployment-Secret hinterlegen</span></li>
     </ol>
-    <button className={cn("inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50", "self-start")} type="button" onClick={onCopy} title="Kopiert den Bootstrap-Befehl für den lxcup-Benutzer auf dem Zielhost.">
-      {copied ? "✓ Befehl kopiert" : "＋ Installationsbefehl kopieren"}
+    <button className="inline-flex min-h-10 w-full items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" type="button" onClick={onCopy} title="Kopiert das vollständige Bash-Vorbereitungsskript für den lxcup-Benutzer.">
+      {copied ? "✓ Skript kopiert" : "Vorbereitungsskript kopieren"}
     </button>
-    <span className="min-h-4 text-xs font-medium text-[var(--success)]" aria-live="polite">{copied ? "Der Befehl liegt jetzt in der Zwischenablage." : ""}</span>
-    <p className="border-l-2 border-l-lxcup-primary pl-2 text-[11px] leading-4">Die Frontend-URL muss vom Zielhost erreichbar sein.</p>
+    <span className="min-h-4 text-xs font-medium text-[var(--success)]" aria-live="polite">{copied ? "Das vollständige Skript liegt jetzt in der Zwischenablage." : ""}</span>
   </aside>;
 }
 
 function WindowsSetupCard() {
-  return <aside className="grid gap-3 border border-[var(--line)] bg-[var(--paper-muted)] p-4" aria-labelledby="windows-setup-title">
+  return <aside className="grid content-start gap-3" aria-labelledby="windows-setup-title">
     <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Windows vorbereiten</p>
     <h3 id="windows-setup-title">WinRM-Zugang prüfen</h3>
     <p className="text-[var(--muted)]">Stelle vor dem Speichern sicher, dass der Windows-Host über WinRM erreichbar ist und das ausgewählte Secret die hinterlegten Zugangsdaten enthält.</p>
-    <ol className="m-0 grid list-none gap-2 border-y border-[var(--line)] py-3 pl-0">
-      <li><span>1</span><span>WinRM auf dem Server aktivieren</span></li>
-      <li><span>2</span><span>Zugang als Deployment-Secret hinterlegen</span></li>
-      <li><span>3</span><span>Windows-Server registrieren</span></li>
+    <ol className="m-0 grid list-none gap-3 border-y border-[var(--line)] py-4 pl-0">
+      <li className="flex items-center gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center bg-[var(--panel)] text-[10px] font-bold text-lxcup-primary">1</span><span>WinRM auf dem Server aktivieren</span></li>
+      <li className="flex items-center gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center bg-[var(--panel)] text-[10px] font-bold text-lxcup-primary">2</span><span>Zugang als Deployment-Secret hinterlegen</span></li>
+      <li className="flex items-center gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center bg-[var(--panel)] text-[10px] font-bold text-lxcup-primary">3</span><span>Windows-Server registrieren</span></li>
     </ol>
   </aside>;
 }
@@ -314,8 +301,8 @@ type TargetFormProps = Readonly<{
 
 function TargetForm(props: TargetFormProps) {
   const { selectedKind, activeSecrets, newSecretFor, newSecretName, newSecretKind, newSecretValue, inlineSecretPending, createPending, createError, inlineSecretError } = props;
-  return <form onSubmit={props.onSubmit}>
-    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+  return <form className="grid gap-4" onSubmit={props.onSubmit}>
+    <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
       <label><span className="inline-flex items-center gap-1" title="Anzeigename des verwalteten Ziels.">Name</span><input name="target_name" autoComplete="off" value={props.name} onChange={(event) => props.onNameChange(event.target.value)} required /></label>
       <label><span className="inline-flex items-center gap-1" title="Plattform des Ziels. Sie bestimmt unter anderem das verwendete Ansible-Playbook.">Typ</span>{props.availableKinds.length === 1 ? <input name="target_kind" value={selectedKind.label} readOnly /> : <select name="target_kind" value={props.kind} onChange={(event) => props.onKindChange(event.target.value as TargetKind)}>{props.availableKinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>}</label>
       <label><span className="inline-flex items-center gap-1" title="IP-Adresse oder DNS-Name, unter dem der Worker das Ziel erreicht.">Adresse</span><input name="target_address" autoComplete="url" value={props.address} onChange={(event) => props.onAddressChange(event.target.value)} placeholder="IP oder DNS-Name …" required /></label>
@@ -325,10 +312,12 @@ function TargetForm(props: TargetFormProps) {
       <SecretSelect label="Agent-Token" title="Geheimer Token, mit dem sich der installierte lxcup-Agent beim Controller authentifiziert." value={props.agentSecret} options={activeSecrets} onChange={props.onAgentChange} onNew={() => { props.onSecretForChange("agent"); props.onSecretKindChange("agent_token"); }} />
       <label><span className="inline-flex items-center gap-1" title="Verbindungsprotokoll, das automatisch aus dem Zieltyp abgeleitet wird.">Transport</span><input name="transport" value={selectedKind.transport.toUpperCase()} readOnly /></label>
     </div>
-    {newSecretFor && <InlineSecretEditor newSecretFor={newSecretFor} name={newSecretName} kind={newSecretKind} value={newSecretValue} pending={inlineSecretPending} error={inlineSecretError} onCancel={() => props.onSecretForChange(null)} onNameChange={props.onSecretNameChange} onKindChange={props.onSecretKindChange} onValueChange={props.onSecretValueChange} onGenerate={() => props.onSecretValueChange(generateSecretValue())} onCreate={props.onCreateSecret} />}
-    {props.onboardingAvailable ? <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={props.startOnboarding} onChange={(event) => props.onStartOnboardingChange(event.target.checked)} /> Onboarding direkt starten: Agent installieren und nach erfolgreichem Heartbeat einen Healthcheck ausführen.</label> : null}
-     <button className="inline-flex min-h-10 min-w-60 justify-self-center items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={createPending || props.credentialSecret === "" || props.agentSecret === "" || (selectedKind.transport === "ssh" && props.knownHostsSecret === "")}>{createPending ? "Wird angelegt…" : props.submitLabel}</button>
-    {createError && <p className="font-semibold text-[var(--error)]" role="alert">{createError}</p>}
+    {newSecretFor && <div className="col-span-full"><InlineSecretEditor newSecretFor={newSecretFor} name={newSecretName} kind={newSecretKind} value={newSecretValue} pending={inlineSecretPending} error={inlineSecretError} onCancel={() => props.onSecretForChange(null)} onNameChange={props.onSecretNameChange} onKindChange={props.onSecretKindChange} onValueChange={props.onSecretValueChange} onGenerate={() => props.onSecretValueChange(generateSecretValue())} onCreate={props.onCreateSecret} /></div>}
+    {props.onboardingAvailable ? <label className="col-span-full flex items-start gap-2 border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-sm font-medium"><input className="mt-0.5 shrink-0" type="checkbox" aria-label="Onboarding direkt starten" checked={props.startOnboarding} onChange={(event) => props.onStartOnboardingChange(event.target.checked)} /><span><strong className="block">Onboarding direkt starten</strong><span className="text-xs font-normal text-[var(--muted)]">Agent installieren und nach erfolgreichem Heartbeat einen Healthcheck ausführen.</span></span></label> : null}
+    <div className="col-span-full grid gap-2 border-t border-[var(--line)] pt-4">
+      <button className="mx-auto inline-flex min-h-10 w-full max-w-[15rem] items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={createPending || props.credentialSecret === "" || props.agentSecret === "" || (selectedKind.transport === "ssh" && props.knownHostsSecret === "")}>{createPending ? "Wird angelegt…" : props.submitLabel}</button>
+      {createError && <p className="text-center font-semibold text-[var(--error)]" role="alert">{createError}</p>}
+    </div>
   </form>;
 }
 
@@ -337,7 +326,7 @@ function SecretSelect({ label, title, value, options, onChange, onNew, emptyLabe
 }
 
 function InlineSecretEditor({ newSecretFor, name, kind, value, pending, error, onCancel, onNameChange, onKindChange, onValueChange, onGenerate, onCreate }: Readonly<{ newSecretFor: "credential" | "known_hosts" | "agent"; name: string; kind: SecretKind; value: string; pending: boolean; error?: string; onCancel: () => void; onNameChange: (value: string) => void; onKindChange: (value: SecretKind) => void; onValueChange: (value: string) => void; onGenerate: () => void; onCreate: () => void }>) {
-  return <fieldset className="my-3 grid gap-3 border border-[var(--line)] bg-[var(--panel)] p-3"><legend>Neues {secretPurposeLabel(newSecretFor)}</legend><button className="mt-3 inline-block text-xs font-semibold text-lxcup-primary hover:underline" type="button" onClick={onCancel}>Abbrechen</button><div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3"><label><span>Name</span><input value={name} onChange={(event) => onNameChange(event.target.value)} placeholder="z. B. lxcup-test-ssh" autoComplete="off" /></label><label><span>Typ</span><select value={kind} onChange={(event) => onKindChange(event.target.value as SecretKind)}><option value="ssh_password">SSH Passwort</option><option value="ssh_private_key">SSH Private Key</option><option value="ssh_known_hosts">SSH Known Hosts</option><option value="agent_token">Agent-Token</option><option value="generic">Allgemein</option></select></label><label><span>Wert</span><input type="password" value={value} onChange={(event) => onValueChange(event.target.value)} autoComplete="new-password" placeholder="Wert eingeben oder erzeugen" /></label><button className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" type="button" onClick={onGenerate}>Wert erzeugen</button></div><button className="inline-flex justify-self-start items-center justify-center border border-lxcup-primary bg-lxcup-primary px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={pending || name.trim() === "" || value === ""} onClick={onCreate}>{pending ? "Speichert…" : "Secret erstellen und auswählen"}</button>{error && <p className="font-semibold text-[var(--error)]" role="alert">{error}</p>}</fieldset>;
+  return <fieldset className="my-3 grid gap-3 border border-[var(--line)] bg-[var(--panel)] p-3"><legend>Neues {secretPurposeLabel(newSecretFor)}</legend><button className="mt-3 inline-block text-xs font-semibold text-lxcup-primary hover:underline" type="button" onClick={onCancel}>Abbrechen</button><div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><label><span>Name</span><input value={name} onChange={(event) => onNameChange(event.target.value)} placeholder="z. B. lxcup-test-ssh" autoComplete="off" /></label><label><span>Typ</span><select value={kind} onChange={(event) => onKindChange(event.target.value as SecretKind)}><option value="ssh_password">SSH Passwort</option><option value="ssh_private_key">SSH Private Key</option><option value="ssh_known_hosts">SSH Known Hosts</option><option value="agent_token">Agent-Token</option><option value="generic">Allgemein</option></select></label><label><span>Wert</span><input type="password" value={value} onChange={(event) => onValueChange(event.target.value)} autoComplete="new-password" placeholder="Wert eingeben oder erzeugen" /></label><button className="inline-flex self-end items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" type="button" onClick={onGenerate}>Wert erzeugen</button></div><button className="inline-flex justify-self-start items-center justify-center border border-lxcup-primary bg-lxcup-primary px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={pending || name.trim() === "" || value === ""} onClick={onCreate}>{pending ? "Speichert…" : "Secret erstellen und auswählen"}</button>{error && <p className="font-semibold text-[var(--error)]" role="alert">{error}</p>}</fieldset>;
 }
 
 function secretPurposeLabel(value: "credential" | "known_hosts" | "agent") {
@@ -376,20 +365,8 @@ function TargetInventoryCard({ target, jobs }: Readonly<{ target: TargetDto; job
   const latestSample = telemetry.data?.samples.at(-1);
   const telemetryTime = telemetry.data?.collected_at ?? latestSample?.collected_at;
   const telemetryStale = telemetryTime ? isTelemetryStale(telemetryTime) : false;
-  const inventorySummary = inventory.isLoading
-    ? "Wird geladen…"
-    : inventory.error
-      ? "Fehler beim Laden"
-      : inventory.data?.status === "complete"
-        ? `${inventory.data.packages.length} Pakete · ${inventory.data.collected_at ? new Date(inventory.data.collected_at).toLocaleString() : "Zeitpunkt unbekannt"}`
-        : "Noch nicht erhoben";
-  const telemetrySummary = telemetry.isLoading
-    ? "Wird geladen…"
-    : telemetry.error
-      ? "Fehler beim Laden"
-      : !telemetryTime
-        ? "Noch keine Telemetrie"
-        : `${telemetryStale ? "Veraltet" : "Aktuell"} · ${new Date(telemetryTime).toLocaleString()}`;
+  const inventorySummary = targetInventorySummary(inventory);
+  const telemetrySummary = targetTelemetrySummary(telemetry, telemetryTime, telemetryStale);
 
   return <li>
       <article className="border border-[var(--line)] bg-[var(--paper-muted)] p-4 transition-colors hover:border-[var(--primary)]">
@@ -417,26 +394,61 @@ function TargetInventoryCard({ target, jobs }: Readonly<{ target: TargetDto; job
             <TargetOnboardingProtocols target={target} jobs={jobs} />
           </div>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
-            <TargetSignalLink to={`/targets/${target.id}/packages`} label="Paketinventar" value={inventorySummary} status={inventory.error ? "error" : inventory.data?.status === "complete" ? "success" : "neutral"} accessibleName={`Paketinventar für ${target.name}`} />
-            <TargetSignalLink to={`/targets/${target.id}`} label="Systemauslastung" value={telemetrySummary} status={telemetry.error ? "error" : telemetryStale ? "warning" : telemetryTime ? "success" : "neutral"} accessibleName={`Systemauslastung für ${target.name}`} />
+            <TargetSignalLink to={`/targets/${target.id}/packages`} label="Paketinventar" value={inventorySummary} status={inventorySignalStatus(inventory)} accessibleName={`Paketinventar für ${target.name}`} />
+            <TargetSignalLink to={`/targets/${target.id}`} label="Systemauslastung" value={telemetrySummary} status={telemetrySignalStatus(telemetry, telemetryStale, telemetryTime)} accessibleName={`Systemauslastung für ${target.name}`} />
           </div>
         </div>
       </article>
     </li>;
 }
 
+function targetInventorySummary(inventory: ReturnType<typeof usePackageInventory>) {
+  if (inventory.isLoading) return "Wird geladen…";
+  if (inventory.error) return "Fehler beim Laden";
+  if (inventory.data?.status !== "complete") return "Noch nicht erhoben";
+  const collectedAt = inventory.data.collected_at
+    ? new Date(inventory.data.collected_at).toLocaleString()
+    : "Zeitpunkt unbekannt";
+  return `${inventory.data.packages.length} Pakete · ${collectedAt}`;
+}
+
+function targetTelemetrySummary(telemetry: ReturnType<typeof useTargetTelemetry>, collectedAt: string | undefined, stale: boolean) {
+  if (telemetry.isLoading) return "Wird geladen…";
+  if (telemetry.error) return "Fehler beim Laden";
+  if (collectedAt === undefined) return "Noch keine Telemetrie";
+  return `${stale ? "Veraltet" : "Aktuell"} · ${new Date(collectedAt).toLocaleString()}`;
+}
+
+type SignalStatus = "error" | "success" | "warning" | "neutral";
+
+function inventorySignalStatus(inventory: ReturnType<typeof usePackageInventory>): SignalStatus {
+  if (inventory.error) return "error";
+  if (inventory.data?.status === "complete") return "success";
+  return "neutral";
+}
+
+function telemetrySignalStatus(telemetry: ReturnType<typeof useTargetTelemetry>, stale: boolean, collectedAt: string | undefined): SignalStatus {
+  if (telemetry.error) return "error";
+  if (stale) return "warning";
+  if (collectedAt !== undefined) return "success";
+  return "neutral";
+}
+
 function TargetSignalLink({ to, label, value, status, accessibleName }: Readonly<{ to: string; label: string; value: string; status: "error" | "success" | "warning" | "neutral"; accessibleName: string }>) {
-  const statusClass = status === "success"
-    ? "border-[var(--success)]/40 bg-[var(--success-soft)] text-[var(--success)]"
-    : status === "warning"
-      ? "border-[var(--warning)]/40 bg-[var(--warning-soft)] text-[var(--warning)]"
-      : status === "error"
-        ? "border-[var(--error)]/40 bg-[var(--error-soft)] text-[var(--error)]"
-        : "border-[var(--line)] bg-[var(--panel)] text-[var(--muted)]";
+  const statusClass = targetSignalStatusClass(status);
   return <Link className="grid min-w-0 gap-1 border border-[var(--line)] bg-[var(--panel)] px-3 py-2 hover:border-[var(--primary)] hover:bg-[var(--primary-soft)]" to={to} aria-label={accessibleName}>
     <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">{label}</span>
     <span className={cn("truncate border px-2 py-1 text-xs font-semibold", statusClass)} title={value}>{value}</span>
   </Link>;
+}
+
+function targetSignalStatusClass(status: SignalStatus) {
+  switch (status) {
+    case "success": return "border-[var(--success)]/40 bg-[var(--success-soft)] text-[var(--success)]";
+    case "warning": return "border-[var(--warning)]/40 bg-[var(--warning-soft)] text-[var(--warning)]";
+    case "error": return "border-[var(--error)]/40 bg-[var(--error-soft)] text-[var(--error)]";
+    case "neutral": return "border-[var(--line)] bg-[var(--panel)] text-[var(--muted)]";
+  }
 }
 
 function targetKindShortLabel(kind: TargetKind) {

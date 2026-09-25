@@ -7,11 +7,15 @@ user and report the other verification performed.
 
 ## External services
 
-- GitHub is reachable outside the filesystem sandbox through the configured CI
-  integration. If an in-sandbox GitHub connector or CLI is unavailable, use
-  that CI route for authorized GitHub operations.
-- SonarQube is also available outside the filesystem sandbox. Request
-  escalation when a scan or query needs access beyond the sandbox.
+- GitHub is available outside the filesystem sandbox through the configured CI
+  integration. Use that route for authorized GitHub operations when sandboxed
+  access is unavailable; do not treat a sandbox network failure as lack of
+  GitHub access.
+- SonarQube is available outside the filesystem sandbox, and the SonarQube CLI
+  can authenticate through the configured OS keychain. Request escalation for
+  SonarQube issue queries that need external access; do not ask the user to
+  restore authentication merely because an in-sandbox request failed. Niklas
+  runs all SonarQube scans manually at the end of a task, so do not start scans.
 
 ## Project documentation
 
