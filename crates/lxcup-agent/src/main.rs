@@ -59,16 +59,16 @@ async fn collect_telemetry_with_cpu(
                 })
                 .count() as u32
         });
-        return telemetry_from_proc(
-            &meminfo,
-            &loadavg,
-            &stat,
-            &network,
+        return telemetry_from_proc(ProcTelemetryInput {
+            meminfo: &meminfo,
+            loadavg: &loadavg,
+            stat: &stat,
+            network: &network,
             storage_basis_points,
             process_count,
             previous_cpu,
-            now,
-        );
+            collected_at: now,
+        });
     }
     #[cfg(target_os = "windows")]
     {
@@ -116,16 +116,30 @@ async fn collect_windows_telemetry(now: chrono::DateTime<chrono::Utc>) -> System
     }
 }
 
-fn telemetry_from_proc(
-    meminfo: &str,
-    loadavg: &str,
-    stat: &str,
-    network: &str,
+struct ProcTelemetryInput<'a> {
+    meminfo: &'a str,
+    loadavg: &'a str,
+    stat: &'a str,
+    network: &'a str,
     storage_basis_points: Option<u16>,
     process_count: Option<u32>,
     previous_cpu: Option<(u64, u64)>,
     collected_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn telemetry_from_proc(
+    input: ProcTelemetryInput<'_>,
 ) -> (SystemTelemetrySample, Option<(u64, u64)>) {
+    let ProcTelemetryInput {
+        meminfo,
+        loadavg,
+        stat,
+        network,
+        storage_basis_points,
+        process_count,
+        previous_cpu,
+        collected_at,
+    } = input;
     let value = |key: &str| {
         meminfo.lines().find_map(|line| {
             line.strip_prefix(key)?
@@ -333,7 +347,8 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::{
-        heartbeat_endpoint, run, startup_config_from_values, telemetry_from_proc, value_or_default,
+        ProcTelemetryInput, heartbeat_endpoint, run, startup_config_from_values,
+        telemetry_from_proc, value_or_default,
     };
 
     #[test]
@@ -402,16 +417,16 @@ mod tests {
     #[test]
     fn telemetry_parser_handles_valid_and_malformed_proc_samples() {
         let now = chrono::Utc::now();
-        let (sample, _) = telemetry_from_proc(
-            "MemTotal: 1000 kB\nMemAvailable: 250 kB\n",
-            "1.25 0.50 0.25 1/10 20",
-            "cpu 10 0 20 60 10 0 0 0",
-            "Inter-| Receive | Transmit\n face |bytes packets\neth0: 100 0 0 0 0 0 0 0 200 0 0 0 0 0 0 0\n",
-            Some(7_500),
-            Some(42),
-            Some((0, 0)),
-            now,
-        );
+        let (sample, _) = telemetry_from_proc(ProcTelemetryInput {
+            meminfo: "MemTotal: 1000 kB\nMemAvailable: 250 kB\n",
+            loadavg: "1.25 0.50 0.25 1/10 20",
+            stat: "cpu 10 0 20 60 10 0 0 0",
+            network: "Inter-| Receive | Transmit\n face |bytes packets\neth0: 100 0 0 0 0 0 0 0 200 0 0 0 0 0 0 0\n",
+            storage_basis_points: Some(7_500),
+            process_count: Some(42),
+            previous_cpu: Some((0, 0)),
+            collected_at: now,
+        });
         assert_eq!(sample.collected_at, now);
         assert_eq!(sample.memory_basis_points, Some(7_500));
         assert_eq!(sample.load_1_milli, Some(1_250));
@@ -421,16 +436,16 @@ mod tests {
         assert_eq!(sample.network_rx_bytes, Some(100));
         assert_eq!(sample.network_tx_bytes, Some(200));
 
-        let (malformed, _) = telemetry_from_proc(
-            "MemTotal: nope",
-            "",
-            "cpu invalid",
-            "",
-            None,
-            None,
-            None,
-            now,
-        );
+        let (malformed, _) = telemetry_from_proc(ProcTelemetryInput {
+            meminfo: "MemTotal: nope",
+            loadavg: "",
+            stat: "cpu invalid",
+            network: "",
+            storage_basis_points: None,
+            process_count: None,
+            previous_cpu: None,
+            collected_at: now,
+        });
         assert_eq!(malformed.memory_basis_points, None);
         assert_eq!(malformed.load_1_milli, None);
         assert_eq!(malformed.cpu_basis_points, None);
@@ -440,16 +455,16 @@ mod tests {
     #[test]
     fn linux_cpu_usage_uses_interval_deltas_not_time_since_boot() {
         let now = chrono::Utc::now();
-        let (sample, current) = telemetry_from_proc(
-            "MemTotal: 1000 kB\nMemAvailable: 500 kB\n",
-            "0.00 0.00 0.00 1/1 1",
-            "cpu 20 0 20 130 0 0 0 0",
-            "",
-            None,
-            None,
-            Some((100, 70)),
-            now,
-        );
+        let (sample, current) = telemetry_from_proc(ProcTelemetryInput {
+            meminfo: "MemTotal: 1000 kB\nMemAvailable: 500 kB\n",
+            loadavg: "0.00 0.00 0.00 1/1 1",
+            stat: "cpu 20 0 20 130 0 0 0 0",
+            network: "",
+            storage_basis_points: None,
+            process_count: None,
+            previous_cpu: Some((100, 70)),
+            collected_at: now,
+        });
         assert_eq!(sample.cpu_basis_points, Some(1_428));
         assert_eq!(current, Some((170, 130)));
     }

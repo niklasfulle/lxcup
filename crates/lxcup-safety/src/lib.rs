@@ -175,4 +175,88 @@ mod tests {
         assert!(!result.healthy);
         assert!(result.detail.contains("agent"));
     }
+
+    #[test]
+    fn snapshots_require_a_nonblank_successful_task_id() {
+        assert_eq!(
+            evaluate_snapshot(false, Ok("ignored".to_owned())),
+            SnapshotState::NotRequested
+        );
+        assert_eq!(
+            evaluate_snapshot(true, Ok(" task-17 ".to_owned())),
+            SnapshotState::Succeeded {
+                task_id: " task-17 ".to_owned()
+            }
+        );
+        let empty = evaluate_snapshot(true, Ok("  ".to_owned()));
+        assert_eq!(
+            empty,
+            SnapshotState::Failed {
+                reason: "snapshot task id was empty".to_owned()
+            }
+        );
+        assert!(!snapshot_allows_execution(&empty));
+        assert!(snapshot_allows_execution(&evaluate_snapshot(
+            true,
+            Ok("task-18".to_owned())
+        )));
+    }
+
+    #[test]
+    fn reboot_requirement_accepts_case_and_numeric_markers() {
+        for value in ["YES", "True", "1"] {
+            assert_eq!(
+                parse_reboot_requirement(value, Some(0)),
+                RebootRequirement::Required
+            );
+        }
+        for value in ["NO", "False", "0"] {
+            assert_eq!(
+                parse_reboot_requirement(value, Some(0)),
+                RebootRequirement::NotRequired
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_checker_reports_success_and_connection_failure() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let checker = HealthChecker::new(Duration::from_secs(1)).unwrap();
+        let success = checker
+            .run(HealthCheckSpec::Tcp {
+                host: "127.0.0.1".to_owned(),
+                port,
+            })
+            .await;
+        assert!(success.healthy);
+
+        drop(listener);
+        let failure = checker
+            .run(HealthCheckSpec::Tcp {
+                host: "127.0.0.1".to_owned(),
+                port,
+            })
+            .await;
+        assert!(!failure.healthy);
+        assert!(!failure.detail.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_http_endpoint_and_zero_timeout_fail_safely() {
+        assert!(matches!(
+            HealthChecker::new(Duration::ZERO),
+            Err(SafetyError::InvalidTimeout)
+        ));
+        let checker = HealthChecker::new(Duration::from_millis(50)).unwrap();
+        let result = checker
+            .run(HealthCheckSpec::Http {
+                url: "not a url".to_owned(),
+            })
+            .await;
+        assert!(!result.healthy);
+        assert!(result.detail.len() <= 240);
+    }
 }

@@ -9,13 +9,12 @@ use axum::{
 };
 use lxcup_ansible::{
     AnsibleJob, AnsibleJobRequest, AnsibleJobStatus, AnsibleOperation, AnsibleParameters,
-    ExecutionMode, JobEvent, JobEventKind, JobFailureCode, JobSubmission, PlaybookRegistry,
+    ExecutionMode, JobEventKind, JobFailureCode, JobSubmission, PlaybookRegistry,
 };
 use lxcup_core::{
     ActorRole, ContainerId, ContainerManagementState, EnrollmentId, EnrollmentState,
     ResourceLifecycle, ResourceTarget, SecretId, Target, TargetId, TargetState, UpdateRisk,
 };
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 mod enrollment;

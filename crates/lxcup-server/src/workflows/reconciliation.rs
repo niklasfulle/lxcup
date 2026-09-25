@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    ActorRole, AnsibleJob, AnsibleJobRequest, AnsibleJobStatus, AnsibleOperation,
+    AnsibleParameters, ApiError, ApiEvent, ApiState, ExecutionMode, JobSubmission,
+    ResourceLifecycle, ResourceTarget, Target, TargetState, find_existing_job, map_ansible_error,
+    persist_created_job,
+};
 
 /// Reconciles persisted successful deployments so onboarding can continue
 /// after a browser reload or controller restart. The idempotency keys are
@@ -265,7 +270,7 @@ pub(super) async fn ensure_deployment_followups(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lxcup_core::{TargetKind, TargetTransport};
+    use lxcup_core::{SecretId, TargetKind, TargetTransport};
 
     fn managed_target(name: &str) -> Target {
         let mut target = Target::new(

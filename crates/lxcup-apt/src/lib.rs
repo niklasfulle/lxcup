@@ -236,4 +236,107 @@ mod tests {
             Err(AptParseError::InvalidBoolean(_))
         ));
     }
+
+    #[test]
+    fn command_arguments_reject_zero_and_unknown_operating_systems() {
+        assert!(matches!(
+            AptInspectionRequest {
+                container_id: 0,
+                operating_system: OperatingSystem::Ubuntu,
+            }
+            .command_arguments(),
+            Err(AptError::InvalidContainerId)
+        ));
+        assert!(matches!(
+            AptInspectionRequest {
+                container_id: 5,
+                operating_system: OperatingSystem::Unknown("other".to_owned()),
+            }
+            .command_arguments(),
+            Err(AptError::UnsupportedOperatingSystem)
+        ));
+        assert_eq!(
+            AptInspectionRequest {
+                container_id: 5,
+                operating_system: OperatingSystem::Ubuntu,
+            }
+            .command_arguments()
+            .unwrap(),
+            ["apt-cache", "policy"]
+        );
+    }
+
+    #[test]
+    fn parser_handles_empty_optional_fields_and_rejects_missing_required_fields() {
+        assert!(parse_output("  \n\n").unwrap().is_empty());
+        assert_eq!(
+            parse_output("Package: app\nInstalled: 1\nCandidate: 2\nSecurity: TRUE\nHeld: 1\nAuthenticated: 0")
+                .unwrap()[0]
+                .classification,
+            UpdateClassification::Unknown
+        );
+        assert!(matches!(
+            parse_output("Package: app"),
+            Err(AptParseError::MissingField("Installed"))
+        ));
+        assert!(matches!(
+            parse_output("Installed: 1"),
+            Err(AptParseError::MissingField("Package"))
+        ));
+        assert!(matches!(
+            parse_output("Package: app\nInstalled: 1\nSecurity: yesish"),
+            Err(AptParseError::InvalidBoolean(value)) if value == "yesish"
+        ));
+    }
+
+    #[test]
+    fn records_and_scans_convert_success_failure_and_invalid_output() {
+        let parsed = parse_output(
+            "Package: curl\nInstalled: 8.0\nCandidate: 8.1\nSecurity: no\nHeld: yes\nAuthenticated: yes",
+        )
+        .unwrap()
+        .remove(0)
+        .into_available_update()
+        .unwrap();
+        assert_eq!(parsed.package.as_str(), "curl");
+        assert!(parsed.held);
+
+        let id = lxcup_core::ContainerId::new(37);
+        let success = build_scan(
+            id,
+            AptExecutionResult {
+                stdout: "Package: curl\nInstalled: 8.0\nCandidate: 8.1\nSecurity: yes\nHeld: no\nAuthenticated: yes".to_owned(),
+                stderr: "warning".to_owned(),
+                exit_code: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(success.scan.status, ScanStatus::Succeeded);
+        assert_eq!(success.scan.updates.len(), 1);
+        assert_eq!(success.diagnostics, "warning");
+
+        let failure = build_scan(
+            id,
+            AptExecutionResult {
+                stdout: String::new(),
+                stderr: "apt failed".to_owned(),
+                exit_code: Some(100),
+            },
+        )
+        .unwrap();
+        assert_eq!(failure.scan.status, ScanStatus::Failed);
+        assert_eq!(failure.diagnostics, "apt failed");
+
+        assert!(matches!(
+            build_scan(
+                id,
+                AptExecutionResult {
+                    stdout: "Package: bad name\nInstalled: 1.0\nCandidate: 2.0".to_owned(),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                }
+            ),
+            Err(AptError::Parse(AptParseError::InvalidPackageName))
+        ));
+    }
 }

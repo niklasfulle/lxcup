@@ -24,6 +24,12 @@ use thiserror::Error;
 use tokio::process::Command;
 use uuid::Uuid;
 
+mod parsers;
+use parsers::{
+    normalize_apt_list, parse_docker_containers, parse_dpkg_packages, parse_windows_packages,
+    safe_detail, safe_package,
+};
+
 pub const PROTOCOL_VERSION: &str = "v1";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -415,19 +421,6 @@ impl AgentError {
     }
 }
 
-fn safe_package(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || ".+_:@/-".contains(character))
-        && !value.starts_with('-')
-}
-
-fn safe_detail(value: &str) -> String {
-    value.replace(['\r', '\n'], " ").chars().take(240).collect()
-}
-
 #[derive(Clone)]
 pub struct LocalAgentState {
     pub info: AgentInfo,
@@ -540,51 +533,6 @@ async fn agent_package_inventory(
     .into_response()
 }
 
-fn parse_dpkg_packages(output: &str) -> Vec<AgentInstalledPackage> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.splitn(3, '\t');
-            Some(AgentInstalledPackage {
-                name: fields.next()?.trim().to_owned(),
-                installed_version: fields.next()?.trim().to_owned(),
-                architecture: fields
-                    .next()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned),
-                source: Some("dpkg".to_owned()),
-            })
-            .filter(|package| !package.name.is_empty() && !package.installed_version.is_empty())
-        })
-        .collect()
-}
-
-fn parse_windows_packages(output: &str) -> Vec<AgentInstalledPackage> {
-    let value: serde_json::Value = match serde_json::from_str(output) {
-        Ok(value) => value,
-        Err(_) => return Vec::new(),
-    };
-    let entries = match value {
-        serde_json::Value::Array(entries) => entries,
-        entry => vec![entry],
-    };
-    entries
-        .into_iter()
-        .filter_map(|entry| {
-            Some(AgentInstalledPackage {
-                name: entry.get("Name")?.as_str()?.to_owned(),
-                installed_version: entry.get("Version")?.as_str()?.to_owned(),
-                architecture: None,
-                source: entry
-                    .get("ProviderName")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
-            })
-        })
-        .collect()
-}
-
 async fn agent_docker_containers(
     State(state): State<LocalAgentState>,
     headers: axum::http::HeaderMap,
@@ -627,52 +575,6 @@ async fn agent_docker_containers(
         containers,
     })
     .into_response()
-}
-
-fn parse_docker_containers(output: &str) -> Vec<DockerContainerInfo> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.splitn(8, '\t');
-            Some(DockerContainerInfo {
-                id: fields.next()?.to_owned(),
-                name: fields.next()?.to_owned(),
-                image: fields.next()?.to_owned(),
-                state: fields.next()?.to_owned(),
-                status: fields.next()?.to_owned(),
-                ports: fields
-                    .next()
-                    .unwrap_or_default()
-                    .split(", ")
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-                started_at: fields
-                    .next()
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned),
-                labels: sanitize_docker_labels(fields.next().unwrap_or_default()),
-            })
-        })
-        .collect()
-}
-
-fn sanitize_docker_labels(labels: &str) -> Vec<String> {
-    labels
-        .split(',')
-        .map(str::trim)
-        .filter(|label| !label.is_empty())
-        .filter(|label| {
-            let name = label
-                .split_once('=')
-                .map_or(*label, |(name, _)| name)
-                .to_ascii_lowercase();
-            !["secret", "token", "password", "credential", "private_key"]
-                .iter()
-                .any(|term| name.contains(term))
-        })
-        .map(str::to_owned)
-        .collect()
 }
 
 async fn agent_health(
@@ -841,223 +743,6 @@ async fn run_local_command(
     }
 }
 
-fn normalize_apt_list(output: &str) -> String {
-    output
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with("Listing") {
-                return None;
-            }
-            let (package, _) = line.split_once('/')?;
-            let fields: Vec<_> = line.split_whitespace().collect();
-            let candidate = fields.get(1)?;
-            let marker = "[upgradable from: ";
-            let installed = line.split(marker).nth(1)?.trim_end_matches(']');
-            let security = line.contains("security");
-            Some(format!("Package: {package}\nInstalled: {installed}\nCandidate: {candidate}\nSecurity: {}\nHeld: no\nAuthenticated: yes", if security { "yes" } else { "no" }))
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{body::Body, http::Request};
-    use tower::ServiceExt;
-
-    #[test]
-    fn config_redacts_tokens_and_requires_safe_urls() {
-        assert!(AgentClientConfig::new("http://agent.example", "token").is_err());
-        let config = AgentClientConfig::new("https://agent.example", "secret").unwrap();
-        assert!(!format!("{config:?}").contains("secret"));
-        assert!(
-            AgentClientConfig::new("https://agent.example", "secret")
-                .unwrap()
-                .with_root_certificate_pem(b"private-ca")
-                .root_certificate_pem
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn package_validation_blocks_option_injection() {
-        assert!(safe_package("openssl"));
-        assert!(!safe_package("--download-only"));
-        assert!(!safe_package("openssl; reboot"));
-    }
-
-    #[test]
-    fn apt_output_is_normalized_to_the_agent_contract() {
-        let output = normalize_apt_list(
-            "Listing...\nopenssl/stable-security 3.1 amd64 [upgradable from: 3.0]",
-        );
-        assert!(output.contains("Package: openssl"));
-        assert!(output.contains("Security: yes"));
-        assert!(output.contains("Installed: 3.0"));
-    }
-
-    #[test]
-    fn docker_inventory_parser_keeps_only_complete_rows() {
-        let containers = parse_docker_containers(
-            "a1\tapi\tghcr.io/acme/api:1\trunning\tUp 2 hours\t80/tcp\t2026-01-01\tapp=api,secret=value\ninvalid",
-        );
-        assert_eq!(containers.len(), 1);
-        assert_eq!(containers[0].name, "api");
-        assert_eq!(containers[0].ports, ["80/tcp"]);
-        assert_eq!(containers[0].labels, ["app=api"]);
-    }
-
-    #[test]
-    fn package_inventory_parsers_normalize_linux_and_windows_fixtures() {
-        let linux = parse_dpkg_packages("curl\t8.5.0-2\tamd64\ninvalid");
-        assert_eq!(linux.len(), 1);
-        assert_eq!(linux[0].source.as_deref(), Some("dpkg"));
-        let windows = parse_windows_packages(
-            r#"[{"Name":"7zip","Version":"24.0","ProviderName":"Programs"}]"#,
-        );
-        assert_eq!(windows[0].name, "7zip");
-        assert_eq!(windows[0].source.as_deref(), Some("Programs"));
-    }
-
-    #[test]
-    fn telemetry_buffer_keeps_a_bounded_recent_partial_window() {
-        let mut buffer = TelemetryBuffer::default();
-        let now = Utc::now();
-        buffer.record(SystemTelemetrySample {
-            collected_at: now - chrono::Duration::seconds(31),
-            cpu_basis_points: None,
-            memory_basis_points: None,
-            storage_basis_points: None,
-            load_1_milli: None,
-            network_rx_bytes: None,
-            network_tx_bytes: None,
-            process_count: None,
-        });
-        for offset in 0..40 {
-            buffer.record(SystemTelemetrySample {
-                collected_at: now - chrono::Duration::seconds(29)
-                    + chrono::Duration::milliseconds(offset * 500),
-                cpu_basis_points: Some(5000),
-                memory_basis_points: Some(4000),
-                storage_basis_points: None,
-                load_1_milli: None,
-                network_rx_bytes: None,
-                network_tx_bytes: None,
-                process_count: None,
-            });
-        }
-        let window = buffer.window();
-        assert_eq!(window.samples.len(), TelemetryBuffer::MAX_SAMPLES);
-        assert!(window.partial);
-        assert!(
-            window.samples.iter().all(|sample| {
-                sample.collected_at >= Utc::now() - chrono::Duration::seconds(30)
-            })
-        );
-        assert!(
-            window
-                .samples
-                .windows(2)
-                .all(|pair| pair[0].collected_at <= pair[1].collected_at)
-        );
-        let serialized = serde_json::to_vec(&window).unwrap();
-        let restored: SystemTelemetryWindow = serde_json::from_slice(&serialized).unwrap();
-        assert_eq!(restored, window);
-    }
-
-    #[tokio::test]
-    async fn authenticated_health_command_is_idempotent_and_updates_metrics() {
-        let state = LocalAgentState::new(
-            AgentInfo {
-                agent_id: "test-agent".to_owned(),
-                platform: if cfg!(windows) {
-                    AgentPlatform::Windows
-                } else {
-                    AgentPlatform::Linux
-                },
-                hostname: "test-host".to_owned(),
-                version: "0.2.0".to_owned(),
-                protocol_version: PROTOCOL_VERSION.to_owned(),
-            },
-            "agent-token",
-        );
-        let app = agent_router(state);
-
-        let unauthorized = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-
-        let request = serde_json::json!({
-            "action": "health",
-            "packages": [],
-            "idempotency_key": "health-check-1"
-        })
-        .to_string();
-        let first = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/command")
-                    .header("authorization", "Bearer agent-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(request.clone()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(first.status(), StatusCode::OK);
-        let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
-
-        let second = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/command")
-                    .header("authorization", "Bearer agent-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(request))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(second.status(), StatusCode::OK);
-        let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
-        assert_eq!(first_json["request_id"], second_json["request_id"]);
-
-        let metrics = app
-            .oneshot(
-                Request::builder()
-                    .uri("/metrics")
-                    .header("authorization", "Bearer agent-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(metrics.status(), StatusCode::OK);
-        let metrics_body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let metrics_json: serde_json::Value = serde_json::from_slice(&metrics_body).unwrap();
-        assert_eq!(metrics_json["commands_total"], 1);
-        assert_eq!(metrics_json["commands_failed"], 0);
-    }
-}
+#[path = "tests.rs"]
+mod tests;

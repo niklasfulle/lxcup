@@ -1,4 +1,14 @@
-use super::*;
+use super::{
+    ActorRole, AnsibleJob, AnsibleJobRequest, AnsibleJobStatus, AnsibleOperation,
+    AnsibleParameters, ApiEnvelope, ApiError, ApiEvent, ApiState, CreateEnrollmentRequest,
+    EnrollmentDto, EnrollmentState, ExecutionMode, Extension, JobEventKind, JobFailureCode,
+    JobSubmission, Json, JsonBody, Path, PlaybookRegistry, ResourceLifecycle, ResourceTarget,
+    SecretId, State, StatusCode, TargetId, TargetState, Uuid, envelope, find_existing_job,
+    parse_uuid, require_permission, resolve_ansible_target, resolve_job_secret_refs,
+    validate_package_update,
+};
+use lxcup_ansible::JobEvent;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct CreateAnsibleJobRequest {
@@ -455,6 +465,7 @@ pub(super) fn map_ansible_error(error: lxcup_ansible::CoordinatorError) -> ApiEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ContainerId, Enrollment};
     use lxcup_ansible::{AnsibleContractError, CoordinatorError};
     use std::sync::{Mutex, OnceLock};
 

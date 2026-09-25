@@ -218,4 +218,78 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn validates_database_urls_pool_bounds_and_environment_helpers() {
+        assert!(matches!(
+            DatabaseConfig::from_values(
+                "  ".to_owned(),
+                1,
+                0,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                None,
+            ),
+            Err(super::PersistenceError::MissingDatabaseUrl)
+        ));
+        assert!(matches!(
+            DatabaseConfig::from_values(
+                "postgres://localhost/db".to_owned(),
+                2,
+                3,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                None,
+            ),
+            Err(super::PersistenceError::InvalidPoolSettings)
+        ));
+
+        assert_eq!(
+            super::env_u32("LXCUP_TEST_UNSET_POOL_LIMIT_91F9", 7).unwrap(),
+            7
+        );
+        assert_eq!(
+            super::env_u64("LXCUP_TEST_UNSET_TIMEOUT_91F9", 9).unwrap(),
+            9
+        );
+        assert_eq!(
+            super::env_duration("LXCUP_TEST_UNSET_DURATION_91F9", 11).unwrap(),
+            Duration::from_secs(11)
+        );
+        assert_eq!(
+            super::env_optional_duration("LXCUP_TEST_UNSET_IDLE_91F9").unwrap(),
+            Some(Duration::from_secs(600))
+        );
+
+        assert!(matches!(
+            super::env_u32("PATH", 1),
+            Err(super::PersistenceError::InvalidSetting { name: "PATH" })
+        ));
+        assert!(matches!(
+            super::env_u64("PATH", 1),
+            Err(super::PersistenceError::InvalidSetting { name: "PATH" })
+        ));
+        assert!(matches!(
+            super::env_duration("PATH", 1),
+            Err(super::PersistenceError::InvalidSetting { name: "PATH" })
+        ));
+        assert!(matches!(
+            super::env_optional_duration("PATH"),
+            Err(super::PersistenceError::InvalidSetting { name: "PATH" })
+        ));
+    }
+
+    #[tokio::test]
+    async fn database_from_environment_reports_missing_configuration_before_connecting() {
+        if std::env::var("DATABASE_URL").is_err() {
+            assert!(matches!(
+                super::DatabaseConfig::from_env(),
+                Err(super::PersistenceError::MissingDatabaseUrl)
+            ));
+            assert!(matches!(
+                super::Database::connect_from_env().await,
+                Err(super::PersistenceError::MissingDatabaseUrl)
+            ));
+        }
+    }
 }

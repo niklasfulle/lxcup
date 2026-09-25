@@ -1,4 +1,4 @@
-use super::{ApiEnvelope, ApiError, ApiState, envelope, require_permission};
+use super::{ApiEnvelope, ApiError, ApiState, ApiStore, envelope, require_permission};
 use axum::{
     Json,
     extract::{Json as JsonBody, State},
@@ -85,6 +85,41 @@ pub(super) async fn create_schedule(
     JsonBody(request): JsonBody<CreateScheduleRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ApiEnvelope<ScheduleDto>>), ApiError> {
     require_permission(actor_role, Permission::Configure)?;
+    validate_schedule_fields(&request)?;
+    let mut store = state.store.write().await;
+    validate_schedule_resources(&request, &store)?;
+    let schedule = JobSchedule {
+        id: request.id,
+        operation: request.operation,
+        timezone: request.timezone,
+        target_ids: request.target_ids,
+        frequency: ScheduleFrequency::EveryMinutes(request.every_minutes),
+        enabled: request.enabled,
+        threshold: request.threshold,
+        policy_id: request.policy_id,
+        last_run_at: None,
+        next_run_at: Utc::now() + ScheduleFrequency::EveryMinutes(request.every_minutes).interval(),
+        last_error: None,
+    };
+    let dto = ScheduleDto::from(&schedule);
+    store.schedules.push(schedule);
+    let persisted = store
+        .schedules
+        .last()
+        .cloned()
+        .expect("schedule was just inserted");
+    drop(store);
+    if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .schedules
+            .save(&persisted)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    Ok((axum::http::StatusCode::CREATED, Json(envelope(dto))))
+}
+
+fn validate_schedule_fields(request: &CreateScheduleRequest) -> Result<(), ApiError> {
     if request.id.trim().is_empty() || request.id.len() > 128 {
         return Err(ApiError::bad_request(
             "invalid_schedule",
@@ -118,7 +153,13 @@ pub(super) async fn create_schedule(
             "package updates require an explicit update policy",
         ));
     }
-    let mut store = state.store.write().await;
+    Ok(())
+}
+
+fn validate_schedule_resources(
+    request: &CreateScheduleRequest,
+    store: &ApiStore,
+) -> Result<(), ApiError> {
     if store
         .schedules
         .iter()
@@ -142,50 +183,30 @@ pub(super) async fn create_schedule(
     {
         return Err(ApiError::not_found("schedule target not found"));
     }
-    if let Some(policy_id) = request.policy_id.as_deref() {
-        let policy = store
-            .update_policies
-            .iter()
-            .find(|policy| policy.id == policy_id && policy.enabled)
-            .ok_or_else(|| ApiError::not_found("update policy not found or disabled"))?;
-        if request
-            .target_ids
-            .iter()
-            .any(|target_id| !policy.allowed_targets.contains(target_id))
-        {
-            return Err(ApiError::bad_request(
-                "update_policy_target_denied",
-                "update policy does not allow every schedule target",
-            ));
-        }
-    }
-    let schedule = JobSchedule {
-        id: request.id,
-        operation: request.operation,
-        timezone: request.timezone,
-        target_ids: request.target_ids,
-        frequency: ScheduleFrequency::EveryMinutes(request.every_minutes),
-        enabled: request.enabled,
-        threshold: request.threshold,
-        policy_id: request.policy_id,
-        last_run_at: None,
-        next_run_at: Utc::now() + ScheduleFrequency::EveryMinutes(request.every_minutes).interval(),
-        last_error: None,
+    validate_schedule_policy_targets(request, store)
+}
+
+fn validate_schedule_policy_targets(
+    request: &CreateScheduleRequest,
+    store: &ApiStore,
+) -> Result<(), ApiError> {
+    let Some(policy_id) = request.policy_id.as_deref() else {
+        return Ok(());
     };
-    let dto = ScheduleDto::from(&schedule);
-    store.schedules.push(schedule);
-    let persisted = store
-        .schedules
-        .last()
-        .cloned()
-        .expect("schedule was just inserted");
-    drop(store);
-    if let Some(repositories) = state.repositories.clone() {
-        repositories
-            .schedules
-            .save(&persisted)
-            .await
-            .map_err(|_| ApiError::storage())?;
+    let policy = store
+        .update_policies
+        .iter()
+        .find(|policy| policy.id == policy_id && policy.enabled)
+        .ok_or_else(|| ApiError::not_found("update policy not found or disabled"))?;
+    if request
+        .target_ids
+        .iter()
+        .any(|target_id| !policy.allowed_targets.contains(target_id))
+    {
+        return Err(ApiError::bad_request(
+            "update_policy_target_denied",
+            "update policy does not allow every schedule target",
+        ));
     }
-    Ok((axum::http::StatusCode::CREATED, Json(envelope(dto))))
+    Ok(())
 }

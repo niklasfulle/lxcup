@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    AnsibleJob, AnsibleJobStatus, AnsibleOperation, AnsibleParameters, ApiError, ApiState,
+    ContainerId, ContainerManagementState, CreateAnsibleJobRequest, ExecutionMode,
+    ResourceLifecycle, ResourceTarget, SecretId, TargetId, TargetState, UpdateRisk,
+    configured_ansible_secret_refs, map_ansible_error,
+};
 
 pub(super) async fn validate_package_update(
     state: &ApiState,
@@ -14,10 +19,38 @@ pub(super) async fn validate_package_update(
             "package updates require a registered target and update policy",
         ));
     };
-    let target_kind = state
-        .store
-        .read()
-        .await
+    let policy_id = request.policy_id.as_deref().ok_or_else(|| {
+        ApiError::bad_request(
+            "update_policy_required",
+            "package updates require an explicit update policy",
+        )
+    })?;
+    let policy = load_update_policy(state, target_id, policy_id).await?;
+    let packages = update_packages(request)?;
+    validate_policy_allows_packages(&policy, target_id, packages)?;
+
+    match request.mode {
+        ExecutionMode::Plan => validate_plan_key(request, policy_id),
+        ExecutionMode::Apply => {
+            validate_package_apply(
+                state, request, target, target_id, policy_id, &policy, packages,
+            )
+            .await
+        }
+        _ => Err(ApiError::bad_request(
+            "package_plan_mode_required",
+            "package updates must first be planned; only a matching successful plan may be applied",
+        )),
+    }
+}
+
+async fn load_update_policy(
+    state: &ApiState,
+    target_id: TargetId,
+    policy_id: &str,
+) -> Result<lxcup_core::UpdatePolicy, ApiError> {
+    let store = state.store.read().await;
+    let target_kind = store
         .targets
         .iter()
         .find(|target| target.id == target_id)
@@ -29,16 +62,7 @@ pub(super) async fn validate_package_update(
             "package-name update plans are currently supported on Debian and Ubuntu targets only",
         ));
     }
-    let policy_id = request.policy_id.as_deref().ok_or_else(|| {
-        ApiError::bad_request(
-            "update_policy_required",
-            "package updates require an explicit update policy",
-        )
-    })?;
-    let policy = state
-        .store
-        .read()
-        .await
+    store
         .update_policies
         .iter()
         .find(|policy| policy.id == policy_id && policy.enabled)
@@ -48,122 +72,184 @@ pub(super) async fn validate_package_update(
                 "update_policy_unavailable",
                 "the selected update policy is missing or disabled",
             )
-        })?;
+        })
+}
+
+fn update_packages(request: &CreateAnsibleJobRequest) -> Result<&[String], ApiError> {
     let AnsibleParameters::UpdatePackages { packages } = &request.parameters else {
         return Err(ApiError::bad_request(
             "invalid_package_plan",
             "package update parameters are invalid",
         ));
     };
-    // Until the package manager yields structured impact data, classify requested upgrades as high risk.
-    if !policy.allowed_targets.contains(&target_id)
-        || policy.maximum_risk < UpdateRisk::High
-        || (!policy.allowed_packages.is_empty()
-            && packages
-                .iter()
-                .any(|package| !policy.allowed_packages.contains(package)))
-    {
+    Ok(packages)
+}
+
+fn validate_policy_allows_packages(
+    policy: &lxcup_core::UpdatePolicy,
+    target_id: TargetId,
+    packages: &[String],
+) -> Result<(), ApiError> {
+    let denied_target_or_risk =
+        !policy.allowed_targets.contains(&target_id) || policy.maximum_risk < UpdateRisk::High;
+    let denied_package = !policy.allowed_packages.is_empty()
+        && packages
+            .iter()
+            .any(|package| !policy.allowed_packages.contains(package));
+    if denied_target_or_risk || denied_package {
         return Err(ApiError::forbidden(
             "update_policy_denied",
             "target, package, risk, or maintenance window is not allowed by the selected policy",
         ));
     }
-    match request.mode {
-        ExecutionMode::Plan
-            if request.approved_plan_job_id.is_none()
-                && request
-                    .idempotency_key
-                    .starts_with(&format!("package-plan:{policy_id}:")) =>
-        {
-            Ok(())
-        }
-        ExecutionMode::Apply => {
-            let plan_id = request.approved_plan_job_id.ok_or_else(|| {
-                ApiError::bad_request(
-                    "package_plan_required",
-                    "apply requires a completed package plan",
-                )
-            })?;
-            if !request
-                .idempotency_key
-                .starts_with(&format!("package-apply:{}:", plan_id.as_uuid()))
-            {
-                return Err(ApiError::bad_request(
-                    "invalid_package_apply_key",
-                    "the apply request must be tied to its approved plan",
-                ));
-            }
-            if packages.iter().any(|package| {
-                !policy.allows(target_id, package, UpdateRisk::High, chrono::Utc::now())
-            }) {
-                return Err(ApiError::forbidden(
-                    "update_policy_window_closed",
-                    "package apply is only allowed inside the policy maintenance window",
-                ));
-            }
-            if !request.confirmed {
-                return Err(ApiError::bad_request(
-                    "ansible_confirmation_required",
-                    "applying a package plan requires explicit confirmation",
-                ));
-            }
-            let plan = if let Some(repositories) = state.repositories.as_ref() {
-                repositories
-                    .ansible_jobs
-                    .find_by_id(plan_id)
-                    .await
-                    .map_err(|_| ApiError::storage())?
-                    .ok_or_else(|| ApiError::not_found("package plan not found"))?
-            } else {
-                state
-                    .ansible
-                    .read()
-                    .await
-                    .job(plan_id)
-                    .map_err(map_ansible_error)?
-            };
-            if plan.operation != AnsibleOperation::UpdatePackages
-                || plan.mode != ExecutionMode::Plan
-                || plan.status != AnsibleJobStatus::Succeeded
-                || plan.target != target
-                || plan.parameters != request.parameters
-                || !plan
-                    .idempotency_key
-                    .starts_with(&format!("package-plan:{policy_id}:"))
-            {
-                return Err(ApiError::conflict(
-                    "package_plan_mismatch",
-                    "the approved plan must be successful and match the exact target and package list",
-                ));
-            }
-            let existing_jobs = if let Some(repositories) = state.repositories.as_ref() {
-                repositories
-                    .ansible_jobs
-                    .list()
-                    .await
-                    .map_err(|_| ApiError::storage())?
-            } else {
-                state.ansible.read().await.jobs()
-            };
-            if existing_jobs.iter().any(|job| {
-                job.operation == AnsibleOperation::UpdatePackages
-                    && job.mode == ExecutionMode::Apply
-                    && job
-                        .idempotency_key
-                        .starts_with(&format!("package-apply:{}:", plan_id.as_uuid()))
-            }) {
-                return Err(ApiError::conflict(
-                    "package_plan_already_used",
-                    "this plan already has an apply attempt; create a fresh plan before resuming",
-                ));
-            }
-            Ok(())
-        }
-        _ => Err(ApiError::bad_request(
+    Ok(())
+}
+
+fn validate_plan_key(request: &CreateAnsibleJobRequest, policy_id: &str) -> Result<(), ApiError> {
+    if request.approved_plan_job_id.is_none()
+        && request
+            .idempotency_key
+            .starts_with(&format!("package-plan:{policy_id}:"))
+    {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
             "package_plan_mode_required",
             "package updates must first be planned; only a matching successful plan may be applied",
-        )),
+        ))
     }
+}
+
+async fn validate_package_apply(
+    state: &ApiState,
+    request: &CreateAnsibleJobRequest,
+    target: ResourceTarget,
+    target_id: TargetId,
+    policy_id: &str,
+    policy: &lxcup_core::UpdatePolicy,
+    packages: &[String],
+) -> Result<(), ApiError> {
+    let plan_id = request.approved_plan_job_id.ok_or_else(|| {
+        ApiError::bad_request(
+            "package_plan_required",
+            "apply requires a completed package plan",
+        )
+    })?;
+    validate_apply_key(request, plan_id)?;
+    validate_apply_window(policy, target_id, packages)?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "ansible_confirmation_required",
+            "applying a package plan requires explicit confirmation",
+        ));
+    }
+    let plan = load_package_plan(state, plan_id).await?;
+    if !plan_matches_request(&plan, request, target, policy_id) {
+        return Err(ApiError::conflict(
+            "package_plan_mismatch",
+            "the approved plan must be successful and match the exact target and package list",
+        ));
+    }
+    reject_reused_plan(state, plan_id).await
+}
+
+fn validate_apply_key(
+    request: &CreateAnsibleJobRequest,
+    plan_id: lxcup_core::AnsibleJobId,
+) -> Result<(), ApiError> {
+    if request
+        .idempotency_key
+        .starts_with(&format!("package-apply:{}:", plan_id.as_uuid()))
+    {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "invalid_package_apply_key",
+            "the apply request must be tied to its approved plan",
+        ))
+    }
+}
+
+fn validate_apply_window(
+    policy: &lxcup_core::UpdatePolicy,
+    target_id: TargetId,
+    packages: &[String],
+) -> Result<(), ApiError> {
+    if packages
+        .iter()
+        .any(|package| !policy.allows(target_id, package, UpdateRisk::High, chrono::Utc::now()))
+    {
+        return Err(ApiError::forbidden(
+            "update_policy_window_closed",
+            "package apply is only allowed inside the policy maintenance window",
+        ));
+    }
+    Ok(())
+}
+
+async fn load_package_plan(
+    state: &ApiState,
+    plan_id: lxcup_core::AnsibleJobId,
+) -> Result<AnsibleJob, ApiError> {
+    if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .ansible_jobs
+            .find_by_id(plan_id)
+            .await
+            .map_err(|_| ApiError::storage())?
+            .ok_or_else(|| ApiError::not_found("package plan not found"))
+    } else {
+        state
+            .ansible
+            .read()
+            .await
+            .job(plan_id)
+            .map_err(map_ansible_error)
+    }
+}
+
+fn plan_matches_request(
+    plan: &AnsibleJob,
+    request: &CreateAnsibleJobRequest,
+    target: ResourceTarget,
+    policy_id: &str,
+) -> bool {
+    plan.operation == AnsibleOperation::UpdatePackages
+        && plan.mode == ExecutionMode::Plan
+        && plan.status == AnsibleJobStatus::Succeeded
+        && plan.target == target
+        && plan.parameters == request.parameters
+        && plan
+            .idempotency_key
+            .starts_with(&format!("package-plan:{policy_id}:"))
+}
+
+async fn reject_reused_plan(
+    state: &ApiState,
+    plan_id: lxcup_core::AnsibleJobId,
+) -> Result<(), ApiError> {
+    let existing_jobs = if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .ansible_jobs
+            .list()
+            .await
+            .map_err(|_| ApiError::storage())?
+    } else {
+        state.ansible.read().await.jobs()
+    };
+    if existing_jobs.iter().any(|job| {
+        job.operation == AnsibleOperation::UpdatePackages
+            && job.mode == ExecutionMode::Apply
+            && job
+                .idempotency_key
+                .starts_with(&format!("package-apply:{}:", plan_id.as_uuid()))
+    }) {
+        return Err(ApiError::conflict(
+            "package_plan_already_used",
+            "this plan already has an apply attempt; create a fresh plan before resuming",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) async fn resolve_ansible_target(
@@ -258,8 +344,11 @@ pub(super) async fn find_existing_job(
 
 #[cfg(test)]
 mod package_policy_tests {
+    use super::super::reconcile_onboarding_jobs;
     use super::*;
-    use lxcup_core::{TargetKind, TargetTransport, UpdatePolicy};
+    use lxcup_ansible::{AnsibleJobRequest, JobSubmission};
+    use lxcup_core::{ActorRole, Target, TargetId, TargetKind, TargetTransport, UpdatePolicy};
+    use uuid::Uuid;
 
     fn package_request(
         mode: ExecutionMode,

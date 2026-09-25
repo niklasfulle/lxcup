@@ -671,6 +671,45 @@ mod tests {
     }
 
     #[test]
+    fn file_provider_covers_metadata_update_revoke_and_missing_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            FileSecretStore::new(""),
+            Err(super::SecretStoreError::Invalid)
+        ));
+        let store = FileSecretStore::new(directory.path()).unwrap();
+        assert!(store.list_metadata().unwrap().is_empty());
+
+        let created = store.create(request("file-lifecycle")).unwrap();
+        let id = created.metadata.id;
+        assert_eq!(store.list_metadata().unwrap(), vec![created.clone()]);
+        store
+            .update(id, SecretValue::new("updated-file-secret").unwrap())
+            .unwrap();
+        assert_eq!(store.read(id).unwrap().expose(), "updated-file-secret");
+        store.revoke(id).unwrap();
+        assert_eq!(store.read(id), Err(super::SecretStoreError::Denied));
+        assert_eq!(
+            store.update(id, SecretValue::new("blocked").unwrap()),
+            Err(super::SecretStoreError::Denied)
+        );
+        store.delete(id).unwrap();
+        assert_eq!(store.metadata(id), Err(super::SecretStoreError::Missing));
+        assert_eq!(store.read(id), Err(super::SecretStoreError::Missing));
+        assert_eq!(store.delete(id), Err(super::SecretStoreError::Missing));
+
+        std::fs::write(directory.path().join("broken.json"), "not metadata").unwrap();
+        assert_eq!(store.list_metadata(), Err(super::SecretStoreError::Invalid));
+        assert!(matches!(
+            store.create(CreateSecret {
+                name: String::new(),
+                ..request("ignored")
+            }),
+            Err(super::SecretStoreError::Invalid)
+        ));
+    }
+
+    #[test]
     fn errors_are_stable_and_redacted() {
         let error = super::SecretStoreError::Unavailable;
         assert_eq!(error.to_string(), "secret provider is unavailable");

@@ -63,22 +63,32 @@ async fn run(
     config: StartupConfig,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
+    let bind_address = config.bind_address.clone();
+    let listener = tokio::net::TcpListener::bind(&bind_address)
+        .await
+        .expect("server bind address must be available");
+    let state = initialize_state(config).await;
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), %bind_address, "lxcup server starting");
+    spawn_background_workers(state.clone());
+    axum::serve(listener, lxcup_server::router(state))
+        .with_graceful_shutdown(shutdown)
+        .await
+}
+
+async fn initialize_state(config: StartupConfig) -> lxcup_server::ApiState {
     let StartupConfig {
-        bind_address,
         dev_seed_enabled,
         production,
         auth,
         secret_store,
         database_configured,
+        ..
     } = config;
     if production && !auth.is_production_ready() {
         panic!(
             "production requires LXCUP_AUTH_REQUIRED=true and distinct role tokens of at least 16 characters"
         );
     }
-    let listener = tokio::net::TcpListener::bind(&bind_address)
-        .await
-        .expect("server bind address must be available");
     let mut state = lxcup_server::ApiState::new().with_auth_config(auth);
     if let Some((secret_root, master_key)) = secret_store {
         let secret_store = EncryptedFileSecretStore::new(secret_root, master_key, [])
@@ -120,7 +130,10 @@ async fn run(
         }
         tracing::warn!("DATABASE_URL is not configured; using in-memory state");
     }
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), %bind_address, "lxcup server starting");
+    state
+}
+
+fn spawn_background_workers(state: lxcup_server::ApiState) {
     let onboarding_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
@@ -143,9 +156,6 @@ async fn run(
             }
         }
     });
-    axum::serve(listener, lxcup_server::router(state))
-        .with_graceful_shutdown(shutdown)
-        .await
 }
 
 async fn shutdown_signal() {
