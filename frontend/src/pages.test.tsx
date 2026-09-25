@@ -328,6 +328,31 @@ describe("inventory pages", () => {
     fireEvent.change(screen.getByLabelText("Sortierung"), { target: { value: "version" } });
   });
 
+  it("keeps 30-second telemetry current and updates stale status after two minutes", async () => {
+    vi.useFakeTimers();
+    try {
+      const now = new Date("2026-09-25T12:00:00Z");
+      vi.setSystemTime(now);
+      mocks.targets.data = [target];
+      mocks.telemetry.data = {
+        target_id: target.id,
+        collected_at: new Date(now.getTime() - 30_000).toISOString(),
+        samples: [{ collected_at: new Date(now.getTime() - 30_000).toISOString(), cpu_basis_points: 1000, memory_basis_points: 2000, storage_basis_points: 3000, load_1_milli: 0, network_rx_bytes: null, network_tx_bytes: null, process_count: null }],
+      };
+      renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
+      expect(screen.getByText("Letzter Messpunkt vor 30 s · Aktuell")).toBeInTheDocument();
+      expect(screen.queryByText(/Seit dem letzten Messpunkt sind mehr als 2 Minuten/)).not.toBeInTheDocument();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+      expect(screen.queryByText(/Seit dem letzten Messpunkt sind mehr als 2 Minuten/)).not.toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
+      expect(screen.getByText(/Seit dem letzten Messpunkt sind mehr als 2 Minuten/)).toBeInTheDocument();
+      expect(screen.getByText("Letzter Messpunkt vor 2 Min. · Veraltet")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("starts one package inventory job and prevents duplicate runs while it is queued", async () => {
     mocks.targets.data = [target];
     mocks.packageInventory.data = { target_id: target.id, status: "not_collected", collected_at: null, packages: [] };

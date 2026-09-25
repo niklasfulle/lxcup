@@ -5,6 +5,7 @@ import { discoverDockerWorkloads } from "../api";
 import { cn } from "../classnames";
 import { ActivityIcon, activityIconForOperation, activityStatusTone } from "../components/ActivityIcon";
 import { dockerDiscoveryFailureLabel } from "../dockerDiscoveryStatus";
+import { isTelemetryStale, telemetryAgeLabel } from "../telemetryFreshness";
 import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
 import { useAnsibleJobs, useContainers, useDockerDiscovery, useDockerWorkloads, usePackageInventory, useTargetTelemetry, useTargets } from "../queries";
 
@@ -14,8 +15,6 @@ type TelemetryQuery = ReturnType<typeof useTargetTelemetry>;
 type DockerWorkloadsQuery = ReturnType<typeof useDockerWorkloads>;
 type DockerDiscoveryQuery = ReturnType<typeof useDockerDiscovery>;
 type ContainerItem = NonNullable<ReturnType<typeof useContainers>["data"]>[number];
-const staleAfterMs = 2 * 60 * 1000;
-
 function stateLabel(state: string) {
   if (state === "managed") return "Verbunden";
   if (state === "disabled") return "Deaktiviert";
@@ -71,8 +70,7 @@ export function TargetDetailPage() {
   }, []);
   const samples = telemetry.data?.samples ?? [];
   const latest = samples.at(-1);
-  const heartbeatAge = target ? now - new Date(target.updated_at).getTime() : 0;
-  const stale = heartbeatAge > staleAfterMs;
+  const stale = isTelemetryStale(target?.updated_at, now);
   const inventoryStale = Boolean(inventory.data?.collected_at && Date.now() - new Date(inventory.data.collected_at).getTime() > 24 * 60 * 60 * 1000);
   const dockerStale = Boolean(dockerDiscovery.data?.finished_at && Date.now() - new Date(dockerDiscovery.data.finished_at).getTime() > 15 * 60 * 1000);
 
@@ -132,8 +130,8 @@ function targetTelemetryContent(telemetry: TelemetryQuery, samples: TelemetrySam
 }
 
 function LatestTelemetryNotice({ latest }: Readonly<{ latest: TelemetrySample }>) {
-  if (Date.now() - new Date(latest.collected_at).getTime() <= staleAfterMs) return null;
-  return <output className="mb-3 block border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--ink)]">Messwerte sind älter als 2 Minuten; letzter Messpunkt {new Date(latest.collected_at).toLocaleString()}.</output>;
+  if (!isTelemetryStale(latest.collected_at)) return <p className="mb-3 text-xs text-[var(--muted)]">Letzter Messpunkt {telemetryAgeLabel(latest.collected_at)}.</p>;
+  return <output className="mb-3 block border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--ink)]">Messwerte sind seit mehr als 2 Minuten veraltet; letzter Messpunkt {telemetryAgeLabel(latest.collected_at)} ({new Date(latest.collected_at).toLocaleString()}).</output>;
 }
 
 function TargetDockerInventory({ target, host, workloads, discovery, stale, discovering, discoveryError, onDiscover }: Readonly<{ target: Target; host: ContainerItem | undefined; workloads: DockerWorkloadsQuery; discovery: DockerDiscoveryQuery; stale: boolean; discovering: boolean; discoveryError: Error | null; onDiscover: () => void }>) {

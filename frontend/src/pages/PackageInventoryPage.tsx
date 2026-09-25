@@ -5,6 +5,7 @@ import { cn } from "../classnames";
 import { createAnsibleJob, type AnsibleJobDto } from "../api";
 import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
 import { queryKeys, useAnsibleJobs, usePackageInventory, useTargetTelemetry, useTargets } from "../queries";
+import { isTelemetryStale, telemetryAgeLabel } from "../telemetryFreshness";
 
 type TelemetrySample = NonNullable<ReturnType<typeof useTargetTelemetry>["data"]>["samples"][number];
 
@@ -53,6 +54,7 @@ function TelemetryChart({ samples }: Readonly<{ samples: TelemetrySample[] }>) {
 
 export function PackageInventoryPage() {
   const { targetId } = useParams();
+  const [now, setNow] = useState(() => Date.now());
   const queryClient = useQueryClient();
   const inventory = usePackageInventory(targetId);
   const telemetry = useTargetTelemetry(targetId);
@@ -72,7 +74,7 @@ export function PackageInventoryPage() {
     : inventoryJobs[0];
   const hasActiveInventoryJob = inventoryJobs.some((job) => isActiveInventoryJob(job.status)) || Boolean(submittedInventoryJob && !inventoryJobs.some((job) => job.id === submittedInventoryJob.id) && isActiveInventoryJob(submittedInventoryJob.status));
   const latestSample = telemetry.data?.samples.at(-1);
-  const telemetryStale = latestSample ? Date.now() - new Date(latestSample.collected_at).getTime() > 15_000 : false;
+  const telemetryStale = latestSample ? isTelemetryStale(latestSample.collected_at, now) : false;
   const collectInventory = useMutation({
     mutationFn: () => createAnsibleJob({
       operation: "collect_package_inventory",
@@ -90,6 +92,11 @@ export function PackageInventoryPage() {
   });
 
   useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 5_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     if (!targetId || !inventoryJob || inventoryJob.status !== "succeeded" || refreshedInventoryJob.current === inventoryJob.id) return;
     refreshedInventoryJob.current = inventoryJob.id;
     void queryClient.invalidateQueries({ queryKey: queryKeys.packageInventory(targetId) });
@@ -105,7 +112,8 @@ export function PackageInventoryPage() {
     <header className="mb-3 flex items-end justify-between gap-4 border-b border-[var(--line)] pb-3 max-[720px]:flex-col max-[720px]:items-start"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Systeminventar</p><h1>Paketinventar</h1><p className="text-[var(--muted)]">{target ? `${target.name} · ${target.kind}` : "Installierte Pakete des verwalteten Systems"}</p></div><Link className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" to={targetListPath(target?.kind)}>← Zur Ressourcenübersicht</Link></header>
     <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]">
       <div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start"><div><h2>Systemauslastung</h2><p className="text-[var(--muted)]">Letzte 30 Sekunden · {telemetry.data?.samples.length ?? 0} Samples</p></div></div>
-      {telemetryStale ? <output className={cn("border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-[var(--ink)]", "border-red-200 bg-[var(--error-soft)]")}>Telemetrie ist nicht aktuell. Der letzte Messwert ist älter als 15 Sekunden; Heartbeat und Agent-Verbindung prüfen.</output> : null}
+      {latestSample ? <p className="mb-2 text-xs text-[var(--muted)]" aria-live="polite">Letzter Messpunkt {telemetryAgeLabel(latestSample.collected_at, now)} · {telemetryStale ? "Veraltet" : "Aktuell"}</p> : null}
+      {telemetryStale ? <output className={cn("border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-[var(--ink)]", "border-red-200 bg-[var(--error-soft)]")}>Telemetrie ist veraltet. Seit dem letzten Messpunkt sind mehr als 2 Minuten vergangen; Heartbeat und Agent-Verbindung prüfen.</output> : null}
       {telemetryContent(telemetry)}
     </section>
     <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]">
