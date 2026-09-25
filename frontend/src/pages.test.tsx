@@ -187,9 +187,9 @@ describe("inventory pages", () => {
     expect(mocks.createContainerAction).toHaveBeenCalledWith(101, "refresh", true);
   });
 
-  it("renders target detail with inventory, telemetry and stale heartbeat state", () => {
+  it("renders target detail with inventory, telemetry and stable Docker host mapping", async () => {
     mocks.targets.data = [target];
-    mocks.containers.data = [{ ...container, name: target.name }];
+    mocks.containers.data = [{ ...container, name: "different-display-name", target_id: target.id }];
     mocks.workloads.data = [{ host_container_id: 101, id: "docker-1", name: "web", image: "nginx:latest", state: "running", status: "Up", ports: [], started_at: null, labels: [], presence: "present", change_state: "unchanged", management_state: "managed", discovered_at: "2026-01-01T00:00:00Z" }];
     mocks.jobs.data = [{ id: "job-1", operation: "health_check", target: { target: "target-1" }, status: "succeeded", updated_at: "2026-01-01T00:00:00Z" }];
     mocks.packageInventory.data = { target_id: "target-1", status: "complete", collected_at: "2026-01-01T00:00:00Z", packages: [{ name: "curl", installed_version: "8.5", architecture: "amd64", source: "apt" }] };
@@ -208,8 +208,28 @@ describe("inventory pages", () => {
     expect(screen.getByRole("figure", { name: /RAM-Auslastung im Verlauf/ })).toBeInTheDocument();
     expect(screen.getByRole("figure", { name: /Speicher-Auslastung im Verlauf/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Docker-Inventar öffnen/ })).toHaveAttribute("href", "/docker?host=101");
+    await userEvent.click(screen.getByRole("button", { name: "Docker erkennen" }));
+    expect(mocks.discoverDockerWorkloads).toHaveBeenCalledWith(101);
     expect(screen.getByRole("link", { name: /Alle Workflows/ })).toHaveAttribute("href", "/workflows?target=target-1");
     expect(screen.getByText("web")).toBeInTheDocument();
+  });
+
+  it("does not infer a Docker host from matching display names", () => {
+    mocks.targets.data = [target];
+    mocks.containers.data = [{ ...container, name: target.name }];
+    renderPage(<TargetDetailPage />, "/targets/target-1");
+    expect(screen.getByText(/Kein verknüpfter LXC-Host gefunden/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Docker erkennen" })).not.toBeInTheDocument();
+  });
+
+  it("shows Docker discovery status and actions in the LXC inventory", async () => {
+    mocks.containers.data = [container];
+    mocks.dockerDiscovery.data = { host_container_id: 101, status: "succeeded", started_at: "2026-01-01T00:00:00Z", finished_at: "2026-01-01T00:00:02Z", container_count: 2, error_code: null };
+    renderPage(<ContainersPage />, "/containers");
+    expect(screen.getByText("2 Container")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Öffnen" })).toHaveAttribute("href", "/docker?host=101");
+    await userEvent.click(screen.getByRole("button", { name: "Erkennen" }));
+    expect(mocks.discoverDockerWorkloads).toHaveBeenCalledWith(101);
   });
 
   it("updates the heartbeat warning when the two-minute limit passes without reloading", async () => {
@@ -251,7 +271,7 @@ describe("inventory pages", () => {
 
   it("shows Docker inventory loading, empty, and error states on a target", () => {
     mocks.targets.data = [target];
-    mocks.containers.data = [{ ...container, name: target.name }];
+    mocks.containers.data = [{ ...container, name: target.name, target_id: target.id }];
     mocks.workloads.isLoading = true;
     renderPage(<TargetDetailPage />, "/targets/target-1");
     expect(screen.getByText("Docker-Inventar wird geladen…")).toBeInTheDocument();

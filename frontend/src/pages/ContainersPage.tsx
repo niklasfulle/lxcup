@@ -1,12 +1,30 @@
 import { cn } from "../classnames";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
 import { DataTable } from "../components/DataTable";
-import { useContainers } from "../queries";
+import { discoverDockerWorkloads } from "../api";
+import { dockerDiscoveryFailureLabel } from "../dockerDiscoveryStatus";
+import { queryKeys, useContainers, useDockerDiscovery } from "../queries";
 import { Link, useSearchParams } from "react-router-dom";
 import type { ContainerDto } from "../api";
 
 const column = createColumnHelper<ContainerDto>();
-const columns = [column.accessor("id", { header: "VMID" }), column.accessor("name", { header: "Name", cell: (info) => <Link to={`/containers/${info.row.original.id}`}>{info.getValue()}</Link> }), column.accessor("operating_system", { header: "OS" }), column.accessor("status", { header: "Status" }), column.accessor("management_state", { header: "Verwaltung" })];
+const columns = [column.accessor("id", { header: "VMID" }), column.accessor("name", { header: "Name", cell: (info) => <Link to={`/containers/${info.row.original.id}`}>{info.getValue()}</Link> }), column.accessor("operating_system", { header: "OS" }), column.accessor("status", { header: "Status" }), column.accessor("management_state", { header: "Verwaltung" }), column.display({ id: "docker", header: "Docker-Inventar", cell: (info) => <ContainerDockerDiscovery container={info.row.original} /> })];
+
+function ContainerDockerDiscovery({ container }: Readonly<{ container: ContainerDto }>) {
+  const discovery = useDockerDiscovery(container.id);
+  const queryClient = useQueryClient();
+  const discover = useMutation({
+    mutationFn: () => discoverDockerWorkloads(container.id),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.dockerDiscovery(container.id) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.dockerWorkloads(container.id) });
+    },
+  });
+  const last = discovery.data;
+  const label = discover.isPending || last?.status === "running" ? "Läuft" : last?.status === "succeeded" ? `${last.container_count} Container` : last?.status === "failed" ? dockerDiscoveryFailureLabel(last.error_code ?? "Docker-Erkennung fehlgeschlagen") : "Noch nicht geprüft";
+  return <div className="flex flex-wrap items-center gap-2"><span className="text-xs text-[var(--muted)]">{discovery.isLoading ? "Lädt…" : label}</span><button className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discover.isPending} onClick={() => discover.mutate()}>{discover.isPending ? "Erkennung läuft…" : "Erkennen"}</button><Link className="text-xs font-semibold text-lxcup-primary hover:underline" to={`/docker?host=${container.id}`}>Öffnen</Link>{discover.error ? <span className="basis-full text-xs text-[var(--error)]" role="alert">{dockerDiscoveryFailureLabel(discover.error.message)}</span> : null}</div>;
+}
 
 export function ContainersPage() {
   const containers = useContainers();

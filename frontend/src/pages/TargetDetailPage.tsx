@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
+import { discoverDockerWorkloads } from "../api";
 import { cn } from "../classnames";
 import { ActivityIcon, activityIconForOperation, activityStatusTone } from "../components/ActivityIcon";
+import { dockerDiscoveryFailureLabel } from "../dockerDiscoveryStatus";
 import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
 import { useAnsibleJobs, useContainers, useDockerDiscovery, useDockerWorkloads, usePackageInventory, useTargetTelemetry, useTargets } from "../queries";
 
@@ -43,13 +46,25 @@ export function TargetDetailPage() {
   const targets = useTargets();
   const jobs = useAnsibleJobs();
   const containers = useContainers();
+  const queryClient = useQueryClient();
   const inventory = usePackageInventory(targetId);
   const telemetry = useTargetTelemetry(targetId);
   const target = targets.data?.find((item) => item.id === targetId);
   const targetJobs = (jobs.data ?? []).filter((job) => "target" in job.target && job.target.target === targetId).slice(0, 8);
-  const hostContainer = (containers.data ?? []).find((container) => container.name === target?.name);
+  const hostContainer = (containers.data ?? []).find((container) => container.target_id === target?.id);
   const dockerWorkloads = useDockerWorkloads(target?.kind === "lxc" ? hostContainer?.id : undefined);
   const dockerDiscovery = useDockerDiscovery(target?.kind === "lxc" ? hostContainer?.id : undefined);
+  const discoverDocker = useMutation({
+    mutationFn: () => {
+      if (hostContainer === undefined) throw new Error("Kein verknüpfter LXC-Host vorhanden.");
+      return discoverDockerWorkloads(hostContainer.id);
+    },
+    onSettled: () => {
+      if (hostContainer === undefined) return;
+      void queryClient.invalidateQueries({ queryKey: ["containers", hostContainer.id, "docker-workloads"] });
+      void queryClient.invalidateQueries({ queryKey: ["containers", hostContainer.id, "docker-discovery"] });
+    },
+  });
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 5_000);
     return () => clearInterval(timer);
@@ -78,7 +93,7 @@ export function TargetDetailPage() {
     <section className="grid grid-cols-1 gap-4 xl:grid-cols-2" aria-label="Ressourcenstatus">
       <TargetPackageInventory target={target} inventory={inventory} stale={inventoryStale} />
       <TargetTelemetry telemetry={telemetry} samples={samples} latest={latest} />
-      <TargetDockerInventory target={target} host={hostContainer} workloads={dockerWorkloads} discovery={dockerDiscovery} stale={dockerStale} />
+      <TargetDockerInventory target={target} host={hostContainer} workloads={dockerWorkloads} discovery={dockerDiscovery} stale={dockerStale} discovering={discoverDocker.isPending} discoveryError={discoverDocker.error} onDiscover={() => discoverDocker.mutate()} />
     </section>
     <TargetWorkflowList targetId={target.id} jobs={jobs} targetJobs={targetJobs} />
   </div>;
@@ -121,16 +136,23 @@ function LatestTelemetryNotice({ latest }: Readonly<{ latest: TelemetrySample }>
   return <output className="mb-3 block border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--ink)]">Messwerte sind älter als 2 Minuten; letzter Messpunkt {new Date(latest.collected_at).toLocaleString()}.</output>;
 }
 
-function TargetDockerInventory({ target, host, workloads, discovery, stale }: Readonly<{ target: Target; host: ContainerItem | undefined; workloads: DockerWorkloadsQuery; discovery: DockerDiscoveryQuery; stale: boolean }>) {
+function TargetDockerInventory({ target, host, workloads, discovery, stale, discovering, discoveryError, onDiscover }: Readonly<{ target: Target; host: ContainerItem | undefined; workloads: DockerWorkloadsQuery; discovery: DockerDiscoveryQuery; stale: boolean; discovering: boolean; discoveryError: Error | null; onDiscover: () => void }>) {
   if (target.kind !== "lxc") return null;
-  return <article className="flex min-h-36 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)] xl:col-span-2"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Docker-Inventar</h2><p className="mb-0 text-sm text-[var(--muted)]">Docker-Container werden getrennt vom LXC-Inventar geführt.</p></div>{host ? <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?host=${host.id}`}>Docker-Inventar öffnen <span className="ml-2" aria-hidden="true">→</span></Link> : null}</div><div className="flex-1">{targetDockerContent(host, workloads, discovery, stale)}</div></article>;
+  return <article className="flex min-h-36 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)] xl:col-span-2"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Docker-Inventar</h2><p className="mb-0 text-sm text-[var(--muted)]">Docker-Container werden getrennt vom LXC-Inventar geführt.</p></div><div className="flex flex-wrap gap-2">{host ? <button className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discovering} onClick={onDiscover}>{discovering ? "Erkennung läuft…" : "Docker erkennen"}</button> : null}{host ? <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?host=${host.id}`}>Docker-Inventar öffnen <span className="ml-2" aria-hidden="true">→</span></Link> : null}</div></div><div className="flex-1">{discoveryError ? <p className="mb-3 border border-[var(--error)] bg-[var(--paper-muted)] p-3 text-sm" role="alert">Docker-Erkennung fehlgeschlagen: {dockerDiscoveryFailureLabel(discoveryError.message)}</p> : null}{targetDockerContent(host, workloads, discovery, stale)}</div></article>;
 }
 
 function targetDockerContent(host: ContainerItem | undefined, workloads: DockerWorkloadsQuery, discovery: DockerDiscoveryQuery, stale: boolean) {
-  if (host === undefined) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Kein zugehöriger LXC-Host im Container-Inventar gefunden.</p>;
+  if (host === undefined) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Kein verknüpfter LXC-Host gefunden. Schließe das LXC-Onboarding mit dieser Zielressource ab.</p>;
   if (workloads.isLoading || discovery.isLoading) return <p className="text-[var(--muted)]">Docker-Inventar wird geladen…</p>;
   if (workloads.error || discovery.error) return <p className="font-semibold text-[var(--error)]" role="alert">{workloads.error?.message ?? discovery.error?.message}</p>;
-  return <><DockerStaleNotice stale={stale} />{dockerWorkloadList(workloads.data ?? [])}</>;
+  return <><DockerDiscoveryState discovery={discovery} /><DockerStaleNotice stale={stale} />{dockerWorkloadList(workloads.data ?? [])}</>;
+}
+
+function DockerDiscoveryState({ discovery }: Readonly<{ discovery: DockerDiscoveryQuery }>) {
+  if (!discovery.data) return null;
+  const run = discovery.data;
+  const status = run.status === "running" ? "Läuft" : run.status === "succeeded" ? "Erfolgreich" : "Fehlgeschlagen";
+  return <p className="mb-3 text-sm text-[var(--muted)]">Letzte Erkennung: <strong className="text-[var(--ink)]">{status}</strong> · {new Date(run.started_at).toLocaleString()} · {run.container_count} Container{run.error_code ? ` · ${dockerDiscoveryFailureLabel(run.error_code)}` : ""}</p>;
 }
 
 function DockerStaleNotice({ stale }: Readonly<{ stale: boolean }>) {

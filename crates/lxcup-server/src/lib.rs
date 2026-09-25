@@ -363,6 +363,7 @@ fn default_true() -> bool {
 pub struct EnrollmentDto {
     pub id: EnrollmentId,
     pub container_id: ContainerId,
+    pub target_id: Option<TargetId>,
     pub state: EnrollmentState,
     pub failure_reason: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -374,6 +375,7 @@ impl From<&Enrollment> for EnrollmentDto {
         Self {
             id: enrollment.id,
             container_id: enrollment.container_id,
+            target_id: enrollment.target_id,
             state: enrollment.state,
             failure_reason: enrollment.failure_reason.clone(),
             created_at: enrollment.created_at,

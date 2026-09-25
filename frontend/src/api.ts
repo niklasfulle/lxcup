@@ -2,6 +2,7 @@ export type ApiEnvelope<T> = { data: T; request_id: string };
 
 export type ContainerDto = {
   id: number;
+  target_id?: string | null;
   node_id: string;
   name: string;
   operating_system: string;
@@ -15,7 +16,7 @@ export type TargetState = "pending" | "managed" | "disabled";
 export type TargetDto = { id: string; name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string; state: TargetState; agent_version?: string | null; created_at: string; updated_at: string };
 export type CreateTargetRequest = { name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string };
 export type EnrollmentState = "requested" | "discovering" | "installing_agent" | "registering_agent" | "connected" | "failed" | "disabled";
-export type EnrollmentDto = { id: string; container_id: number; state: EnrollmentState; failure_reason: string | null; created_at: string; updated_at: string };
+export type EnrollmentDto = { id: string; container_id: number; target_id: string | null; state: EnrollmentState; failure_reason: string | null; created_at: string; updated_at: string };
 
 export type ContainerAction = "start" | "stop" | "shutdown" | "reboot" | "refresh" | "clone" | "backup" | "restore" | "delete";
 export type ContainerActionTaskDto = {

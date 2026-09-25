@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{ContainerId, DomainError, EnrollmentId, error::DomainResult};
+use crate::{ContainerId, DomainError, EnrollmentId, TargetId, error::DomainResult};
 
 /// Lifecycle of a container enrollment.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -54,6 +54,9 @@ impl EnrollmentState {
 pub struct Enrollment {
     pub id: EnrollmentId,
     pub container_id: ContainerId,
+    /// Stable link to the managed target that this discovered LXC represents.
+    #[serde(default)]
+    pub target_id: Option<TargetId>,
     pub state: EnrollmentState,
     pub idempotency_key: String,
     pub failure_reason: Option<String>,
@@ -82,6 +85,7 @@ impl Enrollment {
         Ok(Self {
             id: EnrollmentId::new(),
             container_id,
+            target_id: None,
             state: EnrollmentState::Requested,
             idempotency_key,
             failure_reason: None,

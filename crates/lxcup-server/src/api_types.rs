@@ -1,10 +1,11 @@
-use super::{Container, ContainerId, Execution, ExecutionId, Scan, ScanId};
+use super::{Container, ContainerId, Execution, ExecutionId, Scan, ScanId, TargetId};
 use lxcup_core::{UpdatePlan, UpdatePlanId};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ContainerDto {
     pub id: ContainerId,
+    pub target_id: Option<TargetId>,
     pub name: String,
     pub operating_system: String,
     pub status: String,
@@ -16,12 +17,20 @@ impl From<&Container> for ContainerDto {
     fn from(container: &Container) -> Self {
         Self {
             id: container.id,
+            target_id: None,
             name: container.name.clone(),
             operating_system: format!("{:?}", container.operating_system).to_ascii_lowercase(),
             status: format!("{:?}", container.status).to_ascii_lowercase(),
             management_state: format!("{:?}", container.management_state).to_ascii_lowercase(),
             discovered_at: container.discovered_at,
         }
+    }
+}
+
+impl ContainerDto {
+    pub(crate) fn with_target_id(mut self, target_id: Option<TargetId>) -> Self {
+        self.target_id = target_id;
+        self
     }
 }
 

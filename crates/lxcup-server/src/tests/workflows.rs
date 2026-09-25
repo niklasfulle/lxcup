@@ -191,7 +191,7 @@ async fn enrollment_poll_resumes_after_deployment_without_holding_the_store_lock
     let state = ApiState::new();
     let mut target = Target::new(
         "enrollment-resume-target",
-        TargetKind::LinuxServer,
+        TargetKind::Lxc,
         "192.0.2.84",
         TargetTransport::Ssh,
         SecretId::new(),

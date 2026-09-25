@@ -19,13 +19,21 @@ pub(super) use execution::*;
 pub(super) async fn list_containers(
     State(state): State<ApiState>,
 ) -> Json<ApiEnvelope<Vec<ContainerDto>>> {
-    let containers = state
-        .store
-        .read()
-        .await
+    let store = state.store.read().await;
+    let containers = store
         .containers
         .iter()
-        .map(ContainerDto::from)
+        .map(|container| {
+            let target_id = store
+                .enrollments
+                .iter()
+                .filter(|enrollment| {
+                    enrollment.container_id == container.id && enrollment.target_id.is_some()
+                })
+                .max_by_key(|enrollment| enrollment.updated_at)
+                .and_then(|enrollment| enrollment.target_id);
+            ContainerDto::from(container).with_target_id(target_id)
+        })
         .collect();
     Json(envelope(containers))
 }

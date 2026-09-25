@@ -25,6 +25,25 @@ pub(crate) async fn create_enrollment(
     {
         return Err(ApiError::not_found("container not found"));
     }
+    if let Some(target_id) = request.target_id {
+        let Some(target) = store.targets.iter().find(|target| target.id == target_id) else {
+            return Err(ApiError::not_found("target not found"));
+        };
+        if target.kind != lxcup_core::TargetKind::Lxc {
+            return Err(ApiError::bad_request(
+                "invalid_enrollment_target",
+                "an LXC enrollment can only be linked to an LXC target",
+            ));
+        }
+        if store.enrollments.iter().any(|enrollment| {
+            enrollment.container_id != container_id && enrollment.target_id == Some(target_id)
+        }) {
+            return Err(ApiError::conflict(
+                "target_already_enrolled",
+                "this target is already linked to another LXC container",
+            ));
+        }
+    }
 
     if let Some(existing_id) = store.enrollment_keys.get(&request.idempotency_key).copied() {
         let existing = store
@@ -32,7 +51,7 @@ pub(crate) async fn create_enrollment(
             .iter()
             .find(|enrollment| enrollment.id == existing_id)
             .expect("enrollment idempotency index must point to an enrollment");
-        if existing.container_id != container_id {
+        if existing.container_id != container_id || existing.target_id != request.target_id {
             return Err(ApiError::conflict(
                 "idempotency_key_reused",
                 "idempotency key is already used for another container",
@@ -55,10 +74,11 @@ pub(crate) async fn create_enrollment(
         ));
     }
 
-    let enrollment =
+    let mut enrollment =
         Enrollment::new(container_id, request.idempotency_key.clone()).map_err(|_| {
             ApiError::bad_request("invalid_idempotency_key", "idempotency key is invalid")
         })?;
+    enrollment.target_id = request.target_id;
     let dto = EnrollmentDto::from(&enrollment);
     store
         .enrollment_keys

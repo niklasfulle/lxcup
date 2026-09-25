@@ -257,6 +257,71 @@ async fn enrollment_endpoint_is_idempotent_and_queryable() {
 }
 
 #[tokio::test]
+async fn enrollment_exposes_stable_target_link_on_container_inventory() {
+    let state = ApiState::new();
+    let container = Container::new(
+        ContainerId::new(107),
+        NodeId::new(),
+        "different-display-name",
+        lxcup_core::OperatingSystem::Debian,
+        lxcup_core::ContainerStatus::Running,
+    )
+    .unwrap();
+    let target = Target::new(
+        "friendly-target-name",
+        lxcup_core::TargetKind::Lxc,
+        "192.0.2.107",
+        lxcup_core::TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    let target_id = target.id;
+    state.replace_containers(vec![container]).await;
+    state.store.write().await.targets.push(target);
+
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/enrollments")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "container_id": 107,
+                        "target_id": target_id,
+                        "idempotency_key": "stable-link",
+                        "start_onboarding": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/containers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"][0]["name"], "different-display-name");
+    assert_eq!(
+        json["data"][0]["target_id"],
+        target_id.as_uuid().to_string()
+    );
+}
+
+#[tokio::test]
 async fn enrollment_rejects_key_reuse_and_unknown_containers() {
     let state = ApiState::new();
     let containers = [101, 102]
