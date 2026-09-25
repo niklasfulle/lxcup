@@ -421,6 +421,31 @@ async fn ansible_job_endpoint_accepts_healthcheck_and_is_idempotent() {
     let duplicate_json: serde_json::Value = serde_json::from_slice(&duplicate_body).unwrap();
     assert_eq!(duplicate_json["data"]["id"], job_id);
 
+    let invalid_mode = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/ansible/jobs")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "operation": "health_check",
+                "container_id": 101,
+                "mode": "apply",
+                "parameters": {"operation": "health_check"},
+                "idempotency_key": "health-invalid-mode",
+                "confirmed": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let invalid_mode = router(state.clone()).oneshot(invalid_mode).await.unwrap();
+    assert_eq!(invalid_mode.status(), StatusCode::BAD_REQUEST);
+    let invalid_body = axum::body::to_bytes(invalid_mode.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let invalid_json: serde_json::Value = serde_json::from_slice(&invalid_body).unwrap();
+    assert_eq!(invalid_json["error"]["code"], "ansible_mode_invalid");
+    assert_eq!(state.ansible.read().await.jobs().len(), 1);
+
     let events = router(state.clone())
         .oneshot(
             Request::builder()

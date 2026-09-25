@@ -5,6 +5,7 @@
 //! sind absichtlich nicht Teil dieses öffentlichen Modells.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
 use lxcup_core::{
@@ -36,6 +37,25 @@ pub enum ExecutionMode {
     Plan,
     Apply,
     Reconcile,
+}
+
+impl AnsibleOperation {
+    /// Returns the modes registered by the shared frontend/backend contract.
+    pub fn supported_modes(self) -> &'static [ExecutionMode] {
+        static MODES: OnceLock<HashMap<AnsibleOperation, Vec<ExecutionMode>>> = OnceLock::new();
+        MODES
+            .get_or_init(|| {
+                serde_json::from_str(include_str!("../../../frontend/workflow-modes.json"))
+                    .expect("shared workflow mode contract must be valid")
+            })
+            .get(&self)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn supports_mode(self, mode: ExecutionMode) -> bool {
+        self.supported_modes().contains(&mode)
+    }
 }
 
 /// Lifecycle of a validated Ansible task.
@@ -201,6 +221,8 @@ pub enum AnsibleContractError {
     ConfirmationRequired,
     #[error("ansible target is not supported")]
     UnsupportedTarget,
+    #[error("ansible execution mode is not supported for this operation")]
+    UnsupportedMode,
     #[error("ansible operation requires a secret reference")]
     MissingSecretReference,
     #[error("ansible job state transition is invalid")]
@@ -250,6 +272,9 @@ impl AnsibleJob {
         }
         let registry = PlaybookRegistry;
         let spec = registry.resolve(request.operation);
+        if !request.operation.supports_mode(request.mode) {
+            return Err(AnsibleContractError::UnsupportedMode);
+        }
         if !spec.action.supports(request.target) {
             return Err(AnsibleContractError::UnsupportedTarget);
         }
@@ -552,7 +577,14 @@ mod tests {
             operation,
             target: ResourceTarget::Container(ContainerId::new(101)),
             lifecycle: ResourceLifecycle::Managed,
-            mode: ExecutionMode::Apply,
+            mode: if matches!(
+                operation,
+                AnsibleOperation::HealthCheck | AnsibleOperation::CollectPackageInventory
+            ) {
+                ExecutionMode::Check
+            } else {
+                ExecutionMode::Apply
+            },
             parameters,
             secret_refs: vec![SecretId::new()],
             idempotency_key: "job-1".to_owned(),
@@ -572,6 +604,60 @@ mod tests {
         assert_eq!(inventory.playbook, "inventory/packages.yml");
         assert_eq!(inventory.version, "1");
         assert!(inventory.requires_secret);
+    }
+
+    #[test]
+    fn operation_mode_matrix_covers_every_operation_and_rejects_reconcile() {
+        let check_plan_apply = vec![
+            ExecutionMode::Check,
+            ExecutionMode::Plan,
+            ExecutionMode::Apply,
+        ];
+        let expected = vec![
+            (AnsibleOperation::DeployAgent, check_plan_apply.clone()),
+            (AnsibleOperation::UpdateAgent, check_plan_apply.clone()),
+            (
+                AnsibleOperation::UpdatePackages,
+                vec![ExecutionMode::Plan, ExecutionMode::Apply],
+            ),
+            (AnsibleOperation::RepairAgent, check_plan_apply.clone()),
+            (AnsibleOperation::ConfigureTarget, check_plan_apply),
+            (AnsibleOperation::HealthCheck, vec![ExecutionMode::Check]),
+            (
+                AnsibleOperation::CollectPackageInventory,
+                vec![ExecutionMode::Check],
+            ),
+        ];
+        let modes = [
+            ExecutionMode::Check,
+            ExecutionMode::Plan,
+            ExecutionMode::Apply,
+            ExecutionMode::Reconcile,
+        ];
+        for (operation, expected_modes) in expected {
+            assert_eq!(operation.supported_modes(), expected_modes);
+            for mode in modes {
+                assert_eq!(
+                    operation.supports_mode(mode),
+                    expected_modes.contains(&mode),
+                    "matrix mismatch for {operation:?}/{mode:?}"
+                );
+                assert!(!operation.supports_mode(ExecutionMode::Reconcile));
+            }
+        }
+    }
+
+    #[test]
+    fn job_contract_rejects_a_mode_outside_the_shared_matrix() {
+        let mut invalid = request(
+            AnsibleOperation::HealthCheck,
+            AnsibleParameters::HealthCheck,
+        );
+        invalid.mode = ExecutionMode::Apply;
+        assert_eq!(
+            AnsibleJob::from_request(invalid),
+            Err(AnsibleContractError::UnsupportedMode)
+        );
     }
 
     #[test]

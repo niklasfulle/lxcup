@@ -5,6 +5,9 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { createAnsibleJob, type AnsibleExecutionMode, type AnsibleOperation, type CreateAnsibleJobRequest } from "../api";
 import { queryKeys, useAnsibleJobEvents, useAnsibleJobs, useTargets, useUpdatePolicies } from "../queries";
+import workflowModeMatrix from "../../workflow-modes.json";
+
+const operationModes = workflowModeMatrix as Record<AnsibleOperation, AnsibleExecutionMode[]>;
 
 const operations: Array<{ value: AnsibleOperation; label: string; risk: string }> = [
   { value: "deploy_agent", label: "Agent installieren", risk: "Ändernd" },
@@ -18,7 +21,6 @@ const modes: Array<{ value: AnsibleExecutionMode; label: string; effect: string;
   { value: "check", label: "Check", effect: "Prüfung", description: "Prüft Voraussetzungen und den aktuellen Zustand für die gewählte Operation. Der Job dokumentiert das Ergebnis, ohne eine freigegebene Änderung auszuführen." },
   { value: "plan", label: "Plan / Dry-Run", effect: "Vorschau", description: "Erstellt eine Vorschau der vorgesehenen Schritte. Nutze diesen Modus, um Umfang und erwartete Änderungen vor dem Apply zu prüfen." },
   { value: "apply", label: "Apply", effect: "Ausführung", description: "Führt die gewählte Operation auf dem Ziel aus. Bei ändernden Operationen ist deshalb die ausdrückliche Bestätigung erforderlich." },
-  { value: "reconcile", label: "Reconcile", effect: "Abgleich", description: "Gleicht einen unterbrochenen oder unklaren Workflow mit dem tatsächlichen Zielzustand ab und entscheidet danach über den weiteren Job-Status." },
 ];
 
 export function buildWorkflowRequest(
@@ -78,10 +80,10 @@ export function WorkflowsPage() {
   const selectedMode = useMemo(() => modes.find((item) => item.value === mode), [mode]);
   const selectedTarget = targets.data?.find((target) => target.id === targetId);
   const visibleJobs = jobs.data?.filter((job) => targetFilter === null || ("target" in job.target && job.target.target === targetFilter));
-  const isMutating = operation !== "health_check";
+  const isModifyingOperation = operation !== "health_check" && operation !== "collect_package_inventory";
   const requestedPackages = packages.split(",").map((value) => value.trim()).filter(Boolean).sort(compareText).join(",");
   const packagePlans = (jobs.data ?? []).filter((job) => job.operation === "update_packages" && job.mode === "plan" && job.status === "succeeded" && "target" in job.target && job.target.target === targetId && job.update_policy_id === policyId && [...(job.package_names ?? [])].sort(compareText).join(",") === requestedPackages);
-  const canSubmit = canSubmitWorkflow({ targetId, isMutating, confirmed, operation, packages, policyId, mode, approvedPlanJobId, packagePlans });
+  const canSubmit = canSubmitWorkflow({ targetId, isModifyingOperation, confirmed, operation, packages, policyId, mode, approvedPlanJobId, packagePlans, supportedModes: operationModes[operation] });
 
   function submit(event: Readonly<{ preventDefault: () => void }>) {
     event.preventDefault();
@@ -110,13 +112,13 @@ export function WorkflowsPage() {
               </select>
             </label>
             <label className="grid content-start gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Die erlaubte, fest registrierte Aktion des Workers."><span>Operation</span>
-              <select value={operation} onChange={(event) => { const next = event.target.value as AnsibleOperation; setOperation(next); if (next === "update_packages") setMode("plan"); }}>
+              <select value={operation} onChange={(event) => { const next = event.target.value as AnsibleOperation; setOperation(next); setMode(operationModes[next][0] ?? "check"); }}>
                 {operations.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
               </select>
             </label>
             <label className="grid content-start gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Check prüft, Plan erstellt eine Vorschau, Apply führt aus und Reconcile gleicht einen unklaren Zustand ab."><span>Modus</span>
               <select value={mode} onChange={(event) => setMode(event.target.value as AnsibleExecutionMode)} aria-describedby="mode-help">
-              {modes.filter((item) => operation !== "update_packages" || item.value === "plan" || item.value === "apply").map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              {modes.filter((item) => operationModes[operation].includes(item.value)).map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
               </select>
             </label>
           </div>
@@ -135,7 +137,7 @@ export function WorkflowsPage() {
           </div>
           {selectedTarget?.state === "pending" ? <output className="block border border-[#bad0fa] bg-[var(--primary-soft)] p-3 text-[var(--ink)]"><strong>Onboarding für {selectedTarget.name}</strong><span className="mt-1 block text-sm text-[var(--muted)]">Dieses Ziel wartet noch auf seinen Agenten. Mit „Agent installieren“ startest du den nächsten nachvollziehbaren Schritt.</span></output> : null}
           <div className="flex flex-col gap-3 border-t border-[var(--line)] pt-4 sm:flex-row sm:items-center sm:justify-between">
-            {isMutating ? <label className="flex items-center gap-2 text-sm font-medium"><input className="h-4 w-4 accent-lxcup-primary" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /> Ich bestätige Ziel, Umfang und Risiko dieser Änderung.</label> : <span className="text-xs text-[var(--muted)]">Dieser Workflow führt keine freigegebene Änderung aus.</span>}
+            {isModifyingOperation ? <label className="flex items-center gap-2 text-sm font-medium"><input className="h-4 w-4 accent-lxcup-primary" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /> {mode === "apply" ? "Ich bestätige Ziel, Umfang und Risiko dieser Änderung." : mode === "plan" ? "Ich bestätige Ziel und Umfang dieser Vorschau." : "Ich bestätige die Prüfung dieses Ziels."}</label> : <span className="text-xs text-[var(--muted)]">Dieser Workflow führt keine freigegebene Änderung aus.</span>}
             <button className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={canSubmit === false || mutation.isPending}>{mutation.isPending ? "Wird gestartet…" : "Workflow starten"}<span aria-hidden="true">→</span></button>
           </div>
           {mutation.error ? <p className="m-0 border border-[var(--error)] bg-[var(--error-soft)] px-3 py-2 font-semibold text-[var(--error)]" role="alert">Workflow konnte nicht gestartet werden: {mutation.error.message}</p> : null}
@@ -154,9 +156,9 @@ export function WorkflowsPage() {
   );
 }
 
-function canSubmitWorkflow({ targetId, isMutating, confirmed, operation, packages, policyId, mode, approvedPlanJobId, packagePlans }: {
+function canSubmitWorkflow({ targetId, isModifyingOperation, confirmed, operation, packages, policyId, mode, approvedPlanJobId, packagePlans, supportedModes }: {
   targetId: string;
-  isMutating: boolean;
+  isModifyingOperation: boolean;
   confirmed: boolean;
   operation: AnsibleOperation;
   packages: string;
@@ -164,8 +166,9 @@ function canSubmitWorkflow({ targetId, isMutating, confirmed, operation, package
   mode: AnsibleExecutionMode;
   approvedPlanJobId: string;
   packagePlans: import("../api").AnsibleJobDto[];
+  supportedModes: AnsibleExecutionMode[];
 }) {
-  if (!targetId || (isMutating && !confirmed)) return false;
+  if (!targetId || !supportedModes.includes(mode) || (isModifyingOperation && !confirmed)) return false;
   if (operation !== "update_packages") return true;
   if (!packages.trim() || !policyId) return false;
   if (mode === "plan") return true;

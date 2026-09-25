@@ -1,0 +1,9 @@
+{
+  "deploy_agent": ["check", "plan", "apply"],
+  "update_agent": ["check", "plan", "apply"],
+  "update_packages": ["plan", "apply"],
+  "repair_agent": ["check", "plan", "apply"],
+  "configure_target": ["check", "plan", "apply"],
+  "health_check": ["check"],
+  "collect_package_inventory": ["check"]
+}

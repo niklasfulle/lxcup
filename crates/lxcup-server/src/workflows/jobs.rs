@@ -454,6 +454,10 @@ pub(super) fn map_ansible_error(error: lxcup_ansible::CoordinatorError) -> ApiEr
                 "ansible_target_invalid",
                 "the operation is not supported for this target",
             ),
+            lxcup_ansible::AnsibleContractError::UnsupportedMode => ApiError::bad_request(
+                "ansible_mode_invalid",
+                "the execution mode is not supported for this operation",
+            ),
             lxcup_ansible::AnsibleContractError::Invalid
             | lxcup_ansible::AnsibleContractError::InvalidTransition => {
                 ApiError::bad_request("ansible_request_invalid", "the Ansible request is invalid")
@@ -506,6 +510,10 @@ mod tests {
             (
                 CoordinatorError::Contract(AnsibleContractError::UnsupportedTarget),
                 "ansible_target_invalid",
+            ),
+            (
+                CoordinatorError::Contract(AnsibleContractError::UnsupportedMode),
+                "ansible_mode_invalid",
             ),
             (
                 CoordinatorError::Contract(AnsibleContractError::Invalid),
