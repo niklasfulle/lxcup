@@ -217,6 +217,23 @@ fn worker_classifies_common_ansible_failures_and_change_summary() {
     );
     assert!(!playbook_changed("PLAY RECAP changed=0 failed=0"));
     assert!(playbook_changed("PLAY RECAP changed=1 failed=0"));
+    assert!(playbook_changed(
+        "PLAY RECAP\nhost-a : changed=2 failed=0\nhost-b : changed=0 failed=0"
+    ));
+}
+
+#[test]
+fn apply_audit_events_report_actual_changed_tasks_and_result() {
+    let output = "PLAY [target]\nTASK [Install runtime]\nchanged: [target]\nTASK [Validate agent]\nok: [target]\nTASK [Conditional restart]\nskipping: [target]\nPLAY RECAP\ntarget : ok=1 changed=1 failed=0";
+    assert_eq!(
+        finished_task_results(output),
+        vec![
+            ("Install runtime".to_owned(), true),
+            ("Validate agent".to_owned(), false),
+        ]
+    );
+    assert!(apply_summary(output, true).contains("1 Task(s) haben Änderungen vorgenommen"));
+    assert!(apply_summary(output, false).contains("Apply fehlgeschlagen"));
 }
 
 #[test]

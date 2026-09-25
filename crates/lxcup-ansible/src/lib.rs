@@ -667,6 +667,56 @@ mod tests {
     }
 
     #[test]
+    fn every_mutating_apply_requires_explicit_confirmation_but_checks_do_not() {
+        let requests = [
+            (
+                AnsibleOperation::DeployAgent,
+                AnsibleParameters::DeployAgent {
+                    agent_version: "0.2.0".to_owned(),
+                },
+            ),
+            (
+                AnsibleOperation::UpdateAgent,
+                AnsibleParameters::UpdateAgent {
+                    agent_version: "0.2.0".to_owned(),
+                },
+            ),
+            (
+                AnsibleOperation::UpdatePackages,
+                AnsibleParameters::UpdatePackages {
+                    packages: vec!["curl".to_owned()],
+                },
+            ),
+            (
+                AnsibleOperation::RepairAgent,
+                AnsibleParameters::RepairAgent,
+            ),
+            (
+                AnsibleOperation::ConfigureTarget,
+                AnsibleParameters::ConfigureTarget {
+                    desired_hostname: Some("managed-host".to_owned()),
+                },
+            ),
+        ];
+        for (operation, parameters) in requests {
+            let mut unconfirmed = request(operation, parameters);
+            unconfirmed.confirmed = false;
+            assert_eq!(
+                AnsibleJob::from_request(unconfirmed),
+                Err(AnsibleContractError::ConfirmationRequired),
+                "unconfirmed apply was accepted for {operation:?}"
+            );
+        }
+
+        let mut read_only = request(
+            AnsibleOperation::HealthCheck,
+            AnsibleParameters::HealthCheck,
+        );
+        read_only.confirmed = false;
+        assert!(AnsibleJob::from_request(read_only).is_ok());
+    }
+
+    #[test]
     fn job_contains_hash_and_never_secret_values() {
         let job = AnsibleJob::from_request(request(
             AnsibleOperation::UpdatePackages,

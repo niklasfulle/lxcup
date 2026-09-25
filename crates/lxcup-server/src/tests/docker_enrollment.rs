@@ -468,3 +468,48 @@ async fn ansible_job_endpoint_accepts_healthcheck_and_is_idempotent() {
         .unwrap();
     assert_eq!(status.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn ansible_apply_without_confirmation_is_rejected_before_enqueue() {
+    let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+    let target = Target::new(
+        "confirmation-target",
+        TargetKind::Lxc,
+        "192.0.2.111",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    let target_id = target.id;
+    state.store.write().await.targets.push(target);
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/ansible/jobs")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "operation": "deploy_agent",
+                        "target_id": target_id,
+                        "mode": "apply",
+                        "parameters": {"operation": "deploy_agent", "agent_version": "0.2.0"},
+                        "idempotency_key": "unconfirmed-apply",
+                        "confirmed": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "ansible_confirmation_required");
+    assert!(state.ansible.read().await.jobs().is_empty());
+}

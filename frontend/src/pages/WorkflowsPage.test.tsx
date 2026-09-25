@@ -29,4 +29,17 @@ describe("workflow mode contract", () => {
     expect(within(mode).getAllByRole("option").map((option) => option.textContent)).toEqual(["Plan / Dry-Run", "Apply"]);
     expect(workflowModeMatrix.configure_target).toEqual(["check", "apply"]);
   });
+
+  it("keeps Apply disabled until the user explicitly confirms the target and scope", () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={client}><MemoryRouter><WorkflowsPage /></MemoryRouter></QueryClientProvider>);
+    fireEvent.change(screen.getByRole("combobox", { name: "Ziel" }), { target: { value: "target-1" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Operation" }), { target: { value: "deploy_agent" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Modus" }), { target: { value: "apply" } });
+
+    const start = screen.getByRole("button", { name: /Workflow starten/ });
+    expect(start).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Ich bestätige Ziel, Umfang und Risiko dieser Änderung/ }));
+    expect(start).toBeEnabled();
+  });
 });

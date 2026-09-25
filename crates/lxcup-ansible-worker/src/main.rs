@@ -164,7 +164,11 @@ async fn process(
                     (
                         AnsibleJobStatus::Succeeded,
                         JobEventKind::TaskFinished {
-                            task: job.playbook.clone(),
+                            task: if job.mode == lxcup_ansible::ExecutionMode::Apply {
+                                "Apply-Ausführung".to_owned()
+                            } else {
+                                job.playbook.clone()
+                            },
                             changed,
                         },
                     )
@@ -241,6 +245,20 @@ async fn invoke(
     if job.mode == lxcup_ansible::ExecutionMode::Apply {
         job.transition_to(AnsibleJobStatus::Applying)
             .map_err(|_| JobFailureCode::PlaybookFailed)?;
+        repos
+            .ansible_jobs
+            .update(job)
+            .await
+            .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+        event(
+            repos,
+            job.id,
+            JobEventKind::StatusChanged {
+                status: AnsibleJobStatus::Applying,
+            },
+        )
+        .await
+        .map_err(|_| JobFailureCode::WorkerUnavailable)?;
     }
     let playbook = playbook(job.operation, target.kind).ok_or(JobFailureCode::PlaybookFailed)?;
     let out = timeout(
@@ -282,6 +300,24 @@ async fn invoke(
             .await
             .map_err(|_| JobFailureCode::WorkerUnavailable)?;
         }
+    }
+    if job.mode == lxcup_ansible::ExecutionMode::Apply {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for (task, changed) in finished_task_results(&stdout) {
+            event(repos, job.id, JobEventKind::TaskFinished { task, changed })
+                .await
+                .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+        }
+        event(
+            repos,
+            job.id,
+            JobEventKind::WorkerLog {
+                source: "apply".to_owned(),
+                message: apply_summary(&stdout, out.status.success()),
+            },
+        )
+        .await
+        .map_err(|_| JobFailureCode::WorkerUnavailable)?;
     }
     if job.mode == lxcup_ansible::ExecutionMode::Check {
         event(
@@ -448,8 +484,92 @@ fn classify_playbook_failure(output: &str) -> JobFailureCode {
     }
 }
 
+fn recap_change_count(stdout: &str) -> Option<u32> {
+    let mut found = false;
+    let changes = stdout
+        .lines()
+        .skip_while(|line| !line.contains("PLAY RECAP"))
+        .flat_map(str::split_whitespace)
+        .filter_map(|field| {
+            let value = field.strip_prefix("changed=")?.parse::<u32>().ok()?;
+            found = true;
+            Some(value)
+        })
+        .sum();
+    found.then_some(changes)
+}
+
 fn playbook_changed(stdout: &str) -> bool {
-    !stdout.contains("changed=0")
+    recap_change_count(stdout)
+        .map(|changes| changes > 0)
+        .unwrap_or_else(|| {
+            stdout
+                .lines()
+                .any(|line| line.trim_start().starts_with("changed: ["))
+        })
+}
+
+fn finished_task_results(stdout: &str) -> Vec<(String, bool)> {
+    let mut results = Vec::new();
+    let mut current: Option<(String, bool, bool)> = None;
+    for line in stdout.lines() {
+        if let Some(task) = task_header_name(line) {
+            if let Some((name, changed, finished)) = current.take() {
+                if finished {
+                    results.push((name, changed));
+                }
+            }
+            current = Some((task.to_owned(), false, false));
+        } else if let Some((_, changed, finished)) = current.as_mut() {
+            let outcome = line.trim_start();
+            if outcome.starts_with("changed: [") {
+                *changed = true;
+                *finished = true;
+            } else if ["ok: [", "fatal: [", "unreachable: ["]
+                .iter()
+                .any(|prefix| outcome.starts_with(prefix))
+            {
+                *finished = true;
+            }
+        }
+    }
+    if let Some((name, changed, finished)) = current {
+        if finished {
+            results.push((name, changed));
+        }
+    }
+    results
+}
+
+fn task_header_name(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    let header = line
+        .strip_prefix("TASK [")
+        .or_else(|| line.strip_prefix("RUNNING HANDLER ["))?;
+    header.split_once(']').map(|(name, _)| name)
+}
+
+fn apply_summary(stdout: &str, process_succeeded: bool) -> String {
+    let changed_tasks = finished_task_results(stdout)
+        .iter()
+        .filter(|(_, changed)| *changed)
+        .count();
+    if !process_succeeded {
+        format!(
+            "Apply fehlgeschlagen. Bis zum Fehler haben {changed_tasks} Task(s) Änderungen gemeldet; Details und Status je Task stehen im Protokoll."
+        )
+    } else if changed_tasks > 0 {
+        format!(
+            "Apply erfolgreich ausgeführt: {changed_tasks} Task(s) haben Änderungen vorgenommen. Die tatsächlichen Schritte stehen im Protokoll."
+        )
+    } else if playbook_changed(stdout) {
+        format!(
+            "Apply erfolgreich ausgeführt: Ansible meldet {} Änderung(en); einzelne Task-Ausgaben stehen im technischen Protokoll.",
+            recap_change_count(stdout).unwrap_or_default()
+        )
+    } else {
+        "Apply erfolgreich ausgeführt: Ansible meldet keine Änderungen am Zielsystem.".to_owned()
+    }
 }
 
 struct InvocationContext {
