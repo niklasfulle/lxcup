@@ -15,6 +15,19 @@ use lxcup_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use uuid::Uuid;
+
+const RECONCILE_KEY_PREFIX: &str = "reconcile-job:";
+
+pub fn reconcile_idempotency_key(source_job_id: AnsibleJobId) -> String {
+    format!("{RECONCILE_KEY_PREFIX}{}", source_job_id.as_uuid())
+}
+
+pub fn reconciliation_source_job_id(idempotency_key: &str) -> Option<AnsibleJobId> {
+    Uuid::parse_str(idempotency_key.strip_prefix(RECONCILE_KEY_PREFIX)?)
+        .ok()
+        .map(AnsibleJobId::from_uuid)
+}
 
 /// Allowlisted operations exposed to the API and worker.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -40,6 +53,13 @@ pub enum ExecutionMode {
 }
 
 impl AnsibleOperation {
+    pub const fn can_reconcile_apply(self) -> bool {
+        matches!(
+            self,
+            Self::DeployAgent | Self::UpdateAgent | Self::RepairAgent | Self::UpdatePackages
+        )
+    }
+
     /// Returns the modes registered by the shared frontend/backend contract.
     pub fn supported_modes(self) -> &'static [ExecutionMode] {
         static MODES: OnceLock<HashMap<AnsibleOperation, Vec<ExecutionMode>>> = OnceLock::new();
@@ -265,6 +285,12 @@ pub struct AnsibleJob {
 }
 
 impl AnsibleJob {
+    pub fn can_be_reconciled(&self) -> bool {
+        self.status == AnsibleJobStatus::ReconcileRequired
+            && self.mode == ExecutionMode::Apply
+            && self.operation.can_reconcile_apply()
+    }
+
     pub fn from_request(request: AnsibleJobRequest) -> Result<Self, AnsibleContractError> {
         if request.parameters.operation() != request.operation {
             return Err(AnsibleContractError::Invalid);
@@ -406,6 +432,8 @@ pub enum CoordinatorError {
     NotFound,
     #[error("ansible job cannot be retried safely")]
     RetryNotAllowed,
+    #[error("ansible job is not eligible for reconciliation")]
+    ReconcileNotAllowed,
     #[error("ansible job cannot transition to the requested state")]
     InvalidTransition,
     #[error("ansible job cannot accept another event")]
@@ -439,6 +467,43 @@ impl AnsibleJobCoordinator {
         }
         let job = AnsibleJob::from_request(request)?;
         self.idempotency.insert(key, job.id);
+        self.record_internal(job.id, JobEventKind::Queued);
+        self.jobs.insert(job.id, job.clone());
+        Ok(JobSubmission::Created(job))
+    }
+
+    pub fn submit_reconciliation(
+        &mut self,
+        source: &AnsibleJob,
+    ) -> Result<JobSubmission, CoordinatorError> {
+        if !source.can_be_reconciled() {
+            return Err(CoordinatorError::ReconcileNotAllowed);
+        }
+        let key = reconcile_idempotency_key(source.id);
+        if let Some(existing_id) = self.idempotency.get(&(source.target, key.clone())).copied() {
+            let existing = self
+                .jobs
+                .get(&existing_id)
+                .ok_or(CoordinatorError::NotFound)?;
+            return Ok(JobSubmission::Duplicate(existing.clone()));
+        }
+        if self
+            .active_targets
+            .get(&source.target)
+            .is_some_and(|active_job_id| *active_job_id != source.id)
+        {
+            return Err(CoordinatorError::TargetBusy);
+        }
+        let now = Utc::now();
+        let mut job = source.clone();
+        job.id = AnsibleJobId::new();
+        job.mode = ExecutionMode::Reconcile;
+        job.idempotency_key = key.clone();
+        job.status = AnsibleJobStatus::Queued;
+        job.created_at = now;
+        job.updated_at = now;
+        self.active_targets.insert(job.target, job.id);
+        self.idempotency.insert((job.target, key), job.id);
         self.record_internal(job.id, JobEventKind::Queued);
         self.jobs.insert(job.id, job.clone());
         Ok(JobSubmission::Created(job))
@@ -714,6 +779,92 @@ mod tests {
         );
         read_only.confirmed = false;
         assert!(AnsibleJob::from_request(read_only).is_ok());
+    }
+
+    #[test]
+    fn reconciliation_is_linked_to_one_unresolved_apply_and_idempotent() {
+        let mut coordinator = AnsibleJobCoordinator::default();
+        let source = match coordinator
+            .submit(request(
+                AnsibleOperation::RepairAgent,
+                AnsibleParameters::RepairAgent,
+            ))
+            .unwrap()
+        {
+            JobSubmission::Created(job) => job,
+            JobSubmission::Duplicate(_) => unreachable!(),
+        };
+        for status in [
+            AnsibleJobStatus::Checking,
+            AnsibleJobStatus::Planned,
+            AnsibleJobStatus::Applying,
+            AnsibleJobStatus::ReconcileRequired,
+        ] {
+            coordinator.transition(source.id, status).unwrap();
+        }
+
+        let current_source = coordinator.job(source.id).unwrap();
+        let JobSubmission::Created(reconcile) =
+            coordinator.submit_reconciliation(&current_source).unwrap()
+        else {
+            panic!("first reconciliation must create a job")
+        };
+        assert_eq!(reconcile.mode, ExecutionMode::Reconcile);
+        assert_eq!(reconcile.operation, source.operation);
+        assert_eq!(reconcile.target, source.target);
+        assert_eq!(
+            reconciliation_source_job_id(&reconcile.idempotency_key),
+            Some(source.id)
+        );
+        let current_source = coordinator.job(source.id).unwrap();
+        assert_eq!(
+            coordinator.submit_reconciliation(&current_source).unwrap(),
+            JobSubmission::Duplicate(reconcile)
+        );
+        let mut resolved_source = current_source;
+        resolved_source.status = AnsibleJobStatus::Succeeded;
+        assert_eq!(
+            coordinator.submit_reconciliation(&resolved_source),
+            Err(CoordinatorError::ReconcileNotAllowed)
+        );
+    }
+
+    #[test]
+    fn reconciliation_rejects_jobs_without_unresolved_apply_state() {
+        let mut coordinator = AnsibleJobCoordinator::default();
+        let source = match coordinator
+            .submit(request(
+                AnsibleOperation::RepairAgent,
+                AnsibleParameters::RepairAgent,
+            ))
+            .unwrap()
+        {
+            JobSubmission::Created(job) => job,
+            JobSubmission::Duplicate(_) => unreachable!(),
+        };
+        assert_eq!(
+            coordinator.submit_reconciliation(&source),
+            Err(CoordinatorError::ReconcileNotAllowed)
+        );
+        for status in [
+            AnsibleJobStatus::Checking,
+            AnsibleJobStatus::Planned,
+            AnsibleJobStatus::Applying,
+            AnsibleJobStatus::Succeeded,
+        ] {
+            coordinator.transition(source.id, status).unwrap();
+        }
+        let succeeded = coordinator.job(source.id).unwrap();
+        assert_eq!(
+            coordinator.submit_reconciliation(&succeeded),
+            Err(CoordinatorError::ReconcileNotAllowed)
+        );
+        let mut aborted = succeeded;
+        aborted.status = AnsibleJobStatus::Aborted;
+        assert_eq!(
+            coordinator.submit_reconciliation(&aborted),
+            Err(CoordinatorError::ReconcileNotAllowed)
+        );
     }
 
     #[test]

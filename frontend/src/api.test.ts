@@ -21,6 +21,7 @@ import {
   listSecrets,
   listTargets,
   removeDockerWorkload,
+  reconcileAnsibleJob,
   revokeSecret,
   rotateSecret,
   apiClient,
@@ -88,6 +89,7 @@ describe("ApiClient", () => {
     await listAnsibleJobs();
     await getAnsibleJob("job");
     await getAnsibleJobEvents("job");
+    await reconcileAnsibleJob("job-reconcile");
     await createEnrollment(1, undefined, false, "00000000-0000-0000-0000-000000000001");
     await getEnrollment("enroll");
     await listSecrets();
@@ -105,6 +107,7 @@ describe("ApiClient", () => {
     await removeDockerWorkload(1, "docker/id");
     expect(get).toHaveBeenCalled();
     expect(post).toHaveBeenCalled();
+    expect(post).toHaveBeenCalledWith("/api/v1/ansible/jobs/job-reconcile/reconcile", {}, undefined);
     expect(del).toHaveBeenCalled();
     get.mockRestore();
     post.mockRestore();

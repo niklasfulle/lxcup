@@ -80,6 +80,7 @@ export type AnsibleJobDto = {
   package_names?: string[];
   update_policy_id?: string;
   approved_plan_job_id?: string;
+  reconciles_job_id?: string;
   created_at: string;
   updated_at: string;
 };
@@ -423,6 +424,7 @@ export function getWorkerAvailability(signal?: AbortSignal) { return apiClient.g
 export function getAnsibleJob(id: string, signal?: AbortSignal) { return apiClient.get<AnsibleJobDto>(`/api/v1/ansible/jobs/${id}`, signal); }
 export function getAnsibleJobEvents(id: string, signal?: AbortSignal) { return apiClient.get<AnsibleJobEvent[]>(`/api/v1/ansible/jobs/${id}/events`, signal); }
 export function retryAnsibleJob(id: string, confirmed: boolean, signal?: AbortSignal) { return apiClient.post<AnsibleJobDto>(`/api/v1/ansible/jobs/${id}/retry`, { confirmed }, signal); }
+export function reconcileAnsibleJob(id: string, signal?: AbortSignal) { return apiClient.post<AnsibleJobDto>(`/api/v1/ansible/jobs/${id}/reconcile`, {}, signal); }
 
 export function createEnrollment(containerId: number, targetId: string | undefined, startOnboarding = true, idempotencyKey = crypto.randomUUID(), signal?: AbortSignal) {
   return apiClient.post<EnrollmentDto>("/api/v1/enrollments", { container_id: containerId, target_id: targetId, idempotency_key: idempotencyKey, start_onboarding: startOnboarding }, signal);

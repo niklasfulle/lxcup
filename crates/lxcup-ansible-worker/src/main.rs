@@ -175,12 +175,22 @@ async fn process(
                 }
                 Err(code) => {
                     tracing::error!(failure_code = ?code, "workflow job execution failed");
-                    (AnsibleJobStatus::Failed, JobEventKind::Failed { code })
+                    let status = if job.mode == lxcup_ansible::ExecutionMode::Apply
+                        && job.status == AnsibleJobStatus::Applying
+                    {
+                        AnsibleJobStatus::ReconcileRequired
+                    } else {
+                        AnsibleJobStatus::Failed
+                    };
+                    (status, JobEventKind::Failed { code })
                 }
             };
             job.transition_to(status).expect("claimed status");
             repos.ansible_jobs.update(&job).await?;
             event(repos, job.id, job_event).await?;
+            if status == AnsibleJobStatus::ReconcileRequired {
+                event(repos, job.id, JobEventKind::ReconcileRequired).await?;
+            }
             event(repos, job.id, JobEventKind::StatusChanged { status }).await?;
             tracing::info!(status = ?status, "workflow job status persisted");
             Ok::<(), lxcup_persistence::RepositoryError>(())
@@ -241,6 +251,11 @@ async fn invoke(
     dir: &Path,
 ) -> Result<bool, JobFailureCode> {
     let mode_args = ansible_mode_args(job.operation, job.mode)?;
+    let reconciliation_source = if job.mode == lxcup_ansible::ExecutionMode::Reconcile {
+        Some(load_reconciliation_source(repos, job).await?)
+    } else {
+        None
+    };
     let context = prepare_invocation(r, job, target, dir).await?;
     if job.mode == lxcup_ansible::ExecutionMode::Apply {
         job.transition_to(AnsibleJobStatus::Applying)
@@ -343,6 +358,35 @@ async fn invoke(
         .await
         .map_err(|_| JobFailureCode::WorkerUnavailable)?;
     }
+    if let Some(source) = reconciliation_source {
+        if out.status.success() {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let decision = reconciliation_decision(&stdout);
+            let message = reconciliation_summary(decision);
+            event(
+                repos,
+                job.id,
+                JobEventKind::WorkerLog {
+                    source: "reconcile".to_owned(),
+                    message: message.clone(),
+                },
+            )
+            .await
+            .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+            finalize_reconciliation_source(repos, source, decision, &message).await?;
+        } else {
+            event(
+                repos,
+                job.id,
+                JobEventKind::WorkerLog {
+                    source: "reconcile".to_owned(),
+                    message: "Ist-Zustand konnte nicht zuverlässig ermittelt werden. Der Ursprungsjob bleibt abgleichspflichtig; dieser Reconcile-Lauf kann nach Behebung der Verbindungsursache erneut versucht werden.".to_owned(),
+                },
+            )
+            .await
+            .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+        }
+    }
     if !out.status.success() {
         let output = format!(
             "{}\n{}",
@@ -377,7 +421,9 @@ fn ansible_mode_args(
     operation: AnsibleOperation,
     mode: lxcup_ansible::ExecutionMode,
 ) -> Result<&'static [&'static str], JobFailureCode> {
-    if !operation.supports_mode(mode) {
+    let dedicated_reconciliation =
+        mode == lxcup_ansible::ExecutionMode::Reconcile && operation.can_reconcile_apply();
+    if !operation.supports_mode(mode) && !dedicated_reconciliation {
         return Err(JobFailureCode::PlaybookFailed);
     }
     match mode {
@@ -399,7 +445,13 @@ fn ansible_mode_args(
             _ => Err(JobFailureCode::PlaybookFailed),
         },
         lxcup_ansible::ExecutionMode::Apply => Ok(&[]),
-        lxcup_ansible::ExecutionMode::Reconcile => Err(JobFailureCode::PlaybookFailed),
+        lxcup_ansible::ExecutionMode::Reconcile => match operation {
+            AnsibleOperation::DeployAgent
+            | AnsibleOperation::UpdateAgent
+            | AnsibleOperation::RepairAgent => Ok(["--check", "--diff"].as_slice()),
+            AnsibleOperation::UpdatePackages => Ok(["--diff"].as_slice()),
+            _ => Err(JobFailureCode::PlaybookFailed),
+        },
     }
 }
 
@@ -465,6 +517,113 @@ fn recap_has_failures(stdout: &str) -> bool {
                     .any(|prefix| field.strip_prefix(prefix).is_some_and(|value| value != "0"))
             })
         })
+}
+
+fn recap_has_skipped_tasks(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .skip_while(|line| !line.contains("PLAY RECAP"))
+        .skip(1)
+        .any(|line| {
+            line.split_whitespace().any(|field| {
+                field
+                    .strip_prefix("skipped=")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .is_some_and(|count| count > 0)
+            })
+        })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReconciliationDecision {
+    Completed,
+    ChangesRemain,
+    ManualReview,
+}
+
+fn reconciliation_decision(stdout: &str) -> ReconciliationDecision {
+    if !stdout.contains("PLAY RECAP")
+        || recap_has_failures(stdout)
+        || recap_has_skipped_tasks(stdout)
+        || stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("skipping:"))
+    {
+        return ReconciliationDecision::ManualReview;
+    }
+    match recap_change_count(stdout) {
+        Some(0) => ReconciliationDecision::Completed,
+        Some(_) => ReconciliationDecision::ChangesRemain,
+        None => ReconciliationDecision::ManualReview,
+    }
+}
+
+fn reconciliation_summary(decision: ReconciliationDecision) -> String {
+    match decision {
+        ReconciliationDecision::Completed => "Ist-Zustand geprüft: Es sind keine Änderungen mehr offen. Der ursprüngliche Apply-Lauf wird als abgeschlossen markiert; Reconcile hat selbst nichts geändert.".to_owned(),
+        ReconciliationDecision::ChangesRemain => "Ist-Zustand geprüft: Es bleiben Änderungen offen. Der ursprüngliche Lauf wird als fehlgeschlagen markiert. Erstelle einen neuen Plan und bestätige einen neuen Apply ausdrücklich; Reconcile hat selbst nichts geändert.".to_owned(),
+        ReconciliationDecision::ManualReview => "Ist-Zustand konnte nicht vollständig bewertet werden. Der ursprüngliche Lauf wird zur manuellen Prüfung als fehlgeschlagen markiert; Reconcile hat selbst nichts geändert.".to_owned(),
+    }
+}
+
+async fn load_reconciliation_source(
+    repos: &Repositories,
+    job: &AnsibleJob,
+) -> Result<AnsibleJob, JobFailureCode> {
+    let source_id = lxcup_ansible::reconciliation_source_job_id(&job.idempotency_key)
+        .ok_or(JobFailureCode::PlaybookFailed)?;
+    let source = repos
+        .ansible_jobs
+        .find_by_id(source_id)
+        .await
+        .map_err(|_| JobFailureCode::WorkerUnavailable)?
+        .ok_or(JobFailureCode::PlaybookFailed)?;
+    if source.status != AnsibleJobStatus::ReconcileRequired
+        || source.mode != lxcup_ansible::ExecutionMode::Apply
+        || !source.operation.can_reconcile_apply()
+        || source.target != job.target
+        || source.operation != job.operation
+        || source.parameters != job.parameters
+        || source.secret_refs != job.secret_refs
+    {
+        return Err(JobFailureCode::PlaybookFailed);
+    }
+    Ok(source)
+}
+
+async fn finalize_reconciliation_source(
+    repos: &Repositories,
+    mut source: AnsibleJob,
+    decision: ReconciliationDecision,
+    message: &str,
+) -> Result<(), JobFailureCode> {
+    let status = if decision == ReconciliationDecision::Completed {
+        AnsibleJobStatus::Succeeded
+    } else {
+        AnsibleJobStatus::Failed
+    };
+    source
+        .transition_to(status)
+        .map_err(|_| JobFailureCode::PlaybookFailed)?;
+    repos
+        .ansible_jobs
+        .update(&source)
+        .await
+        .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+    event(
+        repos,
+        source.id,
+        JobEventKind::WorkerLog {
+            source: "reconcile".to_owned(),
+            message: message.to_owned(),
+        },
+    )
+    .await
+    .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+    event(repos, source.id, JobEventKind::StatusChanged { status })
+        .await
+        .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+    Ok(())
 }
 
 fn classify_playbook_failure(output: &str) -> JobFailureCode {
@@ -628,8 +787,17 @@ async fn prepare_invocation(
         &serde_json::json!({group:{"hosts":{"target":host}}}).to_string(),
     )
     .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    let mut vars =
-        serde_json::json!({"lxcup_execution_mode":format!("{:?}",job.mode).to_lowercase()});
+    let execution_mode = if job.mode == lxcup_ansible::ExecutionMode::Reconcile {
+        "plan"
+    } else {
+        match job.mode {
+            lxcup_ansible::ExecutionMode::Check => "check",
+            lxcup_ansible::ExecutionMode::Plan => "plan",
+            lxcup_ansible::ExecutionMode::Apply => "apply",
+            lxcup_ansible::ExecutionMode::Reconcile => unreachable!(),
+        }
+    };
+    let mut vars = serde_json::json!({"lxcup_execution_mode": execution_mode});
     let agent_token = prepare_agent_vars(r, job, target, &mut vars)?;
     if let Some(controller_url) = &r.controller_url {
         vars["lxcup_controller_url"] = serde_json::json!(controller_url);

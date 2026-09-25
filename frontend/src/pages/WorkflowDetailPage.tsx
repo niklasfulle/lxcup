@@ -2,7 +2,7 @@ import { cn } from "../classnames";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { retryAnsibleJob, type AnsibleJobEvent, type AnsibleJobDto, type ContainerDto, type TargetDto } from "../api";
+import { reconcileAnsibleJob, retryAnsibleJob, type AnsibleJobEvent, type AnsibleJobDto, type ContainerDto, type TargetDto } from "../api";
 import { queryKeys, useAnsibleJob, useAnsibleJobEvents, useContainers, useTargets } from "../queries";
 import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
 
@@ -26,6 +26,15 @@ export function WorkflowDetailPage() {
       ]);
     },
   });
+  const reconcile = useMutation({
+    mutationFn: () => reconcileAnsibleJob(jobId!),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.ansibleJob(jobId!) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.ansibleJobs }),
+      ]);
+    },
+  });
 
   if (job.isLoading) return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]"><p className="text-[var(--muted)]">Lade Workflow…</p></section>;
   if (job.error !== null || job.data === undefined) return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]"><h1>Workflow nicht gefunden</h1><p className="font-semibold text-[var(--error)]">{job.error?.message ?? "Der Job ist nicht mehr verfügbar."}</p><Link className="mt-3 inline-block text-xs font-semibold text-lxcup-primary hover:underline" to="/workflows">Zur Workflow-Übersicht</Link></section>;
@@ -41,10 +50,11 @@ export function WorkflowDetailPage() {
     retry.mutate();
   };
   return <>
-    <header className="mb-3 flex items-end justify-between gap-4 border-b border-[var(--line)] pb-3 max-[720px]:flex-col max-[720px]:items-start"><div className="min-w-0"><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Workflow-Protokoll</p><h1>{workflowOperationLabel(currentJob.operation)}</h1><p className="truncate text-[var(--muted)]" title={currentJob.id}>Job {currentJob.id} <span aria-hidden="true">·</span> {resource.name}</p></div><div className="flex shrink-0 flex-wrap items-center gap-2"><WorkflowRetryAction status={currentJob.status} allowed={retryAllowed} pending={retry.isPending} onRetry={retryJob} /><Link className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" to="/workflows">← Alle Workflows</Link></div></header>
+    <header className="mb-3 flex items-end justify-between gap-4 border-b border-[var(--line)] pb-3 max-[720px]:flex-col max-[720px]:items-start"><div className="min-w-0"><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Workflow-Protokoll</p><h1>{workflowOperationLabel(currentJob.operation)}</h1><p className="truncate text-[var(--muted)]" title={currentJob.id}>Job {currentJob.id} <span aria-hidden="true">·</span> {resource.name}</p></div><div className="flex shrink-0 flex-wrap items-center gap-2"><WorkflowReconcileAction status={currentJob.status} mode={currentJob.mode} pending={reconcile.isPending} createdJobId={reconcile.data?.id} onReconcile={() => reconcile.mutate()} /><WorkflowRetryAction status={currentJob.status} allowed={retryAllowed} pending={retry.isPending} onRetry={retryJob} /><Link className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" to="/workflows">← Alle Workflows</Link></div></header>
     {retry.error ? <p className="border border-[var(--error)] bg-[var(--error-soft)] px-3 py-2 font-semibold text-[var(--error)]" role="alert">{retry.error.message}</p> : null}
+    {reconcile.error ? <p className="border border-[var(--error)] bg-[var(--error-soft)] px-3 py-2 font-semibold text-[var(--error)]" role="alert">{reconcile.error.message}</p> : null}
     <div className="mb-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-      <section className="border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><h2 className="mb-3">Ausführung</h2><dl className="m-0 grid grid-cols-[minmax(7rem,0.7fr)_minmax(0,1.3fr)] gap-x-3 gap-y-3 text-sm"><dt className="text-[var(--muted)]">Status</dt><dd className="m-0"><span className={cn("inline-flex items-center px-2 py-0.5 text-xs font-bold", jobStatusBadgeClass(currentJob.status))}>{jobStatusLabel(currentJob.status)}</span></dd><dt className="text-[var(--muted)]">Ressource</dt><dd className="m-0 min-w-0"><strong>{resource.name}</strong>{resource.detail ? <small className="block text-[var(--muted)]">{resource.detail}</small> : null}</dd><dt className="text-[var(--muted)]">Modus</dt><dd className="m-0">{workflowModeLabel(currentJob.mode)}</dd><dt className="text-[var(--muted)]">Playbook</dt><dd className="m-0 min-w-0 break-words">{currentJob.playbook} · v{currentJob.playbook_version}</dd>{currentJob.approved_plan_job_id ? <><dt className="text-[var(--muted)]">Freigegebener Paketplan</dt><dd className="m-0 min-w-0 break-all"><Link className="font-semibold text-lxcup-primary hover:underline" to={`/workflows/${currentJob.approved_plan_job_id}`}>{currentJob.approved_plan_job_id}</Link></dd></> : null}</dl></section>
+      <section className="border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><h2 className="mb-3">Ausführung</h2><dl className="m-0 grid grid-cols-[minmax(7rem,0.7fr)_minmax(0,1.3fr)] gap-x-3 gap-y-3 text-sm"><dt className="text-[var(--muted)]">Status</dt><dd className="m-0"><span className={cn("inline-flex items-center px-2 py-0.5 text-xs font-bold", jobStatusBadgeClass(currentJob.status))}>{jobStatusLabel(currentJob.status)}</span></dd><dt className="text-[var(--muted)]">Ressource</dt><dd className="m-0 min-w-0"><strong>{resource.name}</strong>{resource.detail ? <small className="block text-[var(--muted)]">{resource.detail}</small> : null}</dd><dt className="text-[var(--muted)]">Modus</dt><dd className="m-0">{workflowModeLabel(currentJob.mode)}</dd><dt className="text-[var(--muted)]">Playbook</dt><dd className="m-0 min-w-0 break-words">{currentJob.playbook} · v{currentJob.playbook_version}</dd>{currentJob.approved_plan_job_id ? <><dt className="text-[var(--muted)]">Freigegebener Paketplan</dt><dd className="m-0 min-w-0 break-all"><Link className="font-semibold text-lxcup-primary hover:underline" to={`/workflows/${currentJob.approved_plan_job_id}`}>{currentJob.approved_plan_job_id}</Link></dd></> : null}{currentJob.reconciles_job_id ? <><dt className="text-[var(--muted)]">Abgleich für Job</dt><dd className="m-0 min-w-0 break-all"><Link className="font-semibold text-lxcup-primary hover:underline" to={`/workflows/${currentJob.reconciles_job_id}`}>{currentJob.reconciles_job_id}</Link></dd></> : null}</dl></section>
       <section className="border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><h2 className="mb-3">Zeiten</h2><dl className="m-0 grid grid-cols-[minmax(7rem,0.7fr)_minmax(0,1.3fr)] gap-x-3 gap-y-3 text-sm"><dt className="text-[var(--muted)]">Erstellt</dt><dd className="m-0">{new Date(currentJob.created_at).toLocaleString()}</dd><dt className="text-[var(--muted)]">Letzte Änderung</dt><dd className="m-0">{new Date(currentJob.updated_at).toLocaleString()}</dd><dt className="text-[var(--muted)]">Protokoll</dt><dd className="m-0">{active ? "wird automatisch aktualisiert" : "abgeschlossen"}</dd></dl></section>
     </div>
     <section className={cn("mb-3 border p-4 text-[var(--ink)]", guidanceClass(guidance.level))} aria-live="polite"><strong>{guidance.title}</strong><p className="mb-0 mt-1 text-sm">{guidance.detail}</p></section>
@@ -59,6 +69,14 @@ function WorkflowRetryAction({ status, allowed, pending, onRetry }: Readonly<{ s
   if (status !== "failed") return null;
   if (!allowed) return <span className="text-[var(--muted)]" title="Paket-Apply-Jobs müssen neu geplant und erneut bestätigt werden.">Neuer Update-Plan erforderlich</span>;
   return <button className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={pending} onClick={onRetry}>{pending ? "Wird erneut eingereiht…" : "Fehlgeschlagenen Job erneut versuchen"}</button>;
+}
+
+function WorkflowReconcileAction({ status, mode, pending, createdJobId, onReconcile }: Readonly<{ status: string; mode: string; pending: boolean; createdJobId: string | undefined; onReconcile: () => void }>) {
+  if (status !== "reconcile_required" || mode !== "apply") return null;
+  return <div className="flex flex-wrap items-center gap-2">
+    <button className="inline-flex items-center justify-center border border-[var(--error)] bg-[var(--error-soft)] px-2 py-1.5 text-xs font-semibold text-[var(--error)] hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={pending || Boolean(createdJobId)} onClick={onReconcile}>{pending ? "Abgleich wird eingereiht…" : createdJobId ? "Abgleich eingereiht" : "Ist-Zustand abgleichen"}</button>
+    {createdJobId ? <Link className="text-xs font-semibold text-lxcup-primary hover:underline" to={`/workflows/${createdJobId}`}>Abgleich öffnen</Link> : null}
+  </div>;
 }
 
 function guidanceClass(level: string) {

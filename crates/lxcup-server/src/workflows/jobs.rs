@@ -43,6 +43,8 @@ pub struct AnsibleJobDto {
     pub update_policy_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approved_plan_job_id: Option<lxcup_core::AnsibleJobId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciles_job_id: Option<lxcup_core::AnsibleJobId>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -76,6 +78,7 @@ impl From<&AnsibleJob> for AnsibleJobDto {
             package_names,
             update_policy_id,
             approved_plan_job_id,
+            reconciles_job_id: lxcup_ansible::reconciliation_source_job_id(&job.idempotency_key),
             created_at: job.created_at,
             updated_at: job.updated_at,
         }
@@ -348,6 +351,67 @@ pub(crate) async fn retry_ansible_job(
     Ok(Json(envelope(AnsibleJobDto::from(&retried))))
 }
 
+pub(crate) async fn reconcile_ansible_job(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    Path(job_id): Path<String>,
+) -> Result<(StatusCode, Json<ApiEnvelope<AnsibleJobDto>>), ApiError> {
+    let source_id = lxcup_core::AnsibleJobId::from_uuid(parse_uuid(&job_id, "ansible job id")?);
+    let source = if let Some(repositories) = state.repositories.clone() {
+        repositories
+            .ansible_jobs
+            .find_by_id(source_id)
+            .await
+            .map_err(|_| ApiError::storage())?
+            .ok_or_else(|| ApiError::not_found("ansible job not found"))?
+    } else {
+        state
+            .ansible
+            .read()
+            .await
+            .job(source_id)
+            .map_err(map_ansible_error)?
+    };
+    require_permission(
+        actor_role,
+        PlaybookRegistry
+            .resolve(source.operation)
+            .action
+            .permission(),
+    )?;
+    if !source.can_be_reconciled() {
+        return Err(map_ansible_error(
+            lxcup_ansible::CoordinatorError::ReconcileNotAllowed,
+        ));
+    }
+    let idempotency_key = lxcup_ansible::reconcile_idempotency_key(source_id);
+    if let Some(existing) = find_existing_job(&state, source.target, &idempotency_key).await? {
+        return Ok((
+            StatusCode::OK,
+            Json(envelope(AnsibleJobDto::from(&existing))),
+        ));
+    }
+    let submission = state
+        .ansible
+        .write()
+        .await
+        .submit_reconciliation(&source)
+        .map_err(map_ansible_error)?;
+    let (status, job, created) = match submission {
+        JobSubmission::Created(job) => (StatusCode::ACCEPTED, job, true),
+        JobSubmission::Duplicate(job) => (StatusCode::OK, job, false),
+    };
+    if created {
+        persist_created_job(&state, &job).await?;
+    }
+    state.publish(ApiEvent::status(
+        "ansible_job",
+        job.id.as_uuid().to_string(),
+        "queued",
+    ));
+    Ok((status, Json(envelope(AnsibleJobDto::from(&job)))))
+}
+
 pub(crate) async fn get_ansible_job_events(
     State(state): State<ApiState>,
     Path(job_id): Path<String>,
@@ -432,6 +496,10 @@ pub(super) fn map_ansible_error(error: lxcup_ansible::CoordinatorError) -> ApiEr
             "another job is active for this target",
         ),
         lxcup_ansible::CoordinatorError::NotFound => ApiError::not_found("ansible job not found"),
+        lxcup_ansible::CoordinatorError::ReconcileNotAllowed => ApiError::bad_request(
+            "ansible_reconcile_not_allowed",
+            "only an unresolved Apply job can be reconciled",
+        ),
         lxcup_ansible::CoordinatorError::RetryNotAllowed
         | lxcup_ansible::CoordinatorError::InvalidTransition
         | lxcup_ansible::CoordinatorError::Terminal => {

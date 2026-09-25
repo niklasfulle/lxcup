@@ -252,10 +252,6 @@ fn check_mode_uses_ansible_check_flag_and_never_falls_through_to_apply() {
             ansible_mode_args(operation, ExecutionMode::Apply),
             Ok([].as_slice())
         );
-        assert_eq!(
-            ansible_mode_args(operation, ExecutionMode::Reconcile),
-            Err(JobFailureCode::PlaybookFailed)
-        );
     }
     for operation in [
         AnsibleOperation::DeployAgent,
@@ -273,6 +269,24 @@ fn check_mode_uses_ansible_check_flag_and_never_falls_through_to_apply() {
     );
     assert_eq!(
         ansible_mode_args(AnsibleOperation::ConfigureTarget, ExecutionMode::Plan),
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    for operation in [
+        AnsibleOperation::DeployAgent,
+        AnsibleOperation::UpdateAgent,
+        AnsibleOperation::RepairAgent,
+    ] {
+        assert_eq!(
+            ansible_mode_args(operation, ExecutionMode::Reconcile),
+            Ok(["--check", "--diff"].as_slice())
+        );
+    }
+    assert_eq!(
+        ansible_mode_args(AnsibleOperation::UpdatePackages, ExecutionMode::Reconcile),
+        Ok(["--diff"].as_slice())
+    );
+    assert_eq!(
+        ansible_mode_args(AnsibleOperation::HealthCheck, ExecutionMode::Reconcile),
         Err(JobFailureCode::PlaybookFailed)
     );
     for operation in [
@@ -300,6 +314,38 @@ fn check_mode_summary_marks_skipped_and_missing_results_unverifiable() {
     );
     assert!(check_mode_summary("PLAY RECAP changed=1").contains("nichts angewendet"));
     assert!(check_mode_summary("PLAY RECAP changed=0").contains("keine Änderungen"));
+}
+
+#[test]
+fn reconciliation_summary_classifies_the_observed_target_state() {
+    assert_eq!(
+        reconciliation_decision("PLAY RECAP\ntarget : ok=3 changed=0 failed=0 skipped=0"),
+        ReconciliationDecision::Completed
+    );
+    assert_eq!(
+        reconciliation_decision("PLAY RECAP\ntarget : ok=2 changed=1 failed=0 skipped=0"),
+        ReconciliationDecision::ChangesRemain
+    );
+    assert_eq!(
+        reconciliation_decision("PLAY RECAP\ntarget : ok=2 changed=0 failed=1 skipped=0"),
+        ReconciliationDecision::ManualReview
+    );
+    assert_eq!(
+        reconciliation_decision("PLAY RECAP\ntarget : ok=2 changed=0 failed=0 skipped=1"),
+        ReconciliationDecision::ManualReview
+    );
+    assert_eq!(
+        reconciliation_decision("PLAY [target]"),
+        ReconciliationDecision::ManualReview
+    );
+    assert!(
+        reconciliation_summary(ReconciliationDecision::Completed)
+            .contains("hat selbst nichts geändert")
+    );
+    assert!(
+        reconciliation_summary(ReconciliationDecision::ChangesRemain)
+            .contains("bestätige einen neuen Apply ausdrücklich")
+    );
 }
 
 #[test]

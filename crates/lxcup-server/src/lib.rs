@@ -45,7 +45,7 @@ pub(crate) use targets::{
 mod workflows;
 pub(crate) use workflows::{
     create_ansible_job, create_enrollment, get_ansible_job, get_ansible_job_events, get_enrollment,
-    list_ansible_jobs, queue_agent_reconfiguration, retry_ansible_job,
+    list_ansible_jobs, queue_agent_reconfiguration, reconcile_ansible_job, retry_ansible_job,
 };
 mod worker;
 pub(crate) use worker::get_worker_availability;
@@ -439,6 +439,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/v1/ansible/jobs/{job_id}/retry",
             post(retry_ansible_job),
+        )
+        .route(
+            "/api/v1/ansible/jobs/{job_id}/reconcile",
+            post(reconcile_ansible_job),
         )
         .route(
             "/api/v1/ansible/jobs/{job_id}/events",

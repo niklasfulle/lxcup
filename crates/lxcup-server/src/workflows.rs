@@ -25,7 +25,7 @@ mod reconciliation;
 pub(super) use enrollment::{create_enrollment, get_enrollment};
 pub(super) use jobs::{
     create_ansible_job, get_ansible_job, get_ansible_job_events, list_ansible_jobs,
-    persist_created_job, retry_ansible_job,
+    persist_created_job, reconcile_ansible_job, retry_ansible_job,
 };
 pub(super) use reconciliation::{queue_agent_reconfiguration, reconcile_onboarding_jobs};
 

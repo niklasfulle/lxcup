@@ -15,5 +15,6 @@ mod agents;
 mod core_state;
 mod docker_enrollment;
 mod inventory;
+mod reconciliation;
 mod removed_resources;
 mod workflows;
