@@ -49,8 +49,7 @@
   ansible.builtin.apt:
     name: "{{ lxcup_update_packages }}"
     state: latest
-    update_cache: true
-    cache_valid_time: 3600
+    update_cache: false
   register: lxcup_update_check
   check_mode: true
   when: lxcup_execution_mode in ['check', 'plan']

@@ -189,6 +189,15 @@ fn worker_logs_redact_all_secret_occurrences_and_ignore_empty_values() {
 }
 
 #[test]
+fn plan_diff_redacts_secret_values_before_preview_logging() {
+    let raw_diff = "--- before\n+++ after\n+token=agent-secret-123";
+    let preview = redact_output(raw_diff, &[Some("agent-secret-123"), None]);
+
+    assert!(!preview.contains("agent-secret-123"));
+    assert!(preview.contains("token=[REDACTED]"));
+}
+
+#[test]
 fn worker_classifies_common_ansible_failures_and_change_summary() {
     assert_eq!(
         classify_playbook_failure("fatal: Invalid/incorrect password"),
@@ -232,6 +241,24 @@ fn check_mode_uses_ansible_check_flag_and_never_falls_through_to_apply() {
         );
     }
     for operation in [
+        AnsibleOperation::DeployAgent,
+        AnsibleOperation::UpdateAgent,
+        AnsibleOperation::RepairAgent,
+    ] {
+        assert_eq!(
+            ansible_mode_args(operation, ExecutionMode::Plan),
+            Ok(["--check", "--diff"].as_slice())
+        );
+    }
+    assert_eq!(
+        ansible_mode_args(AnsibleOperation::UpdatePackages, ExecutionMode::Plan),
+        Ok(["--diff"].as_slice())
+    );
+    assert_eq!(
+        ansible_mode_args(AnsibleOperation::ConfigureTarget, ExecutionMode::Plan),
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    for operation in [
         AnsibleOperation::HealthCheck,
         AnsibleOperation::CollectPackageInventory,
     ] {
@@ -250,8 +277,26 @@ fn check_mode_uses_ansible_check_flag_and_never_falls_through_to_apply() {
 fn check_mode_summary_marks_skipped_and_missing_results_unverifiable() {
     assert!(check_mode_summary("skipping: [target]\nPLAY RECAP").contains("nicht prüfbar"));
     assert!(check_mode_summary("PLAY [target]").contains("keine vollständige"));
+    assert!(
+        check_mode_summary("PLAY RECAP\ntarget : ok=0 changed=0 failed=1")
+            .contains("fehlgeschlagen")
+    );
     assert!(check_mode_summary("PLAY RECAP changed=1").contains("nichts angewendet"));
     assert!(check_mode_summary("PLAY RECAP changed=0").contains("keine Änderungen"));
+}
+
+#[test]
+fn plan_summary_reports_predicted_changes_without_claiming_apply() {
+    assert!(plan_summary("PLAY RECAP\ntarget : ok=4 changed=2 failed=0").contains("2 Änderung"));
+    assert!(
+        plan_summary("PLAY RECAP\ntarget : ok=4 changed=0 failed=0").contains("keine Änderungen")
+    );
+    assert!(
+        plan_summary("PLAY RECAP\ntarget : ok=0 changed=0 failed=1")
+            .contains("Vorschau fehlgeschlagen")
+    );
+    assert!(plan_summary("skipping: [target]\nPLAY RECAP").contains("teilweise nicht prüfbar"));
+    assert!(plan_summary("PLAY [target]").contains("Vorschau unvollständig"));
 }
 
 #[test]

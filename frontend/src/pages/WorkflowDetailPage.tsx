@@ -50,7 +50,7 @@ export function WorkflowDetailPage() {
     <section className={cn("mb-3 border p-4 text-[var(--ink)]", guidanceClass(guidance.level))} aria-live="polite"><strong>{guidance.title}</strong><p className="mb-0 mt-1 text-sm">{guidance.detail}</p></section>
     <section className="mb-3 overflow-hidden border border-[var(--line)] bg-[var(--panel)] text-[var(--ink)]">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] px-4 py-3"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Audit-Trail</p><h2 className="m-0">Ausführungsprotokoll</h2><p className="mt-1 text-sm text-[var(--muted)]">Zeitlich sortierte Schritte und Rückmeldungen des Workers.</p></div><span className="border border-[var(--line)] bg-[var(--paper-muted)] px-2.5 py-1 text-xs font-semibold text-[var(--muted)]">{events.data?.length ?? 0} Einträge</span></div>
-      {workflowLogContent(events, rawLog)}
+      {workflowLogContent(events, rawLog, currentJob.mode === "plan")}
     </section>
   </>;
 }
@@ -77,11 +77,14 @@ function CopyLogButton({ log }: Readonly<{ log: string }>) {
   return <button className={cn("inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50", "px-3 py-1")} type="button" onClick={copy}>{copied ? "Log kopiert" : "Log kopieren"}</button>;
 }
 
-function workflowLogContent(events: ReturnType<typeof useAnsibleJobEvents>, rawLog: string) {
+function workflowLogContent(events: ReturnType<typeof useAnsibleJobEvents>, rawLog: string, isPlan: boolean) {
   if (events.isLoading) return <p className="text-[var(--muted)]">Lade Protokoll…</p>;
   if (events.error) return <p className="font-semibold text-[var(--error)]" role="alert">{events.error.message}</p>;
   if (events.data === undefined || events.data.length === 0) return <p className="m-4 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Noch keine Worker-Meldung. Prüfe, ob ein Ansible-Worker läuft und das Ziel erreichbar ist.</p>;
+  const planOutput = isPlan ? events.data.filter((event) => event.event.kind === "worker_log" && event.event.source === "stdout").map((event) => event.event.kind === "worker_log" ? event.event.message : "").filter(Boolean).join("\n") : "";
+  const planSummary = isPlan ? events.data.find((event) => event.event.kind === "worker_log" && event.event.source === "plan") : undefined;
   return <>
+    {isPlan ? <PlanPreview summary={planSummary?.event.kind === "worker_log" ? planSummary.event.message ?? "Vorschau wird erstellt…" : "Vorschau wird erstellt…"} preview={planOutput} copyable={Boolean(planOutput || planSummary)} /> : null}
     <ol className="m-0 list-none divide-y divide-[var(--line)] p-0">
       {events.data.map((event) => <li className="grid grid-cols-[2rem_minmax(0,1fr)_auto] items-start gap-x-3 px-4 py-3 max-[600px]:grid-cols-[2rem_minmax(0,1fr)]" key={event.sequence}>
         <span className={cn("mt-0.5 grid h-7 w-7 place-items-center rounded-full text-xs font-bold ring-4 ring-[var(--panel)]", eventStepClass(event))}>{event.sequence}</span>
@@ -94,6 +97,19 @@ function workflowLogContent(events: ReturnType<typeof useAnsibleJobEvents>, rawL
       <pre className="m-0 max-h-[32rem] overflow-auto whitespace-pre-wrap break-words border border-[var(--line)] bg-[#111b2d] p-4 font-mono text-xs leading-relaxed text-[var(--ink)]">{rawLog}</pre>
     </div>
   </>;
+}
+
+function PlanPreview({ summary, preview, copyable }: Readonly<{ summary: string; preview: string; copyable: boolean }>) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    await navigator.clipboard.writeText(preview || summary);
+    setCopied(true);
+    globalThis.setTimeout(() => setCopied(false), 2_000);
+  };
+  return <section className="border-b border-[var(--line)] bg-[var(--primary-soft)] p-4" aria-label="Plan-Vorschau">
+    <div className="mb-2 flex flex-wrap items-start justify-between gap-3"><div><h3 className="m-0 text-sm font-semibold text-[var(--ink)]">Erwartete Änderungen</h3><p className="mb-0 mt-1 text-sm text-[var(--muted)]">{summary}</p></div><button className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--paper-muted)] disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={!copyable} onClick={copy}>{copied ? "Vorschau kopiert" : "Vorschau kopieren"}</button></div>
+    {preview ? <pre className="m-0 max-h-96 overflow-auto whitespace-pre-wrap break-words border border-[var(--line)] bg-[#111b2d] p-3 font-mono text-xs leading-relaxed text-[var(--ink)]">{preview}</pre> : <p className="m-0 border border-dashed border-[var(--line)] p-3 text-sm text-[var(--muted)]">Die Diff-Vorschau erscheint, sobald der Worker die Prüfung abgeschlossen hat.</p>}
+  </section>;
 }
 
 function eventStepClass(event: AnsibleJobEvent) {

@@ -295,6 +295,18 @@ async fn invoke(
         .await
         .map_err(|_| JobFailureCode::WorkerUnavailable)?;
     }
+    if job.mode == lxcup_ansible::ExecutionMode::Plan {
+        event(
+            repos,
+            job.id,
+            JobEventKind::WorkerLog {
+                source: "plan".to_owned(),
+                message: plan_summary(&String::from_utf8_lossy(&out.stdout)),
+            },
+        )
+        .await
+        .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+    }
     if !out.status.success() {
         let output = format!(
             "{}\n{}",
@@ -343,25 +355,80 @@ fn ansible_mode_args(
                 &["--check"]
             },
         ),
-        lxcup_ansible::ExecutionMode::Plan | lxcup_ansible::ExecutionMode::Apply => Ok(&[]),
+        lxcup_ansible::ExecutionMode::Plan => match operation {
+            AnsibleOperation::DeployAgent
+            | AnsibleOperation::UpdateAgent
+            | AnsibleOperation::RepairAgent => Ok(["--check", "--diff"].as_slice()),
+            AnsibleOperation::UpdatePackages => Ok(["--diff"].as_slice()),
+            _ => Err(JobFailureCode::PlaybookFailed),
+        },
+        lxcup_ansible::ExecutionMode::Apply => Ok(&[]),
         lxcup_ansible::ExecutionMode::Reconcile => Err(JobFailureCode::PlaybookFailed),
     }
 }
 
 fn check_mode_summary(stdout: &str) -> String {
-    if stdout
+    if !stdout.contains("PLAY RECAP") {
+        "Prüfung lieferte keine vollständige Ansible-Zusammenfassung; Ergebnis bitte manuell prüfen.".to_owned()
+    } else if recap_has_failures(stdout) {
+        "Prüfung fehlgeschlagen: Ansible meldet mindestens einen fehlgeschlagenen oder nicht erreichbaren Host. Details stehen in der Worker-Ausgabe.".to_owned()
+    } else if stdout
         .lines()
         .any(|line| line.trim_start().starts_with("skipping:"))
     {
         "Prüfung abgeschlossen, aber mindestens ein Ansible-Schritt wurde übersprungen und ist nicht prüfbar. Details stehen in der Worker-Ausgabe.".to_owned()
-    } else if !stdout.contains("PLAY RECAP") {
-        "Prüfung lieferte keine vollständige Ansible-Zusammenfassung; Ergebnis bitte manuell prüfen.".to_owned()
     } else if playbook_changed(stdout) {
         "Prüfung erfolgreich: Ansible hat mögliche Änderungen erkannt, aber im Check-Modus nichts angewendet.".to_owned()
     } else {
         "Prüfung erfolgreich: Ansible hat keine Änderungen erkannt und nichts angewendet."
             .to_owned()
     }
+}
+
+fn plan_summary(stdout: &str) -> String {
+    if !stdout.contains("PLAY RECAP") {
+        return "Vorschau unvollständig: Ansible hat keine vollständige Zusammenfassung geliefert. Details stehen in der technischen Ausgabe.".to_owned();
+    }
+    if recap_has_failures(stdout) {
+        return "Vorschau fehlgeschlagen: Ansible meldet mindestens einen fehlgeschlagenen oder nicht erreichbaren Host. Es wurde nichts angewendet; Details stehen in der technischen Ausgabe.".to_owned();
+    }
+    if stdout
+        .lines()
+        .any(|line| line.trim_start().starts_with("skipping:"))
+    {
+        return "Vorschau teilweise nicht prüfbar: Mindestens ein Ansible-Schritt wurde übersprungen. Es wurden keine Änderungen angewendet; Details stehen in der Diff-Ausgabe.".to_owned();
+    }
+    let changes = stdout
+        .lines()
+        .skip_while(|line| !line.contains("PLAY RECAP"))
+        .skip(1)
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix("changed=")?.parse::<u32>().ok())
+        })
+        .sum::<u32>();
+    if changes == 0 {
+        "Dry-Run erfolgreich: Es werden keine Änderungen erwartet. Es wurde nichts angewendet."
+            .to_owned()
+    } else {
+        format!(
+            "Dry-Run erfolgreich: Ansible erwartet {changes} Änderung(en). Es wurde nichts angewendet; die sichere Diff-Vorschau steht unten."
+        )
+    }
+}
+
+fn recap_has_failures(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .skip_while(|line| !line.contains("PLAY RECAP"))
+        .skip(1)
+        .any(|line| {
+            line.split_whitespace().any(|field| {
+                ["failed=", "unreachable="]
+                    .iter()
+                    .any(|prefix| field.strip_prefix(prefix).is_some_and(|value| value != "0"))
+            })
+        })
 }
 
 fn classify_playbook_failure(output: &str) -> JobFailureCode {

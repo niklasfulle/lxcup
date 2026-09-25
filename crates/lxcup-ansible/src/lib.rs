@@ -624,7 +624,10 @@ mod tests {
                 vec![ExecutionMode::Plan, ExecutionMode::Apply],
             ),
             (AnsibleOperation::RepairAgent, check_plan_apply.clone()),
-            (AnsibleOperation::ConfigureTarget, check_plan_apply),
+            (
+                AnsibleOperation::ConfigureTarget,
+                vec![ExecutionMode::Check, ExecutionMode::Apply],
+            ),
             (AnsibleOperation::HealthCheck, vec![ExecutionMode::Check]),
             (
                 AnsibleOperation::CollectPackageInventory,

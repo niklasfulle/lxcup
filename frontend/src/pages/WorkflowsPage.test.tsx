@@ -3,6 +3,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { WorkflowsPage } from "./WorkflowsPage";
+import workflowModeMatrix from "../../workflow-modes.json";
 
 vi.mock("../api", () => ({ createAnsibleJob: vi.fn() }));
 vi.mock("../queries", () => ({
@@ -26,5 +27,6 @@ describe("workflow mode contract", () => {
     expect(within(mode).queryByRole("option", { name: "Reconcile" })).not.toBeInTheDocument();
     fireEvent.change(operation, { target: { value: "update_packages" } });
     expect(within(mode).getAllByRole("option").map((option) => option.textContent)).toEqual(["Plan / Dry-Run", "Apply"]);
+    expect(workflowModeMatrix.configure_target).toEqual(["check", "apply"]);
   });
 });
