@@ -78,7 +78,10 @@ impl AnsibleJobStatus {
             (self, next),
             (Self::Queued, Self::Checking | Self::Planned | Self::Aborted)
                 | (Self::Checking, Self::Planned | Self::Failed | Self::Aborted)
-                | (Self::Planned, Self::Applying | Self::Failed | Self::Aborted)
+                | (
+                    Self::Planned,
+                    Self::Applying | Self::Succeeded | Self::Failed | Self::Aborted
+                )
                 | (
                     Self::Applying,
                     Self::Succeeded | Self::Failed | Self::ReconcileRequired
@@ -729,6 +732,24 @@ mod tests {
         job.transition_to(AnsibleJobStatus::ReconcileRequired)
             .unwrap();
         assert!(job.transition_to(AnsibleJobStatus::Succeeded).is_ok());
+        assert_eq!(
+            job.transition_to(AnsibleJobStatus::Applying),
+            Err(AnsibleContractError::InvalidTransition)
+        );
+    }
+
+    #[test]
+    fn check_jobs_succeed_directly_from_planned_without_applying() {
+        let mut job = AnsibleJob::from_request(request(
+            AnsibleOperation::HealthCheck,
+            AnsibleParameters::HealthCheck,
+        ))
+        .unwrap();
+        assert_eq!(job.mode, ExecutionMode::Check);
+        job.transition_to(AnsibleJobStatus::Checking).unwrap();
+        job.transition_to(AnsibleJobStatus::Planned).unwrap();
+        job.transition_to(AnsibleJobStatus::Succeeded).unwrap();
+        assert_eq!(job.status, AnsibleJobStatus::Succeeded);
         assert_eq!(
             job.transition_to(AnsibleJobStatus::Applying),
             Err(AnsibleContractError::InvalidTransition)

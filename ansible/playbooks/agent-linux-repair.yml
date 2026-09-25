@@ -3,7 +3,6 @@
   hosts: lxcup_targets
   become: true
   gather_facts: true
-  check_mode: false
   vars:
     lxcup_agent_force_restart: true
   roles:

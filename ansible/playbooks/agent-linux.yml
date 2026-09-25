@@ -3,6 +3,5 @@
   hosts: lxcup_targets
   become: true
   gather_facts: true
-  check_mode: false
   roles:
     - role: lxcup_agent_linux

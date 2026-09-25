@@ -236,9 +236,12 @@ async fn invoke(
     target: &Target,
     dir: &Path,
 ) -> Result<bool, JobFailureCode> {
+    let mode_args = ansible_mode_args(job.operation, job.mode)?;
     let context = prepare_invocation(r, job, target, dir).await?;
-    job.transition_to(AnsibleJobStatus::Applying)
-        .map_err(|_| JobFailureCode::PlaybookFailed)?;
+    if job.mode == lxcup_ansible::ExecutionMode::Apply {
+        job.transition_to(AnsibleJobStatus::Applying)
+            .map_err(|_| JobFailureCode::PlaybookFailed)?;
+    }
     let playbook = playbook(job.operation, target.kind).ok_or(JobFailureCode::PlaybookFailed)?;
     let out = timeout(
         Duration::from_secs(900),
@@ -255,6 +258,7 @@ async fn invoke(
                 "--extra-vars",
                 &format!("@{}", context.vars_file.display()),
             ])
+            .args(mode_args)
             .output(),
     )
     .await
@@ -278,6 +282,18 @@ async fn invoke(
             .await
             .map_err(|_| JobFailureCode::WorkerUnavailable)?;
         }
+    }
+    if job.mode == lxcup_ansible::ExecutionMode::Check {
+        event(
+            repos,
+            job.id,
+            JobEventKind::WorkerLog {
+                source: "check".to_owned(),
+                message: check_mode_summary(&String::from_utf8_lossy(&out.stdout)),
+            },
+        )
+        .await
+        .map_err(|_| JobFailureCode::WorkerUnavailable)?;
     }
     if !out.status.success() {
         let output = format!(
@@ -305,7 +321,47 @@ async fn invoke(
         .await
         .map_err(|_| JobFailureCode::WorkerUnavailable)?;
     }
-    Ok(playbook_changed(&String::from_utf8_lossy(&out.stdout)))
+    Ok(job.mode == lxcup_ansible::ExecutionMode::Apply
+        && playbook_changed(&String::from_utf8_lossy(&out.stdout)))
+}
+
+fn ansible_mode_args(
+    operation: AnsibleOperation,
+    mode: lxcup_ansible::ExecutionMode,
+) -> Result<&'static [&'static str], JobFailureCode> {
+    if !operation.supports_mode(mode) {
+        return Err(JobFailureCode::PlaybookFailed);
+    }
+    match mode {
+        lxcup_ansible::ExecutionMode::Check => Ok(
+            if matches!(
+                operation,
+                AnsibleOperation::HealthCheck | AnsibleOperation::CollectPackageInventory
+            ) {
+                &[]
+            } else {
+                &["--check"]
+            },
+        ),
+        lxcup_ansible::ExecutionMode::Plan | lxcup_ansible::ExecutionMode::Apply => Ok(&[]),
+        lxcup_ansible::ExecutionMode::Reconcile => Err(JobFailureCode::PlaybookFailed),
+    }
+}
+
+fn check_mode_summary(stdout: &str) -> String {
+    if stdout
+        .lines()
+        .any(|line| line.trim_start().starts_with("skipping:"))
+    {
+        "Prüfung abgeschlossen, aber mindestens ein Ansible-Schritt wurde übersprungen und ist nicht prüfbar. Details stehen in der Worker-Ausgabe.".to_owned()
+    } else if !stdout.contains("PLAY RECAP") {
+        "Prüfung lieferte keine vollständige Ansible-Zusammenfassung; Ergebnis bitte manuell prüfen.".to_owned()
+    } else if playbook_changed(stdout) {
+        "Prüfung erfolgreich: Ansible hat mögliche Änderungen erkannt, aber im Check-Modus nichts angewendet.".to_owned()
+    } else {
+        "Prüfung erfolgreich: Ansible hat keine Änderungen erkannt und nichts angewendet."
+            .to_owned()
+    }
 }
 
 fn classify_playbook_failure(output: &str) -> JobFailureCode {

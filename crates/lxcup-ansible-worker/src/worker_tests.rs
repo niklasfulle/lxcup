@@ -211,6 +211,66 @@ fn worker_classifies_common_ansible_failures_and_change_summary() {
 }
 
 #[test]
+fn check_mode_uses_ansible_check_flag_and_never_falls_through_to_apply() {
+    for operation in [
+        AnsibleOperation::DeployAgent,
+        AnsibleOperation::UpdateAgent,
+        AnsibleOperation::RepairAgent,
+        AnsibleOperation::ConfigureTarget,
+    ] {
+        assert_eq!(
+            ansible_mode_args(operation, ExecutionMode::Check),
+            Ok(["--check"].as_slice())
+        );
+        assert_eq!(
+            ansible_mode_args(operation, ExecutionMode::Apply),
+            Ok([].as_slice())
+        );
+        assert_eq!(
+            ansible_mode_args(operation, ExecutionMode::Reconcile),
+            Err(JobFailureCode::PlaybookFailed)
+        );
+    }
+    for operation in [
+        AnsibleOperation::HealthCheck,
+        AnsibleOperation::CollectPackageInventory,
+    ] {
+        assert_eq!(
+            ansible_mode_args(operation, ExecutionMode::Check),
+            Ok([].as_slice())
+        );
+    }
+    assert_eq!(
+        ansible_mode_args(AnsibleOperation::UpdatePackages, ExecutionMode::Check),
+        Err(JobFailureCode::PlaybookFailed)
+    );
+}
+
+#[test]
+fn check_mode_summary_marks_skipped_and_missing_results_unverifiable() {
+    assert!(check_mode_summary("skipping: [target]\nPLAY RECAP").contains("nicht prüfbar"));
+    assert!(check_mode_summary("PLAY [target]").contains("keine vollständige"));
+    assert!(check_mode_summary("PLAY RECAP changed=1").contains("nichts angewendet"));
+    assert!(check_mode_summary("PLAY RECAP changed=0").contains("keine Änderungen"));
+}
+
+#[test]
+fn mutating_playbooks_do_not_disable_ansible_check_mode() {
+    let playbooks = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ansible/playbooks");
+    for file in [
+        "agent-linux.yml",
+        "agent-linux-repair.yml",
+        "agent-windows.yml",
+    ] {
+        let contents = fs::read_to_string(playbooks.join(file)).unwrap();
+        assert!(
+            !contents.contains("check_mode: false"),
+            "{file} disables check mode"
+        );
+    }
+}
+
+#[test]
 fn released_agent_020_manifest_matches_binary_checksum() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/agent/0.2.0");
     let manifest: Manifest = serde_json::from_slice(
@@ -290,7 +350,7 @@ fn agent_variables_are_skipped_for_health_checks_and_require_a_secret_otherwise(
         operation: AnsibleOperation::UpdatePackages,
         target: ResourceTarget::Target(target.id),
         lifecycle: ResourceLifecycle::Managed,
-        mode: ExecutionMode::Check,
+        mode: ExecutionMode::Apply,
         parameters: AnsibleParameters::UpdatePackages {
             packages: vec!["curl".to_owned()],
         },
