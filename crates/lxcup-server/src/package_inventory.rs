@@ -20,6 +20,7 @@ pub struct PackageInventoryDto {
 pub struct InstalledPackageDto {
     pub name: String,
     pub installed_version: String,
+    pub candidate_version: Option<String>,
     pub architecture: Option<String>,
     pub source: Option<String>,
 }
@@ -59,6 +60,9 @@ pub(super) async fn get_package_inventory(
                 .map(|package| InstalledPackageDto {
                     name: package.name.as_str().to_owned(),
                     installed_version: package.version.as_str().to_owned(),
+                    candidate_version: package
+                        .candidate_version
+                        .map(|version| version.as_str().to_owned()),
                     architecture: package.architecture,
                     source: package.source,
                 })

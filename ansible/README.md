@@ -5,7 +5,7 @@ aufgerufen. Es gibt kein Repository-Inventar und keine Secrets im Repository.
 
 Erwartete Worker-Variablen:
 
-- `lxcup_agent_version`: validierte Agent-Version, zum Beispiel `0.2.0`
+- `lxcup_agent_version`: validierte Agent-Version, zum Beispiel `0.3.1`
 - `lxcup_agent_binary_src`: vom Worker bereitgestellte Binary-Quelle
 - `lxcup_agent_token`: zur Laufzeit aus dem Secret Store aufgelöst
 - `lxcup_agent_id`: persistierte Agent-ID

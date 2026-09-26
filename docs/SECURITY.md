@@ -24,7 +24,9 @@ to the target, and builds a temporary Ansible inventory and variables file.
   through deployment secrets; never use development placeholders.
 - The server authorizes every protected request. Frontend visibility is not an
   authorization boundary. Administrative secret lifecycle operations and
-  destructive actions require the corresponding server-side role.
+  destructive actions require the corresponding server-side role. Update
+  policy deletion requires destructive permission and explicit confirmation;
+  the system-wide standard policy cannot be deleted.
 - Use TLS for browser access in production. Do not expose bearer tokens over
   plaintext HTTP or place them in URLs.
 - The frontend keeps the authenticated token in in-memory application state;
@@ -74,7 +76,11 @@ For the implemented role behavior and production requirements, see
   unrestricted Ansible extra-vars.
 - Mutating package operations follow scan → plan → explicit confirmation →
   apply. Preserve idempotency, target exclusivity, audit events, and
-  reconciliation behavior.
+  reconciliation behavior. A package selection of `*` means all installed
+  packages with available updates; it is accepted only under a policy with no
+  package-name allowlist and remains subject to the policy's target, risk, and
+  maintenance-window restrictions. Apply still requires the matching
+  successful plan and explicit confirmation.
 - Agent deployment/update artifacts require an approved manifest, matching
   version, and validated SHA-256 before execution. Do not bypass verification
   to make a deployment succeed.

@@ -17,6 +17,7 @@ pub struct PackageInventorySnapshot {
 pub struct InstalledPackage {
     pub name: PackageName,
     pub version: PackageVersion,
+    pub candidate_version: Option<PackageVersion>,
     pub architecture: Option<String>,
     pub source: Option<String>,
 }
@@ -33,6 +34,7 @@ mod tests {
             packages: vec![InstalledPackage {
                 name: PackageName::new("curl").unwrap(),
                 version: PackageVersion::new("8.5.0-2").unwrap(),
+                candidate_version: Some(PackageVersion::new("8.6.0-1").unwrap()),
                 architecture: Some("amd64".to_owned()),
                 source: None,
             }],

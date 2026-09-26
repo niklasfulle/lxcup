@@ -417,7 +417,7 @@ async fn execution_endpoints_confirm_run_reconcile_and_abort() {
             agent_id: "execution-agent".to_owned(),
             platform: lxcup_agent::AgentPlatform::Windows,
             hostname: "execution-host".to_owned(),
-            version: "0.2.0".to_owned(),
+            version: "0.3.1".to_owned(),
             protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
         };
         axum::serve(

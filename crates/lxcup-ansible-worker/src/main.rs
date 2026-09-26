@@ -859,6 +859,8 @@ fn playbook(o: AnsibleOperation, k: TargetKind) -> Option<&'static str> {
 #[derive(Deserialize)]
 struct CollectedPackageInventory {
     packages: serde_json::Value,
+    #[serde(default)]
+    upgradable: Vec<String>,
 }
 
 fn read_package_inventory(
@@ -869,7 +871,7 @@ fn read_package_inventory(
         .map_err(|_| JobFailureCode::PlaybookFailed)?;
     let collected: CollectedPackageInventory =
         serde_json::from_str(&contents).map_err(|_| JobFailureCode::PlaybookFailed)?;
-    let packages = normalize_package_inventory(collected.packages)?;
+    let packages = normalize_package_inventory(collected.packages, &collected.upgradable)?;
     Ok(PackageInventorySnapshot {
         target_id,
         collected_at: Utc::now(),
@@ -879,7 +881,12 @@ fn read_package_inventory(
 
 fn normalize_package_inventory(
     value: serde_json::Value,
+    upgradable: &[String],
 ) -> Result<Vec<InstalledPackage>, JobFailureCode> {
+    let candidate_versions = upgradable
+        .iter()
+        .filter_map(|line| parse_apt_upgrade(line))
+        .collect::<std::collections::HashMap<_, _>>();
     let mut packages = Vec::new();
     let Some(by_name) = value.as_object() else {
         return Err(JobFailureCode::PlaybookFailed);
@@ -891,10 +898,23 @@ fn normalize_package_inventory(
                 .get("version")
                 .and_then(serde_json::Value::as_str)
                 .ok_or(JobFailureCode::PlaybookFailed)?;
+            let installed_version = PackageVersion::new(version.to_owned())
+                .map_err(|_| JobFailureCode::PlaybookFailed)?;
+            let candidate_version = candidate_versions
+                .get(name)
+                .or_else(|| {
+                    name.split(':')
+                        .next()
+                        .and_then(|name| candidate_versions.get(name))
+                })
+                .map(|value| PackageVersion::new(value.clone()))
+                .transpose()
+                .map_err(|_| JobFailureCode::PlaybookFailed)?
+                .unwrap_or_else(|| installed_version.clone());
             packages.push(InstalledPackage {
                 name: PackageName::new(name.clone()).map_err(|_| JobFailureCode::PlaybookFailed)?,
-                version: PackageVersion::new(version.to_owned())
-                    .map_err(|_| JobFailureCode::PlaybookFailed)?,
+                version: installed_version,
+                candidate_version: Some(candidate_version),
                 architecture: entry
                     .get("arch")
                     .or_else(|| entry.get("architecture"))
@@ -918,6 +938,20 @@ fn normalize_package_inventory(
             .then_with(|| left.version.as_str().cmp(right.version.as_str()))
     });
     Ok(packages)
+}
+
+fn parse_apt_upgrade(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with("Listing") || line.starts_with("WARNING") {
+        return None;
+    }
+    let mut fields = line.split_whitespace();
+    let package = fields.next()?.split('/').next()?.split(':').next()?;
+    let candidate = fields.next()?;
+    if package.is_empty() || candidate.is_empty() || !line.contains("[upgradable from:") {
+        return None;
+    }
+    Some((package.to_owned(), candidate.to_owned()))
 }
 fn private(p: &Path, s: &str) -> std::io::Result<()> {
     fs::write(p, s)

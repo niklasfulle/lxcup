@@ -1,7 +1,7 @@
 use super::{ApiEnvelope, ApiError, ApiState, envelope, require_permission};
 use axum::{
     Json,
-    extract::{Json as JsonBody, State},
+    extract::{Json as JsonBody, Path, State},
 };
 use lxcup_core::{ActorRole, Permission, TargetId, UpdatePolicy, UpdateRisk};
 use serde::Deserialize;
@@ -20,13 +20,38 @@ pub(crate) struct CreateUpdatePolicyRequest {
     pub enabled: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct DeleteUpdatePolicyRequest {
+    pub confirmed: bool,
+}
+
 fn default_true() -> bool {
     true
+}
+
+pub(crate) const STANDARD_UPDATE_POLICY_ID: &str = "lxcup-standard-all-packages";
+
+pub(crate) fn default_update_policy(mut target_ids: Vec<TargetId>) -> UpdatePolicy {
+    target_ids.sort_by_key(|target_id| target_id.as_uuid());
+    target_ids.dedup();
+    UpdatePolicy {
+        id: STANDARD_UPDATE_POLICY_ID.to_owned(),
+        allowed_targets: target_ids,
+        allowed_packages: Vec::new(),
+        maintenance_start_minute: 0,
+        maintenance_end_minute: 23 * 60 + 59,
+        timezone: "UTC".to_owned(),
+        maximum_risk: UpdateRisk::High,
+        enabled: true,
+    }
 }
 
 pub(super) async fn list_update_policies(
     State(state): State<ApiState>,
 ) -> Result<Json<ApiEnvelope<Vec<UpdatePolicy>>>, ApiError> {
+    // Reconcile defaults here too, so an earlier startup/database hiccup does
+    // not leave existing resources without their standard policy indefinitely.
+    state.ensure_default_update_policies().await?;
     let policies = if let Some(repositories) = state.repositories.as_ref() {
         repositories
             .update_policies
@@ -45,6 +70,12 @@ pub(super) async fn create_update_policy(
     JsonBody(request): JsonBody<CreateUpdatePolicyRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ApiEnvelope<UpdatePolicy>>), ApiError> {
     require_permission(actor_role, Permission::Configure)?;
+    if request.id == STANDARD_UPDATE_POLICY_ID {
+        return Err(ApiError::bad_request(
+            "reserved_policy_id",
+            "this policy id is reserved for the system default",
+        ));
+    }
     if request.id.trim().is_empty() || request.id.len() > 128 {
         return Err(ApiError::bad_request(
             "invalid_policy",
@@ -130,6 +161,90 @@ pub(super) async fn create_update_policy(
     Ok((axum::http::StatusCode::CREATED, Json(envelope(policy))))
 }
 
+pub(super) async fn delete_update_policy(
+    State(state): State<ApiState>,
+    axum::Extension(actor_role): axum::Extension<ActorRole>,
+    Path(policy_id): Path<String>,
+    JsonBody(request): JsonBody<DeleteUpdatePolicyRequest>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    require_permission(actor_role, Permission::Destructive)?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "confirmation_required",
+            "deleting an update policy requires explicit confirmation",
+        ));
+    }
+    if policy_id == STANDARD_UPDATE_POLICY_ID {
+        return Err(ApiError::bad_request(
+            "system_policy_protected",
+            "the system-wide standard update policy cannot be deleted",
+        ));
+    }
+
+    let schedules = if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .schedules
+            .list()
+            .await
+            .map_err(|_| ApiError::storage())?
+    } else {
+        state.store.read().await.schedules.clone()
+    };
+    if schedules.iter().any(|schedule| {
+        schedule.enabled && schedule.policy_id.as_deref() == Some(policy_id.as_str())
+    }) {
+        return Err(ApiError::conflict(
+            "policy_in_use",
+            "disable recurring schedules that reference this policy before deleting it",
+        ));
+    }
+
+    let deleted = if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .update_policies
+            .delete(&policy_id)
+            .await
+            .map_err(|_| ApiError::storage())?
+    } else {
+        let mut store = state.store.write().await;
+        let previous_count = store.update_policies.len();
+        store
+            .update_policies
+            .retain(|policy| policy.id != policy_id);
+        previous_count != store.update_policies.len()
+    };
+    if !deleted {
+        return Err(ApiError::not_found("update policy not found"));
+    }
+
+    state
+        .store
+        .write()
+        .await
+        .update_policies
+        .retain(|policy| policy.id != policy_id);
+    if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .audit_events
+            .append(&lxcup_persistence::AuditEvent {
+                id: uuid::Uuid::new_v4(),
+                node_id: None,
+                container_id: None,
+                plan_id: None,
+                execution_id: None,
+                event_type: "update_policy.deleted".to_owned(),
+                details: serde_json::json!({
+                    "policy_id": policy_id,
+                    "role": format!("{actor_role:?}").to_lowercase(),
+                }),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,12 +280,117 @@ mod tests {
         (state, target_id)
     }
 
+    #[test]
+    fn default_policy_allows_all_packages_and_the_full_utc_day() {
+        let target_id = TargetId::new();
+        let policy = default_update_policy(vec![target_id]);
+
+        assert_eq!(policy.allowed_targets, vec![target_id]);
+        assert!(policy.allowed_packages.is_empty());
+        assert_eq!(policy.maintenance_start_minute, 0);
+        assert_eq!(policy.maintenance_end_minute, 23 * 60 + 59);
+        assert_eq!(policy.timezone, "UTC");
+        assert_eq!(policy.maximum_risk, UpdateRisk::High);
+        assert!(policy.enabled);
+    }
+
+    #[tokio::test]
+    async fn default_policy_backfill_is_idempotent_and_preserves_existing_policy() {
+        let (state, target_id) = state_with_target().await;
+        let mut existing = default_update_policy(vec![target_id]);
+        existing.maximum_risk = UpdateRisk::Low;
+        state
+            .store
+            .write()
+            .await
+            .update_policies
+            .push(existing.clone());
+
+        assert_eq!(state.ensure_default_update_policies().await.unwrap(), 0);
+        let policies = state.store.read().await.update_policies.clone();
+        assert_eq!(policies, vec![existing]);
+    }
+
+    #[tokio::test]
+    async fn default_policy_backfill_creates_one_policy_for_each_missing_target() {
+        let (state, first_id) = state_with_target().await;
+        let second = lxcup_core::Target::new(
+            "second-policy-target",
+            TargetKind::LinuxServer,
+            "192.0.2.45",
+            TargetTransport::Ssh,
+            lxcup_core::SecretId::new(),
+            lxcup_core::SecretId::new(),
+        )
+        .unwrap();
+        let second_id = second.id;
+        state.store.write().await.targets.push(second);
+
+        assert_eq!(state.ensure_default_update_policies().await.unwrap(), 1);
+        assert_eq!(state.ensure_default_update_policies().await.unwrap(), 0);
+        let policies = state.store.read().await.update_policies.clone();
+        assert_eq!(policies.len(), 1);
+        let mut expected_target_ids = vec![first_id, second_id];
+        expected_target_ids.sort_by_key(|target_id| target_id.as_uuid());
+        assert_eq!(policies[0].allowed_targets, expected_target_ids);
+    }
+
+    #[tokio::test]
+    async fn onboarding_extends_the_shared_policy_without_creating_another() {
+        let (state, first_id) = state_with_target().await;
+        assert_eq!(state.ensure_default_update_policies().await.unwrap(), 1);
+
+        let second = lxcup_core::Target::new(
+            "newly-onboarded-target",
+            TargetKind::LinuxServer,
+            "192.0.2.46",
+            TargetTransport::Ssh,
+            lxcup_core::SecretId::new(),
+            lxcup_core::SecretId::new(),
+        )
+        .unwrap();
+        let second_id = second.id;
+        state.store.write().await.targets.push(second);
+
+        assert_eq!(state.ensure_default_update_policies().await.unwrap(), 1);
+        let policies = state.store.read().await.update_policies.clone();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].id, STANDARD_UPDATE_POLICY_ID);
+        assert!(policies[0].allowed_targets.contains(&first_id));
+        assert!(policies[0].allowed_targets.contains(&second_id));
+    }
+
+    #[tokio::test]
+    async fn listing_policies_backfills_defaults_for_existing_targets() {
+        let (state, target_id) = state_with_target().await;
+
+        let listed = list_update_policies(State(state.clone())).await.unwrap();
+
+        assert_eq!(listed.0.data, vec![default_update_policy(vec![target_id])]);
+        assert_eq!(state.store.read().await.update_policies.len(), 1);
+    }
+
     async fn create(
         state: ApiState,
         role: ActorRole,
         request: CreateUpdatePolicyRequest,
     ) -> Result<(StatusCode, Json<ApiEnvelope<UpdatePolicy>>), ApiError> {
         create_update_policy(State(state), Extension(role), JsonBody(request)).await
+    }
+
+    async fn delete(
+        state: ApiState,
+        role: ActorRole,
+        policy_id: &str,
+        confirmed: bool,
+    ) -> Result<StatusCode, ApiError> {
+        delete_update_policy(
+            State(state),
+            Extension(role),
+            Path(policy_id.to_owned()),
+            JsonBody(DeleteUpdatePolicyRequest { confirmed }),
+        )
+        .await
     }
 
     #[test]
@@ -194,7 +414,8 @@ mod tests {
         assert!(created.0.data.enabled);
 
         let listed = list_update_policies(State(state)).await.unwrap();
-        assert_eq!(listed.0.data, vec![created.0.data.clone()]);
+        assert!(listed.0.data.contains(&created.0.data));
+        assert_eq!(listed.0.data.len(), 2);
     }
 
     #[tokio::test]
@@ -302,5 +523,101 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(duplicate.code, "policy_exists");
+    }
+
+    #[tokio::test]
+    async fn create_policy_rejects_the_reserved_standard_policy_id() {
+        let (state, target_id) = state_with_target().await;
+        let mut request = request(target_id);
+        request.id = STANDARD_UPDATE_POLICY_ID.to_owned();
+
+        let error = create(state, ActorRole::Admin, request).await.unwrap_err();
+
+        assert_eq!(error.code, "reserved_policy_id");
+    }
+
+    #[tokio::test]
+    async fn delete_policy_requires_destructive_permission_and_confirmation() {
+        let (state, target_id) = state_with_target().await;
+        let _created = create(state.clone(), ActorRole::Admin, request(target_id))
+            .await
+            .unwrap();
+
+        let denied = delete(state.clone(), ActorRole::Operator, "nightly-patches", true)
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, "permission_denied");
+
+        let unconfirmed = delete(state.clone(), ActorRole::Admin, "nightly-patches", false)
+            .await
+            .unwrap_err();
+        assert_eq!(unconfirmed.code, "confirmation_required");
+        assert_eq!(state.store.read().await.update_policies.len(), 1);
+
+        assert_eq!(
+            delete(state.clone(), ActorRole::Admin, "nightly-patches", true)
+                .await
+                .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(state.store.read().await.update_policies.is_empty());
+        assert_eq!(
+            delete(state, ActorRole::Admin, "nightly-patches", true)
+                .await
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_policy_protects_the_system_wide_standard_policy() {
+        let (state, _) = state_with_target().await;
+        state.ensure_default_update_policies().await.unwrap();
+
+        let error = delete(
+            state.clone(),
+            ActorRole::Admin,
+            STANDARD_UPDATE_POLICY_ID,
+            true,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code, "system_policy_protected");
+        assert_eq!(state.store.read().await.update_policies.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_policy_rejects_policies_used_by_an_enabled_schedule() {
+        let (state, target_id) = state_with_target().await;
+        let _created = create(state.clone(), ActorRole::Admin, request(target_id))
+            .await
+            .unwrap();
+        state
+            .store
+            .write()
+            .await
+            .schedules
+            .push(lxcup_core::JobSchedule {
+                id: "nightly-update".to_owned(),
+                operation: "update_packages".to_owned(),
+                timezone: "UTC".to_owned(),
+                target_ids: vec![target_id],
+                frequency: lxcup_core::ScheduleFrequency::EveryMinutes(60),
+                enabled: true,
+                threshold: None,
+                policy_id: Some("nightly-patches".to_owned()),
+                last_run_at: None,
+                next_run_at: chrono::Utc::now(),
+                last_error: None,
+            });
+
+        let error = delete(state.clone(), ActorRole::Admin, "nightly-patches", true)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "policy_in_use");
+        assert_eq!(state.store.read().await.update_policies.len(), 1);
     }
 }

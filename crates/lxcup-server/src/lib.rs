@@ -17,7 +17,7 @@ use axum::{
         IntoResponse,
         sse::{Event, Sse},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use lxcup_agent::{
     AgentClient, AgentClientConfig, AgentHealth, AgentHeartbeat, AgentMetrics, DockerContainerInfo,
@@ -53,10 +53,17 @@ mod package_inventory;
 pub(crate) use package_inventory::get_package_inventory;
 mod telemetry;
 pub(crate) use telemetry::get_target_telemetry;
+mod telemetry_alerts;
+pub(crate) use telemetry_alerts::list_telemetry_alerts;
+mod target_docker;
+pub(crate) use target_docker::discover_target_docker;
 mod schedules;
 pub(crate) use schedules::{create_schedule, list_schedules, set_schedule_enabled};
 mod policies;
-pub(crate) use policies::{create_update_policy, list_update_policies};
+pub(crate) use policies::{
+    STANDARD_UPDATE_POLICY_ID, create_update_policy, default_update_policy, delete_update_policy,
+    list_update_policies,
+};
 mod inventory;
 pub use inventory::AuthConfig;
 pub(crate) use inventory::{
@@ -171,7 +178,114 @@ impl ApiState {
         };
         let restored = policies.len();
         self.store.write().await.update_policies = policies;
-        restored
+        match self.ensure_default_update_policies().await {
+            Ok(created_or_extended) => restored + created_or_extended,
+            Err(error) => {
+                tracing::error!(error = ?error, "could not reconcile shared standard update policy");
+                restored
+            }
+        }
+    }
+
+    /// Creates or extends the shared standard package policy to cover all
+    /// registered resources. Operator-defined policy settings are preserved.
+    pub async fn ensure_default_update_policies(&self) -> Result<usize, ApiError> {
+        let mut target_ids = self
+            .store
+            .read()
+            .await
+            .targets
+            .iter()
+            .map(|target| target.id)
+            .collect::<Vec<_>>();
+        if target_ids.is_empty() {
+            return Ok(0);
+        }
+        target_ids.sort_by_key(|target_id| target_id.as_uuid());
+        target_ids.dedup();
+
+        let existing = self
+            .store
+            .read()
+            .await
+            .update_policies
+            .iter()
+            .find(|policy| policy.id == STANDARD_UPDATE_POLICY_ID)
+            .cloned();
+        let mut policy = existing
+            .clone()
+            .unwrap_or_else(|| default_update_policy(target_ids.clone()));
+        let before_targets = policy.allowed_targets.len();
+        policy.allowed_targets.extend(target_ids);
+        policy
+            .allowed_targets
+            .sort_by_key(|target_id| target_id.as_uuid());
+        policy.allowed_targets.dedup();
+        let changed = existing.is_none() || policy.allowed_targets.len() != before_targets;
+        if !changed {
+            return Ok(0);
+        }
+
+        if let Some(repositories) = self.repositories.as_ref() {
+            let saved = if existing.is_some() {
+                repositories
+                    .update_policies
+                    .save(&policy)
+                    .await
+                    .map_err(|_| ApiError::storage())
+            } else {
+                match repositories.update_policies.save_if_absent(&policy).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => {
+                        let persisted = repositories
+                            .update_policies
+                            .list()
+                            .await
+                            .map_err(|_| ApiError::storage())?;
+                        let Some(mut current) = persisted
+                            .into_iter()
+                            .find(|item| item.id == STANDARD_UPDATE_POLICY_ID)
+                        else {
+                            return Ok(0);
+                        };
+                        let old_target_count = current.allowed_targets.len();
+                        current.allowed_targets.extend(policy.allowed_targets);
+                        current
+                            .allowed_targets
+                            .sort_by_key(|target_id| target_id.as_uuid());
+                        current.allowed_targets.dedup();
+                        if current.allowed_targets.len() == old_target_count {
+                            policy = current;
+                            Ok(())
+                        } else {
+                            policy = current;
+                            repositories
+                                .update_policies
+                                .save(&policy)
+                                .await
+                                .map_err(|_| ApiError::storage())
+                        }
+                    }
+                    Err(_) => Err(ApiError::storage()),
+                }
+            };
+            if let Err(error) = saved {
+                tracing::error!(error = ?error, "could not persist shared standard update policy");
+                return Err(error);
+            }
+        }
+
+        let mut store = self.store.write().await;
+        if let Some(existing) = store
+            .update_policies
+            .iter_mut()
+            .find(|existing| existing.id == STANDARD_UPDATE_POLICY_ID)
+        {
+            *existing = policy;
+        } else {
+            store.update_policies.push(policy);
+        }
+        Ok(1)
     }
 
     /// Claims due schedules and turns each target run into the same validated
@@ -407,6 +521,11 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/targets/{target_id}/telemetry",
             get(get_target_telemetry),
         )
+        .route("/api/v1/telemetry-alerts", get(list_telemetry_alerts))
+        .route(
+            "/api/v1/targets/{target_id}/docker/discovery",
+            post(discover_target_docker),
+        )
         .route("/api/v1/targets/{target_id}", get(get_target))
         .route(
             "/api/v1/schedules",
@@ -419,6 +538,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/v1/update-policies",
             get(list_update_policies).post(create_update_policy),
+        )
+        .route(
+            "/api/v1/update-policies/{policy_id}",
+            delete(delete_update_policy),
         )
         .route("/api/v1/agents/heartbeat", post(receive_agent_heartbeat))
         .route("/api/v1/secrets", get(list_secrets).post(create_secret))
@@ -573,6 +696,7 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/health/ready": {"get": {}},
     "/metrics": {"get": {}},
     "/api/v1/enrollments": {"post": {"responses": {"202": {"description": "Enrollment accepted"}}}},
+    "/api/v1/telemetry-alerts": {"get": {"responses": {"200": {"description": "Active telemetry threshold and freshness alerts"}}}},
     "/api/v1/enrollments/{enrollment_id}": {"get": {"responses": {"200": {"description": "Enrollment status"}}}},
     "/api/v1/ansible/jobs": {"post": {"responses": {"202": {"description": "Ansible job accepted"}}}},
     "/api/v1/ansible/jobs/{job_id}": {"get": {"responses": {"200": {"description": "Ansible job status"}}}},
@@ -601,6 +725,8 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/api/v1/containers/{container_id}/docker/discover": {"post": {"responses": {"200": {"description": "Discover Docker workloads"}}}},
     "/api/v1/schedules": {"get": {}, "post": {}},
     "/api/v1/schedules/{schedule_id}": {"patch": {"description": "Enable or pause a recurring schedule"}},
+    "/api/v1/update-policies": {"get": {}, "post": {}},
+    "/api/v1/update-policies/{policy_id}": {"delete": {"description": "Delete a confirmed non-system update policy"}},
     "/api/v1/events": {"get": {"description": "Typed task, log and status SSE"}}
   }
 }"#;

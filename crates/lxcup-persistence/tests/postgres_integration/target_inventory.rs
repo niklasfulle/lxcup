@@ -41,6 +41,28 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
             .unwrap()
             .contains(&persisted_policy)
     );
+    assert!(
+        repositories
+            .update_policies
+            .delete(&persisted_policy.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repositories
+            .update_policies
+            .delete(&persisted_policy.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repositories
+            .update_policies
+            .list()
+            .await
+            .unwrap()
+            .contains(&persisted_policy)
+    );
     let now = postgres_now();
     let suffix = Uuid::new_v4().simple().to_string();
     let container_id = ContainerId::new((Uuid::new_v4().as_u128() as u64 % 900_000_000) + 10_000);
@@ -250,7 +272,7 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
             agent_id: "integration-agent".to_owned(),
             platform: AgentPlatform::Linux,
             hostname: "integration-host".to_owned(),
-            version: "0.2.0".to_owned(),
+            version: "0.3.1".to_owned(),
             protocol_version: "v1".to_owned(),
         },
         metrics: AgentMetrics {
@@ -273,7 +295,7 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
                     process_count: Some(4),
                 },
                 SystemTelemetrySample {
-                    collected_at: telemetry_now - chrono::Duration::seconds(31),
+                    collected_at: telemetry_now - chrono::Duration::seconds(61),
                     cpu_basis_points: Some(9000),
                     memory_basis_points: Some(9000),
                     storage_basis_points: Some(9000),
@@ -286,14 +308,54 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
             partial: false,
         },
     };
+    let historical_sample = SystemTelemetrySample {
+        collected_at: telemetry_now - chrono::Duration::minutes(9),
+        cpu_basis_points: Some(9000),
+        memory_basis_points: Some(9000),
+        storage_basis_points: Some(9000),
+        load_1_milli: Some(900),
+        network_rx_bytes: None,
+        network_tx_bytes: None,
+        process_count: Some(9),
+    };
+    let expired_sample = SystemTelemetrySample {
+        collected_at: telemetry_now - chrono::Duration::minutes(11),
+        ..historical_sample.clone()
+    };
+    for sample in [&historical_sample, &expired_sample] {
+        sqlx::query("INSERT INTO target_telemetry_samples (target_id, collected_at, payload) VALUES ($1, $2, $3)")
+            .bind(target.id.as_uuid())
+            .bind(sample.collected_at)
+            .bind(serde_json::to_value(sample).unwrap())
+            .execute(database.pool())
+            .await
+            .unwrap();
+    }
     repositories
         .telemetry
         .append_heartbeat(&heartbeat)
         .await
         .unwrap();
+    let mut overlapping_heartbeat = heartbeat.clone();
+    overlapping_heartbeat.telemetry.samples = vec![SystemTelemetrySample {
+        collected_at: telemetry_now + chrono::Duration::milliseconds(500),
+        cpu_basis_points: Some(5000),
+        memory_basis_points: Some(6000),
+        storage_basis_points: Some(7000),
+        load_1_milli: Some(500),
+        network_rx_bytes: None,
+        network_tx_bytes: None,
+        process_count: Some(6),
+    }];
+    repositories
+        .telemetry
+        .append_heartbeat(&overlapping_heartbeat)
+        .await
+        .unwrap();
     let samples = repositories.telemetry.list_recent(target.id).await.unwrap();
-    assert_eq!(samples.len(), 1);
-    assert_eq!(samples[0].cpu_basis_points, Some(1000));
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0].cpu_basis_points, Some(9000));
+    assert_eq!(samples[1].cpu_basis_points, Some(1000));
     assert!(
         repositories
             .targets
@@ -355,6 +417,7 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
         packages: vec![InstalledPackage {
             name: PackageName::new("curl").unwrap(),
             version: PackageVersion::new("8.5.0-2").unwrap(),
+            candidate_version: Some(PackageVersion::new("8.6.0-1").unwrap()),
             architecture: Some("amd64".to_owned()),
             source: Some("apt".to_owned()),
         }],

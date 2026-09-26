@@ -90,7 +90,7 @@ fn schedule_thresholds_use_latest_samples_and_fail_closed_without_telemetry() {
             agent_id: "threshold-agent".to_owned(),
             platform: lxcup_agent::AgentPlatform::Linux,
             hostname: "threshold-host".to_owned(),
-            version: "0.2.0".to_owned(),
+            version: "0.3.1".to_owned(),
             protocol_version: "v1".to_owned(),
         },
         metrics: lxcup_agent::AgentMetrics {

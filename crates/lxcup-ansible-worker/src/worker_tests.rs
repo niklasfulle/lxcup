@@ -396,18 +396,63 @@ fn released_agent_020_manifest_matches_binary_checksum() {
 }
 
 #[test]
+fn released_agent_030_manifest_matches_binary_checksum() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/agent/0.3.1");
+    let manifest: Manifest = serde_json::from_slice(
+        &fs::read(root.join("manifest.json")).expect("0.3.1 manifest must exist"),
+    )
+    .expect("0.3.1 manifest must be valid JSON");
+    assert_eq!(manifest.version, "0.3.1");
+    let artifact = manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.platform == "linux-amd64")
+        .expect("linux artifact must be registered");
+    let digest = Sha256::digest(fs::read(root.join(&artifact.file)).expect("binary exists"));
+    assert_eq!(format!("{digest:x}"), artifact.sha256);
+}
+
+#[test]
 fn package_inventory_normalization_preserves_versions_and_metadata() {
-    let packages = normalize_package_inventory(serde_json::json!({
-        "curl": [{"version": "8.5.0-2", "arch": "amd64", "source": "apt"}],
-        "zlib1g": [{"version": "1:1.2.13", "architecture": "amd64"}]
-    }))
+    let packages = normalize_package_inventory(
+        serde_json::json!({
+            "curl": [{"version": "8.5.0-2", "arch": "amd64", "source": "apt"}],
+            "zlib1g": [{"version": "1:1.2.13", "architecture": "amd64"}]
+        }),
+        &["curl/stable 8.6.0-1 amd64 [upgradable from: 8.5.0-2]".to_owned()],
+    )
     .unwrap();
 
     assert_eq!(packages.len(), 2);
     assert_eq!(packages[0].name.as_str(), "curl");
     assert_eq!(packages[0].architecture.as_deref(), Some("amd64"));
+    assert_eq!(
+        packages[0]
+            .candidate_version
+            .as_ref()
+            .map(|version| version.as_str()),
+        Some("8.6.0-1")
+    );
     assert_eq!(packages[1].version.as_str(), "1:1.2.13");
-    assert!(normalize_package_inventory(serde_json::json!([])).is_err());
+    assert_eq!(
+        packages[1]
+            .candidate_version
+            .as_ref()
+            .map(|version| version.as_str()),
+        Some("1:1.2.13")
+    );
+    assert!(normalize_package_inventory(serde_json::json!([]), &[]).is_err());
+}
+
+#[test]
+fn apt_upgrade_parser_ignores_headers_and_non_upgrade_rows() {
+    assert_eq!(parse_apt_upgrade("Listing..."), None);
+    assert_eq!(parse_apt_upgrade("WARNING: cache is old"), None);
+    assert_eq!(
+        parse_apt_upgrade("curl/stable 8.6.0-1 amd64 [upgradable from: 8.5.0-2]"),
+        Some(("curl".to_owned(), "8.6.0-1".to_owned()))
+    );
+    assert_eq!(parse_apt_upgrade("curl/stable 8.6.0-1 amd64"), None);
 }
 
 #[test]
@@ -578,12 +623,19 @@ fn package_inventory_file_reader_handles_missing_invalid_and_valid_files() {
     );
     fs::write(
         root.join("package-inventory.json"),
-        r#"{"packages":{"curl":[{"version":"8.5.0","arch":"amd64"}]}}"#,
+        r#"{"packages":{"curl":[{"version":"8.5.0","arch":"amd64"}]},"upgradable":["curl/stable 8.6.0 amd64 [upgradable from: 8.5.0]"]}"#,
     )
     .unwrap();
     let snapshot = read_package_inventory(&root, target_id).unwrap();
     assert_eq!(snapshot.target_id, target_id);
     assert_eq!(snapshot.packages.len(), 1);
+    assert_eq!(
+        snapshot.packages[0]
+            .candidate_version
+            .as_ref()
+            .map(|version| version.as_str()),
+        Some("8.6.0")
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -594,14 +646,14 @@ async fn artifact_download_checks_version_platform_and_sha256() {
     let binary = b"verified test agent".to_vec();
     let digest = format!("{:x}", Sha256::digest(&binary));
     let base_manifest = serde_json::json!({
-        "version": "0.2.0",
+        "version": "0.3.1",
         "artifacts": [{"platform": "linux-amd64", "file": "agent", "sha256": digest}]
     });
 
     let (base, server) = artifact_server(base_manifest.clone(), binary.clone(), 2).await;
     let mut runtime = runtime_with_secrets(&root).0;
     runtime.artifacts = base;
-    let path = artifact(&runtime, "0.2.0", &root).await.unwrap();
+    let path = artifact(&runtime, "0.3.1", &root).await.unwrap();
     assert_eq!(fs::read(path).unwrap(), binary);
     server.await.unwrap();
 
@@ -610,7 +662,7 @@ async fn artifact_download_checks_version_platform_and_sha256() {
     let (base, server) = artifact_server(wrong_version, Vec::new(), 1).await;
     runtime.artifacts = base;
     assert_eq!(
-        artifact(&runtime, "0.2.0", &root).await,
+        artifact(&runtime, "0.3.1", &root).await,
         Err(JobFailureCode::PlaybookFailed)
     );
     server.await.unwrap();
@@ -620,7 +672,7 @@ async fn artifact_download_checks_version_platform_and_sha256() {
     let (base, server) = artifact_server(wrong_hash, binary, 2).await;
     runtime.artifacts = base;
     assert_eq!(
-        artifact(&runtime, "0.2.0", &root).await,
+        artifact(&runtime, "0.3.1", &root).await,
         Err(JobFailureCode::PlaybookFailed)
     );
     server.await.unwrap();

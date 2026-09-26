@@ -1,6 +1,6 @@
 use super::{Database, RepositoryError};
 use chrono::Utc;
-use lxcup_agent::{AgentHeartbeat, SystemTelemetrySample};
+use lxcup_agent::{AgentHeartbeat, SystemTelemetrySample, TelemetryBuffer};
 use lxcup_core::TargetId;
 use sqlx::Row;
 
@@ -21,8 +21,19 @@ impl super::TelemetryRepository {
             // Accept only the bounded window emitted by an agent. Future
             // timestamps and stale replays must never pollute the time series.
             if sample.collected_at > now + chrono::Duration::seconds(5)
-                || sample.collected_at < now - chrono::Duration::seconds(30)
+                || sample.collected_at
+                    < now - chrono::Duration::seconds(TelemetryBuffer::WINDOW_SECONDS)
             {
+                continue;
+            }
+            let overlap_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM target_telemetry_samples WHERE target_id=$1 AND collected_at BETWEEN $2 - INTERVAL '1 second' AND $2 + INTERVAL '1 second')",
+            )
+            .bind(heartbeat.target_id)
+            .bind(sample.collected_at)
+            .fetch_one(&mut *tx)
+            .await?;
+            if overlap_exists {
                 continue;
             }
             sqlx::query("INSERT INTO target_telemetry_samples (target_id, collected_at, payload) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
@@ -32,7 +43,7 @@ impl super::TelemetryRepository {
             "DELETE FROM target_telemetry_samples WHERE target_id=$1 AND collected_at < $2",
         )
         .bind(heartbeat.target_id)
-        .bind(now - chrono::Duration::seconds(30))
+        .bind(now - chrono::Duration::seconds(lxcup_core::telemetry::HISTORY_WINDOW_SECONDS))
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -44,7 +55,7 @@ impl super::TelemetryRepository {
         target_id: TargetId,
     ) -> Result<Vec<SystemTelemetrySample>, RepositoryError> {
         let rows = sqlx::query("SELECT payload FROM target_telemetry_samples WHERE target_id=$1 AND collected_at >= $2 ORDER BY collected_at")
-            .bind(target_id.as_uuid()).bind(Utc::now() - chrono::Duration::seconds(30)).fetch_all(&self.pool).await?;
+            .bind(target_id.as_uuid()).bind(Utc::now() - chrono::Duration::seconds(lxcup_core::telemetry::HISTORY_WINDOW_SECONDS)).fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|row| {
                 serde_json::from_value(row.try_get("payload")?).map_err(|_| {

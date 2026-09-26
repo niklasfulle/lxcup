@@ -326,14 +326,31 @@ async fn run(
                     sent_at: chrono::Utc::now(),
                     telemetry: reporter_state.telemetry_window().await,
                 };
-                if let Err(error) = reporter
+                let sample_count = heartbeat.telemetry.samples.len();
+                match reporter
                     .post(&endpoint)
                     .bearer_auth(&reporter_token)
                     .json(&heartbeat)
                     .send()
                     .await
                 {
-                    tracing::warn!(%error, "outbound agent heartbeat failed");
+                    Ok(response) if response.status().is_success() => {}
+                    Ok(response) => {
+                        tracing::warn!(
+                            target: "lxcup_agent::telemetry",
+                            samples = sample_count,
+                            status = %response.status(),
+                            "agent heartbeat rejected by controller"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "lxcup_agent::telemetry",
+                            samples = sample_count,
+                            %error,
+                            "outbound agent heartbeat failed"
+                        );
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }

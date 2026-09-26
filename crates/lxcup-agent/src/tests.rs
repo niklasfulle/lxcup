@@ -22,6 +22,29 @@ fn config_redacts_tokens_and_requires_safe_urls() {
 }
 
 #[test]
+fn private_network_http_config_accepts_only_literal_private_addresses() {
+    assert!(
+        AgentClientConfig::new_for_private_network_http("http://192.168.1.20:8090", "token")
+            .is_ok()
+    );
+    assert!(
+        AgentClientConfig::new_for_private_network_http("http://[fd00::20]:8090", "token").is_ok()
+    );
+    assert!(
+        AgentClientConfig::new_for_private_network_http("http://agent.local:8090", "token")
+            .is_err()
+    );
+    assert!(
+        AgentClientConfig::new_for_private_network_http("http://203.0.113.20:8090", "token")
+            .is_err()
+    );
+    assert!(
+        AgentClientConfig::new_for_private_network_http("https://192.168.1.20:8090", "token")
+            .is_err()
+    );
+}
+
+#[test]
 fn package_validation_blocks_option_injection() {
     assert!(safe_package("openssl"));
     assert!(!safe_package("--download-only"));
@@ -60,11 +83,11 @@ fn package_inventory_parsers_normalize_linux_and_windows_fixtures() {
 }
 
 #[test]
-fn telemetry_buffer_keeps_a_bounded_recent_partial_window() {
+fn telemetry_buffer_keeps_a_bounded_overlapping_sixty_second_window() {
     let mut buffer = TelemetryBuffer::default();
     let now = Utc::now();
     buffer.record(SystemTelemetrySample {
-        collected_at: now - chrono::Duration::seconds(31),
+        collected_at: now - chrono::Duration::seconds(61),
         cpu_basis_points: None,
         memory_basis_points: None,
         storage_basis_points: None,
@@ -75,7 +98,7 @@ fn telemetry_buffer_keeps_a_bounded_recent_partial_window() {
     });
     for offset in 0..40 {
         buffer.record(SystemTelemetrySample {
-            collected_at: now - chrono::Duration::seconds(29)
+            collected_at: now - chrono::Duration::seconds(59)
                 + chrono::Duration::milliseconds(offset * 500),
             cpu_basis_points: Some(5000),
             memory_basis_points: Some(4000),
@@ -89,12 +112,10 @@ fn telemetry_buffer_keeps_a_bounded_recent_partial_window() {
     let window = buffer.window();
     assert_eq!(window.samples.len(), TelemetryBuffer::MAX_SAMPLES);
     assert!(window.partial);
-    assert!(
-        window
-            .samples
-            .iter()
-            .all(|sample| { sample.collected_at >= Utc::now() - chrono::Duration::seconds(30) })
-    );
+    assert!(window.samples.iter().all(|sample| {
+        sample.collected_at
+            >= Utc::now() - chrono::Duration::seconds(TelemetryBuffer::WINDOW_SECONDS)
+    }));
     assert!(
         window
             .samples
@@ -117,7 +138,7 @@ async fn authenticated_health_command_is_idempotent_and_updates_metrics() {
                 AgentPlatform::Linux
             },
             hostname: "test-host".to_owned(),
-            version: "0.2.0".to_owned(),
+            version: "0.3.1".to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
         },
         "agent-token",
@@ -207,7 +228,7 @@ async fn inventory_routes_enforce_auth_and_report_platform_support() {
             agent_id: "linux-agent".to_owned(),
             platform: AgentPlatform::Linux,
             hostname: "linux-host".to_owned(),
-            version: "0.2.0".to_owned(),
+            version: "0.3.1".to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
         },
         "inventory-token",
@@ -252,7 +273,7 @@ async fn inventory_routes_enforce_auth_and_report_platform_support() {
             agent_id: "windows-agent".to_owned(),
             platform: AgentPlatform::Windows,
             hostname: "windows-host".to_owned(),
-            version: "0.2.0".to_owned(),
+            version: "0.3.1".to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
         },
         "inventory-token",
@@ -304,7 +325,7 @@ async fn remote_client_retries_server_errors_and_classifies_terminal_failures() 
                         agent_id: "remote-agent".to_owned(),
                         platform: AgentPlatform::Linux,
                         hostname: "remote-host".to_owned(),
-                        version: "0.2.0".to_owned(),
+                        version: "0.3.1".to_owned(),
                         protocol_version: PROTOCOL_VERSION.to_owned(),
                     },
                     metrics: AgentMetrics {
@@ -413,7 +434,7 @@ async fn agent_state_exposes_metric_and_recent_telemetry_snapshots() {
             agent_id: "telemetry-agent".to_owned(),
             platform: AgentPlatform::Linux,
             hostname: "telemetry-host".to_owned(),
-            version: "0.2.0".to_owned(),
+            version: "0.3.1".to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
         },
         "telemetry-token",
@@ -444,7 +465,7 @@ async fn command_endpoint_rejects_bad_requests_and_evicts_full_idempotency_cache
                 AgentPlatform::Linux
             },
             hostname: "cache-host".to_owned(),
-            version: "0.2.0".to_owned(),
+            version: "0.3.1".to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
         },
         "cache-token",

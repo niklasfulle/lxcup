@@ -134,7 +134,7 @@ async fn agent_registration_exposes_health_and_metrics() {
         agent_id: "test-agent".to_owned(),
         platform: lxcup_agent::AgentPlatform::Linux,
         hostname: "test-lxc".to_owned(),
-        version: "0.2.0".to_owned(),
+        version: "0.3.1".to_owned(),
         protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -268,7 +268,7 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
             agent_id: "heartbeat-agent".to_owned(),
             platform: lxcup_agent::AgentPlatform::Linux,
             hostname: "heartbeat-host".to_owned(),
-            version: "0.2.0".to_owned(),
+            version: "0.3.1".to_owned(),
             protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
         },
         metrics: lxcup_agent::AgentMetrics {
@@ -311,7 +311,7 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
                     process_count: None,
                 },
                 lxcup_agent::SystemTelemetrySample {
-                    collected_at: now - chrono::Duration::seconds(31),
+                    collected_at: now - chrono::Duration::seconds(61),
                     cpu_basis_points: None,
                     memory_basis_points: None,
                     storage_basis_points: None,
@@ -367,6 +367,8 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
         telemetry_json["data"]["samples"].as_array().unwrap().len(),
         2
     );
+    assert_eq!(telemetry_json["data"]["partial"], true);
+    assert_eq!(telemetry_json["data"]["missing_samples"], 0);
 
     let targets = router(state.clone())
         .oneshot(
@@ -382,7 +384,7 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
         .await
         .unwrap();
     let targets_json: serde_json::Value = serde_json::from_slice(&targets_body).unwrap();
-    assert_eq!(targets_json["data"][0]["agent_version"], "0.2.0");
+    assert_eq!(targets_json["data"][0]["agent_version"], "0.3.1");
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), events.recv())
             .await
@@ -425,6 +427,82 @@ async fn package_inventory_endpoint_reports_an_uncollected_target_without_packag
     assert_eq!(json["data"]["status"], "not_collected");
     assert_eq!(json["data"]["packages"], serde_json::json!([]));
     assert!(json["data"]["collected_at"].is_null());
+}
+
+#[tokio::test]
+async fn telemetry_alert_endpoint_returns_sustained_load_with_resource_context() {
+    let mut target = Target::new(
+        "alert-target",
+        TargetKind::Lxc,
+        "192.0.2.44",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    target.mark_managed();
+    let target_id = target.id;
+    let now = chrono::Utc::now();
+    let samples = (0..=61)
+        .map(|index| lxcup_agent::SystemTelemetrySample {
+            collected_at: now - chrono::Duration::seconds(index * 5),
+            cpu_basis_points: Some(9_300),
+            memory_basis_points: Some(2_000),
+            storage_basis_points: Some(4_000),
+            load_1_milli: None,
+            network_rx_bytes: None,
+            network_tx_bytes: None,
+            process_count: None,
+        })
+        .collect();
+    let heartbeat = lxcup_agent::AgentHeartbeat {
+        target_id: target_id.as_uuid(),
+        info: lxcup_agent::AgentInfo {
+            agent_id: "alert-agent".to_owned(),
+            platform: lxcup_agent::AgentPlatform::Linux,
+            hostname: "alert-host".to_owned(),
+            version: "0.3.1".to_owned(),
+            protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
+        },
+        metrics: lxcup_agent::AgentMetrics {
+            collected_at: now,
+            commands_total: 0,
+            commands_failed: 0,
+            last_command_at: None,
+        },
+        sent_at: now,
+        telemetry: lxcup_agent::SystemTelemetryWindow {
+            samples,
+            partial: false,
+        },
+    };
+    let state = ApiState::new();
+    {
+        let mut store = state.store.write().await;
+        store.targets.push(target);
+        store.agent_reports.insert(target_id, heartbeat);
+    }
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/telemetry-alerts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let alert = &json["data"][0];
+    assert_eq!(alert["target_name"], "alert-target");
+    assert_eq!(alert["target_address"], "192.0.2.44");
+    assert_eq!(alert["metric"], "CPU");
+    assert_eq!(alert["severity"], "warning");
+    assert_eq!(alert["value_basis_points"], 9_300);
 }
 
 #[tokio::test]

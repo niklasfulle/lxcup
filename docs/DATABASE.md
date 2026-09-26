@@ -33,7 +33,8 @@ level it stores:
 - **Docker workloads and discovery runs** — discovered workloads and their
   management/discovery state.
 - **Schedules and update policies** — recurring registered work and package
-  update constraints.
+  update constraints. Non-system update policies can be deleted through the
+  repository; job/event history remains independent of the policy row.
 - **Planner/execution and audit records** — scan results, plans, confirmed
   executions, results, and lifecycle/audit events used by the existing planner
   domain.

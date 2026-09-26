@@ -112,6 +112,12 @@ can run its health check and collect package inventory. Target onboarding is
 separate from creating an LXC guest: the guest or server must already exist and
 be reachable.
 
+Linux package inventories include the installed version and, when APT reports
+an available upgrade after refreshing repository metadata, its candidate
+version. Connected LXC targets can also run read-only Docker discovery through
+the agent over HTTP on the private network (TCP port 8090); the controller only
+accepts resolved private-network addresses for this request.
+
 The agent is configured with `LXCUP_AGENT_TOKEN`, `LXCUP_TARGET_ID`, and
 `LXCUP_CONTROLLER_URL`. It reports heartbeats and telemetry to the controller.
 The controller exposes these operational endpoints:

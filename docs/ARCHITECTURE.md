@@ -53,15 +53,20 @@ the frontend does not become a policy authority.
 
 1. An operator registers an existing resource with connection details and
    references to required credential, known-host, and agent-token secrets.
-2. The controller persists the target as pending and enqueues the registered
-   deployment workflow when requested.
-3. The worker claims that job exclusively for its target, resolves only the
+2. The controller persists the target as pending and ensures there is one
+   shared standard update policy covering every registered target: all
+   packages, high maximum risk, and a full-day UTC maintenance window. Existing
+   targets are backfilled at startup and when the policy list is read; new
+   targets extend the shared policy. Its reserved ID makes this idempotent, and
+   operator-defined policy settings are preserved.
+3. The controller enqueues the registered deployment workflow when requested.
+4. The worker claims that job exclusively for its target, resolves only the
    referenced secrets from the read-only encrypted store, validates the
    approved artifact manifest/version/hash, and runs a fixed playbook with a
    temporary inventory.
-4. The installed agent authenticates to the controller and sends a heartbeat.
+5. The installed agent authenticates to the controller and sends a heartbeat.
    A valid heartbeat advances lifecycle state to managed.
-5. The controller can then enqueue health and package-inventory jobs. Their
+6. The controller can then enqueue health and package-inventory jobs. Their
    status and ordered logs appear in workflow history and activity UI.
 
 ### Workflow execution
@@ -84,6 +89,12 @@ signals. Telemetry samples are associated with their target and exposed through
 the target API; current UI depicts a rolling recent window. Docker containers
 are workloads discovered by an agent on a managed host, not standalone
 connections.
+
+The controller derives telemetry alerts from retained samples. Sustained CPU,
+RAM, and storage thresholds ignore short spikes and break across sample gaps;
+a separate freshness alert appears when managed-target telemetry is older than
+two minutes. The frontend polls the alert endpoint and retains observed
+recovery notices and read state in browser storage.
 
 ## State and trust boundaries
 

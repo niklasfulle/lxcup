@@ -7,6 +7,7 @@
       - lxcup_update_packages is defined
       - lxcup_update_packages | length > 0
       - lxcup_update_packages | length <= 100
+      - "'*' not in lxcup_update_packages or lxcup_update_packages == ['*']"
       - lxcup_update_request_hash is defined
       - lxcup_update_request_hash is match('^[a-f0-9]{64}$')
       - lxcup_execution_mode in ['check', 'plan', 'apply', 'reconcile']
@@ -26,10 +27,11 @@
       - item | length > 0
       - item | length <= 100
       - item is match('^[A-Za-z0-9][A-Za-z0-9+._:-]*$')
-      - '/' not in item
+      - "'/' not in item"
       - item not in ['*', 'dist-upgrade', 'full-upgrade']
     fail_msg: Package list contains an unsafe or unsupported package name.
   loop: "{{ lxcup_update_packages }}"
+  when: lxcup_update_packages != ['*']
 
 - name: List held APT packages
   ansible.builtin.command:
@@ -44,10 +46,11 @@
     that: item not in lxcup_held_packages.stdout_lines
     fail_msg: A held package cannot be updated by this playbook.
   loop: "{{ lxcup_update_packages }}"
+  when: lxcup_update_packages != ['*']
 
 - name: Check package plan without changing the target
   ansible.builtin.apt:
-    name: "{{ lxcup_update_packages }}"
+    name: "{{ '*' if lxcup_update_packages == ['*'] else lxcup_update_packages }}"
     state: latest
     update_cache: false
   register: lxcup_update_check
@@ -59,12 +62,17 @@
     manager: auto
   when: lxcup_execution_mode == 'apply'
 
+- name: Select packages to restore if update validation fails
+  ansible.builtin.set_fact:
+    lxcup_update_rollback_packages: "{{ ansible_facts.packages.keys() | list if lxcup_update_packages == ['*'] else lxcup_update_packages }}"
+  when: lxcup_execution_mode == 'apply'
+
 - name: Apply updates and verify agent health, rolling back versions on failure
   when: lxcup_execution_mode == 'apply'
   block:
     - name: Apply only the validated package list
       ansible.builtin.apt:
-        name: "{{ lxcup_update_packages }}"
+        name: "{{ '*' if lxcup_update_packages == ['*'] else lxcup_update_packages }}"
         state: latest
         update_cache: true
         cache_valid_time: 3600
@@ -89,7 +97,7 @@
         state: present
         allow_downgrade: true
         update_cache: false
-      loop: "{{ lxcup_update_packages | select('in', ansible_facts.packages.keys() | list) | list }}"
+      loop: "{{ lxcup_update_rollback_packages | select('in', ansible_facts.packages.keys() | list) | list }}"
       register: lxcup_update_rollback
 
     - name: Fail the update after rollback attempt

@@ -20,6 +20,8 @@ pub mod scan;
 pub mod schedule;
 pub mod secret;
 pub mod target;
+pub mod telemetry;
+pub mod telemetry_alerts;
 pub mod update;
 
 pub use agent::{AgentConnectionState, AgentRegistration};
@@ -64,6 +66,6 @@ mod tests {
 
     #[test]
     fn exposes_package_version() {
-        assert_eq!(VERSION, "0.2.0");
+        assert_eq!(VERSION, "0.3.1");
     }
 }

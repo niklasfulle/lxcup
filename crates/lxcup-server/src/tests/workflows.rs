@@ -250,7 +250,7 @@ async fn onboarding_reconciliation_queues_health_then_inventory_idempotently() {
             lifecycle: ResourceLifecycle::Pending,
             mode: ExecutionMode::Apply,
             parameters: AnsibleParameters::DeployAgent {
-                agent_version: "0.2.0".to_owned(),
+                agent_version: "0.3.1".to_owned(),
             },
             secret_refs: vec![credential_ref, agent_ref],
             idempotency_key: format!("onboarding-deploy-{}", target_id.as_uuid()),

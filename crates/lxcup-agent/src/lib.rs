@@ -110,7 +110,9 @@ pub struct TelemetryBuffer {
 }
 
 impl TelemetryBuffer {
-    pub const WINDOW_SECONDS: i64 = 30;
+    /// Retain twice the heartbeat interval so a later report can repair a
+    /// missed delivery without leaving holes in the controller's timeline.
+    pub const WINDOW_SECONDS: i64 = 60;
     pub const MAX_SAMPLES: usize = 32;
     pub fn record(&mut self, sample: SystemTelemetrySample) {
         self.samples.push_back(sample);
@@ -206,6 +208,7 @@ pub struct AgentClientConfig {
     pub max_retries: u8,
     pub backoff: Duration,
     root_certificate_pem: Option<Vec<u8>>,
+    private_network_http: bool,
 }
 
 impl fmt::Debug for AgentClientConfig {
@@ -217,6 +220,7 @@ impl fmt::Debug for AgentClientConfig {
             .field("timeout", &self.timeout)
             .field("max_retries", &self.max_retries)
             .field("backoff", &self.backoff)
+            .field("private_network_http", &self.private_network_http)
             .finish()
     }
 }
@@ -244,6 +248,50 @@ impl AgentClientConfig {
             max_retries: 2,
             backoff: Duration::from_millis(150),
             root_certificate_pem: None,
+            private_network_http: false,
+        })
+    }
+
+    /// Creates an HTTP client for a literal private-network agent address.
+    /// DNS names must be resolved and pinned by the caller before use.
+    pub fn new_for_private_network_http(
+        base_url: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Result<Self, AgentConfigError> {
+        let base_url = base_url.into();
+        let parsed =
+            reqwest::Url::parse(&base_url).map_err(|_| AgentConfigError::InsecureBaseUrl)?;
+        let private_address = parsed
+            .host_str()
+            .and_then(|host| {
+                host.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .ok()
+            })
+            .is_some_and(is_private_network_address);
+        if parsed.scheme() != "http"
+            || !private_address
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.path() != "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(AgentConfigError::InsecureBaseUrl);
+        }
+        let token = token.into();
+        if token.trim().is_empty() {
+            return Err(AgentConfigError::EmptyToken);
+        }
+        Ok(Self {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            token,
+            timeout: Duration::from_secs(20),
+            max_retries: 2,
+            backoff: Duration::from_millis(150),
+            root_certificate_pem: None,
+            private_network_http: true,
         })
     }
 
@@ -263,9 +311,22 @@ impl AgentClientConfig {
     }
 }
 
+fn is_private_network_address(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(address) => {
+            address.is_private() || address.is_loopback() || address.is_link_local()
+        }
+        std::net::IpAddr::V6(address) => {
+            address.is_loopback()
+                || (address.segments()[0] & 0xfe00) == 0xfc00
+                || (address.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AgentConfigError {
-    #[error("agent URL must use HTTPS outside localhost")]
+    #[error("agent URL must use HTTPS or an explicitly allowed local/private HTTP address")]
     InsecureBaseUrl,
     #[error("agent token must not be empty")]
     EmptyToken,
@@ -289,6 +350,9 @@ impl fmt::Debug for AgentClient {
 impl AgentClient {
     pub fn new(config: AgentClientConfig) -> Result<Self, AgentError> {
         let mut builder = Client::builder().timeout(config.timeout);
+        if config.private_network_http {
+            builder = builder.no_proxy();
+        }
         if let Some(certificate_pem) = config.root_certificate_pem.as_deref() {
             let certificate =
                 reqwest::Certificate::from_pem(certificate_pem).map_err(AgentError::ClientBuild)?;

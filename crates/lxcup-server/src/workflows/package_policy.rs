@@ -92,10 +92,12 @@ fn validate_policy_allows_packages(
 ) -> Result<(), ApiError> {
     let denied_target_or_risk =
         !policy.allowed_targets.contains(&target_id) || policy.maximum_risk < UpdateRisk::High;
-    let denied_package = !policy.allowed_packages.is_empty()
-        && packages
-            .iter()
-            .any(|package| !policy.allowed_packages.contains(package));
+    let requests_all_packages = packages == ["*"];
+    let denied_package = (requests_all_packages && !policy.allowed_packages.is_empty())
+        || (!policy.allowed_packages.is_empty()
+            && packages
+                .iter()
+                .any(|package| !policy.allowed_packages.contains(package)));
     if denied_target_or_risk || denied_package {
         return Err(ApiError::forbidden(
             "update_policy_denied",
@@ -608,5 +610,93 @@ mod package_policy_tests {
             item.operation == AnsibleOperation::CollectPackageInventory
                 && item.idempotency_key == format!("package-update-inventory-{}", job.id.as_uuid())
         }));
+    }
+
+    #[tokio::test]
+    async fn all_packages_plan_requires_a_policy_without_package_restrictions() {
+        let state = ApiState::new();
+        let mut target = Target::new(
+            "all-updates-target",
+            TargetKind::LinuxServer,
+            "192.0.2.10",
+            TargetTransport::Ssh,
+            SecretId::new(),
+            SecretId::new(),
+        )
+        .unwrap();
+        target.mark_managed();
+        let target_id = target.id;
+        let target_secret_ref = target.credential_secret_ref;
+        {
+            let mut store = state.store.write().await;
+            store.targets.push(target.clone());
+            store.update_policies.push(UpdatePolicy {
+                id: "standard".to_owned(),
+                allowed_targets: vec![target_id],
+                allowed_packages: vec![],
+                maintenance_start_minute: 0,
+                maintenance_end_minute: 1439,
+                timezone: "UTC".to_owned(),
+                maximum_risk: UpdateRisk::High,
+                enabled: true,
+            });
+        }
+        let mut request = package_request(ExecutionMode::Plan, None, &["*"]);
+        request.target_id = Some(target_id);
+        request.policy_id = Some("standard".to_owned());
+        request.idempotency_key = "package-plan:standard:all-updates".to_owned();
+        assert!(
+            validate_package_update(&state, &request, ResourceTarget::Target(target_id))
+                .await
+                .is_ok()
+        );
+
+        let JobSubmission::Created(plan) = state
+            .ansible
+            .write()
+            .await
+            .submit(AnsibleJobRequest {
+                operation: AnsibleOperation::UpdatePackages,
+                target: ResourceTarget::Target(target_id),
+                lifecycle: ResourceLifecycle::Managed,
+                mode: ExecutionMode::Plan,
+                parameters: request.parameters.clone(),
+                secret_refs: vec![target_secret_ref],
+                idempotency_key: request.idempotency_key.clone(),
+                confirmed: true,
+                actor_role: ActorRole::Admin,
+            })
+            .unwrap()
+        else {
+            panic!("all-updates plan should be created")
+        };
+        let mut coordinator = state.ansible.write().await;
+        coordinator
+            .transition(plan.id, AnsibleJobStatus::Checking)
+            .unwrap();
+        coordinator
+            .transition(plan.id, AnsibleJobStatus::Planned)
+            .unwrap();
+        coordinator
+            .transition(plan.id, AnsibleJobStatus::Succeeded)
+            .unwrap();
+        drop(coordinator);
+        let mut apply = package_request(ExecutionMode::Apply, Some(plan.id), &["*"]);
+        apply.target_id = Some(target_id);
+        apply.policy_id = Some("standard".to_owned());
+        assert!(
+            validate_package_update(&state, &apply, ResourceTarget::Target(target_id))
+                .await
+                .is_ok()
+        );
+
+        state.store.write().await.update_policies[0].allowed_packages = vec!["curl".to_owned()];
+        assert_eq!(
+            validate_package_update(&state, &request, ResourceTarget::Target(target_id))
+                .await
+                .unwrap_err()
+                .code,
+            "update_policy_denied"
+        );
     }
 }

@@ -60,7 +60,7 @@ impl PackageInventoryRepository {
                 });
             }
         };
-        let rows = sqlx::query("SELECT package_name, installed_version, architecture, source FROM package_inventory_packages WHERE target_id = $1 ORDER BY package_name, installed_version").bind(target_id.as_uuid()).fetch_all(&self.pool).await?;
+        let rows = sqlx::query("SELECT package_name, installed_version, candidate_version, architecture, source FROM package_inventory_packages WHERE target_id = $1 ORDER BY package_name, installed_version").bind(target_id.as_uuid()).fetch_all(&self.pool).await?;
         let packages = rows
             .into_iter()
             .map(|row| {
@@ -73,6 +73,13 @@ impl PackageInventoryRepository {
                     version: PackageVersion::new(row.try_get::<String, _>("installed_version")?)
                         .map_err(|_| RepositoryError::InvalidValue {
                             field: "package version",
+                        })?,
+                    candidate_version: row
+                        .try_get::<Option<String>, _>("candidate_version")?
+                        .map(PackageVersion::new)
+                        .transpose()
+                        .map_err(|_| RepositoryError::InvalidValue {
+                            field: "package candidate version",
                         })?,
                     architecture: row.try_get("architecture")?,
                     source: row.try_get("source")?,
@@ -95,6 +102,6 @@ async fn insert_package(
     target_id: TargetId,
     package: &InstalledPackage,
 ) -> Result<(), RepositoryError> {
-    sqlx::query("INSERT INTO package_inventory_packages (target_id, package_name, installed_version, architecture, source) VALUES ($1, $2, $3, $4, $5)").bind(target_id.as_uuid()).bind(package.name.as_str()).bind(package.version.as_str()).bind(&package.architecture).bind(&package.source).execute(&mut **transaction).await?;
+    sqlx::query("INSERT INTO package_inventory_packages (target_id, package_name, installed_version, candidate_version, architecture, source) VALUES ($1, $2, $3, $4, $5, $6)").bind(target_id.as_uuid()).bind(package.name.as_str()).bind(package.version.as_str()).bind(package.candidate_version.as_ref().map(PackageVersion::as_str)).bind(&package.architecture).bind(&package.source).execute(&mut **transaction).await?;
     Ok(())
 }

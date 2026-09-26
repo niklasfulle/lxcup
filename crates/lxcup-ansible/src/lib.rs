@@ -145,7 +145,12 @@ impl AnsibleParameters {
             {
                 Err(AnsibleContractError::Invalid)
             }
-            Self::UpdatePackages { packages } if packages.is_empty() || packages.len() > 100 => {
+            Self::UpdatePackages { packages }
+                if packages.is_empty()
+                    || packages.len() > 100
+                    || (packages.iter().any(|package| package == "*")
+                        && packages.as_slice() != ["*"]) =>
+            {
                 Err(AnsibleContractError::Invalid)
             }
             Self::UpdatePackages { packages }
@@ -737,13 +742,13 @@ mod tests {
             (
                 AnsibleOperation::DeployAgent,
                 AnsibleParameters::DeployAgent {
-                    agent_version: "0.2.0".to_owned(),
+                    agent_version: "0.3.1".to_owned(),
                 },
             ),
             (
                 AnsibleOperation::UpdateAgent,
                 AnsibleParameters::UpdateAgent {
-                    agent_version: "0.2.0".to_owned(),
+                    agent_version: "0.3.1".to_owned(),
                 },
             ),
             (
@@ -779,6 +784,25 @@ mod tests {
         );
         read_only.confirmed = false;
         assert!(AnsibleJob::from_request(read_only).is_ok());
+    }
+
+    #[test]
+    fn all_packages_selector_must_be_used_alone() {
+        let mut all = request(
+            AnsibleOperation::UpdatePackages,
+            AnsibleParameters::UpdatePackages {
+                packages: vec!["*".to_owned()],
+            },
+        );
+        assert!(AnsibleJob::from_request(all.clone()).is_ok());
+
+        all.parameters = AnsibleParameters::UpdatePackages {
+            packages: vec!["curl".to_owned(), "*".to_owned()],
+        };
+        assert_eq!(
+            AnsibleJob::from_request(all),
+            Err(AnsibleContractError::Invalid)
+        );
     }
 
     #[test]
@@ -890,7 +914,7 @@ mod tests {
         let mut invalid = request(
             AnsibleOperation::UpdateAgent,
             AnsibleParameters::DeployAgent {
-                agent_version: "0.2.0".to_owned(),
+                agent_version: "0.3.1".to_owned(),
             },
         );
         assert_eq!(
@@ -901,7 +925,7 @@ mod tests {
         invalid = request(
             AnsibleOperation::DeployAgent,
             AnsibleParameters::DeployAgent {
-                agent_version: "0.2.0".to_owned(),
+                agent_version: "0.3.1".to_owned(),
             },
         );
         invalid.actor_role = ActorRole::Viewer;
@@ -913,7 +937,7 @@ mod tests {
         let mut missing_secret = request(
             AnsibleOperation::DeployAgent,
             AnsibleParameters::DeployAgent {
-                agent_version: "0.2.0".to_owned(),
+                agent_version: "0.3.1".to_owned(),
             },
         );
         missing_secret.secret_refs.clear();

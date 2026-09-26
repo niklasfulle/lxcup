@@ -4,13 +4,23 @@
   become: true
   gather_facts: false
   tasks:
+    - name: Refresh APT metadata when older than one hour
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
     - name: Gather installed packages from the registered package manager
       ansible.builtin.package_facts:
         manager: auto
 
+    - name: Find newer package versions available from configured repositories
+      ansible.builtin.command: apt list --upgradable
+      register: lxcup_upgradable_packages
+      changed_when: false
+
     - name: Stage normalized package inventory for the worker
       ansible.builtin.copy:
-        content: "{{ {'packages': ansible_facts.packages} | to_json }}"
+        content: "{{ {'packages': ansible_facts.packages, 'upgradable': lxcup_upgradable_packages.stdout_lines} | to_json }}"
         dest: "{{ lxcup_package_inventory_remote_file }}"
         mode: '0600'
 

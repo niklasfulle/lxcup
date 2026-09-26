@@ -108,7 +108,7 @@ async fn docker_unavailable_is_audited_without_marking_existing_workloads_missin
         agent_id: "windows-agent".to_owned(),
         platform: lxcup_agent::AgentPlatform::Windows,
         hostname: "docker-host".to_owned(),
-        version: "0.2.0".to_owned(),
+        version: "0.3.1".to_owned(),
         protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -494,7 +494,7 @@ async fn ansible_apply_without_confirmation_is_rejected_before_enqueue() {
                         "operation": "deploy_agent",
                         "target_id": target_id,
                         "mode": "apply",
-                        "parameters": {"operation": "deploy_agent", "agent_version": "0.2.0"},
+                        "parameters": {"operation": "deploy_agent", "agent_version": "0.3.1"},
                         "idempotency_key": "unconfirmed-apply",
                         "confirmed": false
                     })

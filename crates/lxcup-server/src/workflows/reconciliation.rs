@@ -302,7 +302,7 @@ mod tests {
                 lifecycle: ResourceLifecycle::Pending,
                 mode: ExecutionMode::Apply,
                 parameters: AnsibleParameters::DeployAgent {
-                    agent_version: "0.2.0".to_owned(),
+                    agent_version: "0.3.1".to_owned(),
                 },
                 secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
                 idempotency_key: idempotency_key.to_owned(),
@@ -457,7 +457,7 @@ mod tests {
                 lifecycle: ResourceLifecycle::Pending,
                 mode: ExecutionMode::Apply,
                 parameters: AnsibleParameters::DeployAgent {
-                    agent_version: "0.2.0".to_owned(),
+                    agent_version: "0.3.1".to_owned(),
                 },
                 secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
                 idempotency_key: "unrecognized-deployment-key".to_owned(),
