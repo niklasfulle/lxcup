@@ -1,5 +1,6 @@
 import { cn } from "../classnames";
 import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
+import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -81,7 +82,7 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
   });
 
   const deployment = useMutation({
-    mutationFn: (targetId: string) => createAnsibleJob({ operation: "deploy_agent", target_id: targetId, mode: "apply", parameters: { operation: "deploy_agent", agent_version: "0.2.0" }, idempotency_key: `onboarding-deploy-${targetId}`, confirmed: true }),
+    mutationFn: (targetId: string) => createAnsibleJob({ operation: "deploy_agent", target_id: targetId, mode: "apply", parameters: { operation: "deploy_agent", agent_version: "0.3.1" }, idempotency_key: `onboarding-deploy-${targetId}`, confirmed: true }),
     onSuccess: (job) => { setDeploymentJobId(job.id); void queryClient.invalidateQueries({ queryKey: queryKeys.ansibleJobs }); },
   });
   const deploymentJob = useAnsibleJob(deploymentJobId);
@@ -366,6 +367,7 @@ function TargetInventoryCard({ target, jobs }: Readonly<{ target: TargetDto; job
   const telemetryTime = telemetry.data?.collected_at ?? latestSample?.collected_at;
   const telemetryStale = telemetryTime ? isTelemetryStale(telemetryTime) : false;
   const inventorySummary = targetInventorySummary(inventory);
+  const updateCount = targetPackageUpdateCount(inventory);
   const telemetrySummary = targetTelemetrySummary(telemetry, telemetryTime, telemetryStale);
 
   return <li>
@@ -384,22 +386,35 @@ function TargetInventoryCard({ target, jobs }: Readonly<{ target: TargetDto; job
           </div>
         </div>
 
-        <div className="mt-4 grid gap-4 border-t border-[var(--line)] pt-3 md:grid-cols-[minmax(8rem,0.7fr)_minmax(0,2fr)] xl:grid-cols-[minmax(8rem,0.7fr)_minmax(0,2fr)_minmax(14rem,1fr)] xl:items-center">
-          <div>
-            <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Installierte Agent-Version</p>
-            <p className="mb-0 text-sm font-semibold" title="Wird vom letzten authentifizierten Heartbeat des Zielsystems gemeldet.">{target.agent_version ? `v${target.agent_version}` : <span className="font-normal text-[var(--muted)]">Noch keine Meldung</span>}</p>
-          </div>
-          <div>
-            <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Onboarding</p>
+        <div className="mt-4 grid gap-3 border-t border-[var(--line)] pt-3 md:grid-cols-2 xl:grid-cols-[minmax(8rem,0.55fr)_minmax(17rem,1.15fr)_minmax(24rem,2fr)]">
+          <section className="grid content-start gap-2 border border-[var(--line)] bg-[var(--panel)] px-3 py-2.5" aria-label="Installierte Agent-Version">
+            <h3 className="m-0 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Agent</h3>
+            <p className="m-0 text-sm font-semibold" title="Wird vom letzten authentifizierten Heartbeat des Zielsystems gemeldet.">{target.agent_version ? `v${target.agent_version}` : <span className="font-normal text-[var(--muted)]">Noch keine Meldung</span>}</p>
+          </section>
+          <section className="grid content-start gap-2 border border-[var(--line)] bg-[var(--panel)] px-3 py-2.5" aria-label={`Onboarding für ${target.name}`}>
+            <h3 className="m-0 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Onboarding</h3>
             <TargetOnboardingProtocols target={target} jobs={jobs} />
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
-            <TargetSignalLink to={`/targets/${target.id}/packages`} label="Paketinventar" value={inventorySummary} status={inventorySignalStatus(inventory)} accessibleName={`Paketinventar für ${target.name}`} />
-            <TargetSignalLink to={`/targets/${target.id}`} label="Systemauslastung" value={telemetrySummary} status={telemetrySignalStatus(telemetry, telemetryStale, telemetryTime)} accessibleName={`Systemauslastung für ${target.name}`} />
+          </section>
+          <div className="grid min-w-0 gap-2 md:col-span-2 xl:col-span-1 xl:grid-cols-2">
+            <TargetSignalLink to={`/targets/${target.id}/packages`} label="Paketinventar" value={inventorySummary} status={inventorySignalStatus(inventory)} accessibleName={`Paketinventar für ${target.name}`} details={updateCount === null ? undefined : <span className={cn("px-1 text-[11px]", updateCount > 0 ? "font-semibold text-[var(--warning)]" : "text-[var(--muted)]")}>{updateCount} {updateCount === 1 ? "Update" : "Updates"} verfügbar</span>} />
+            <TargetSignalLink to={`/targets/${target.id}`} label="Systemauslastung" value={telemetrySummary} status={telemetrySignalStatus(telemetry, telemetryStale, telemetryTime)} accessibleName={`Systemauslastung für ${target.name}`} details={<TelemetryReadings sample={latestSample} />} />
           </div>
         </div>
       </article>
     </li>;
+}
+
+function TelemetryReadings({ sample }: Readonly<{ sample: NonNullable<ReturnType<typeof useTargetTelemetry>["data"]>["samples"][number] | undefined }>) {
+  if (!sample) return null;
+  return <div className="flex flex-wrap gap-x-3 gap-y-1 px-1 text-[11px] text-[var(--muted)]" aria-label="Aktuelle Systemauslastung">
+    <span>CPU {telemetryPercent(sample.cpu_basis_points)}</span>
+    <span>RAM {telemetryPercent(sample.memory_basis_points)}</span>
+    <span>Speicher {telemetryPercent(sample.storage_basis_points)}</span>
+  </div>;
+}
+
+function telemetryPercent(basisPoints: number | null) {
+  return basisPoints === null ? "—" : `${(basisPoints / 100).toFixed(1)}%`;
 }
 
 function targetInventorySummary(inventory: ReturnType<typeof usePackageInventory>) {
@@ -410,6 +425,11 @@ function targetInventorySummary(inventory: ReturnType<typeof usePackageInventory
     ? new Date(inventory.data.collected_at).toLocaleString()
     : "Zeitpunkt unbekannt";
   return `${inventory.data.packages.length} Pakete · ${collectedAt}`;
+}
+
+function targetPackageUpdateCount(inventory: ReturnType<typeof usePackageInventory>) {
+  if (inventory.data?.status !== "complete") return null;
+  return inventory.data.packages.filter((item) => item.candidate_version !== null && item.candidate_version !== item.installed_version).length;
 }
 
 function targetTelemetrySummary(telemetry: ReturnType<typeof useTargetTelemetry>, collectedAt: string | undefined, stale: boolean) {
@@ -434,11 +454,12 @@ function telemetrySignalStatus(telemetry: ReturnType<typeof useTargetTelemetry>,
   return "neutral";
 }
 
-function TargetSignalLink({ to, label, value, status, accessibleName }: Readonly<{ to: string; label: string; value: string; status: "error" | "success" | "warning" | "neutral"; accessibleName: string }>) {
+function TargetSignalLink({ to, label, value, status, accessibleName, details }: Readonly<{ to: string; label: string; value: string; status: "error" | "success" | "warning" | "neutral"; accessibleName: string; details?: ReactNode }>) {
   const statusClass = targetSignalStatusClass(status);
-  return <Link className="grid min-w-0 gap-1 border border-[var(--line)] bg-[var(--panel)] px-3 py-2 hover:border-[var(--primary)] hover:bg-[var(--primary-soft)]" to={to} aria-label={accessibleName}>
+  return <Link className="grid min-w-0 content-start gap-1.5 border border-[var(--line)] bg-[var(--panel)] px-3 py-2.5 transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)]" to={to} aria-label={accessibleName}>
     <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">{label}</span>
     <span className={cn("truncate border px-2 py-1 text-xs font-semibold", statusClass)} title={value}>{value}</span>
+    {details}
   </Link>;
 }
 

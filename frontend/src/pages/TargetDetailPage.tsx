@@ -7,6 +7,7 @@ import { ActivityIcon, activityIconForOperation, activityStatusTone } from "../c
 import { dockerDiscoveryFailureLabel } from "../dockerDiscoveryStatus";
 import { isTelemetryStale, telemetryAgeLabel } from "../telemetryFreshness";
 import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
+import { TELEMETRY_WINDOW_MS, telemetryXPosition } from "../telemetryChart";
 import { useAnsibleJobs, useContainers, useDockerDiscovery, useDockerWorkloads, usePackageInventory, useTargetTelemetry, useTargets } from "../queries";
 
 type Target = NonNullable<ReturnType<typeof useTargets>["data"]>[number];
@@ -90,8 +91,8 @@ export function TargetDetailPage() {
     {stale ? <output className="flex items-start gap-3 border border-[var(--warning)] bg-[var(--warning-soft)] p-4 text-sm text-[var(--ink)]"><span className="grid h-6 w-6 shrink-0 place-items-center border border-[var(--warning)] text-xs font-bold text-[var(--warning)]" aria-hidden="true">!</span><span><strong className="block">Heartbeat veraltet</strong><span>Der letzte Heartbeat liegt mehr als 2 Minuten zurück. Telemetrie und Agentstatus können veraltet sein.</span></span></output> : null}
     <section className="grid grid-cols-1 gap-4 xl:grid-cols-2" aria-label="Ressourcenstatus">
       <TargetPackageInventory target={target} inventory={inventory} stale={inventoryStale} />
-      <TargetTelemetry telemetry={telemetry} samples={samples} latest={latest} />
       <TargetDockerInventory target={target} host={hostContainer} workloads={dockerWorkloads} discovery={dockerDiscovery} stale={dockerStale} discovering={discoverDocker.isPending} discoveryError={discoverDocker.error} onDiscover={() => discoverDocker.mutate()} />
+      <TargetTelemetry telemetry={telemetry} samples={samples} latest={latest} now={now} />
     </section>
     <TargetWorkflowList targetId={target.id} jobs={jobs} targetJobs={targetJobs} />
   </div>;
@@ -118,15 +119,15 @@ function packageInventoryContent(inventory: InventoryQuery, stale: boolean) {
   return <p className="text-[var(--muted)]">Paketinventar aktuell.</p>;
 }
 
-function TargetTelemetry({ telemetry, samples, latest }: Readonly<{ telemetry: TelemetryQuery; samples: TelemetrySample[]; latest: TelemetrySample | undefined }>) {
-  return <article className="flex min-h-44 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Systemauslastung</h2><p className="mb-0 text-sm text-[var(--muted)]">{telemetry.isLoading ? "Wird geladen…" : `${samples.length} Messpunkte im 30-Sekunden-Fenster`}</p></div><span className="border border-[var(--line)] bg-[var(--paper-muted)] px-2 py-1 text-xs text-[var(--muted)]" title="Die Telemetrieansicht aktualisiert sich automatisch alle fünf Sekunden.">Live · 5 s</span></div><div className="flex-1">{targetTelemetryContent(telemetry, samples, latest)}</div></article>;
+function TargetTelemetry({ telemetry, samples, latest, now }: Readonly<{ telemetry: TelemetryQuery; samples: TelemetrySample[]; latest: TelemetrySample | undefined; now: number }>) {
+  return <article className="flex min-h-44 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)] xl:col-span-2"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Systemauslastung</h2><p className="mb-0 text-sm text-[var(--muted)]">{telemetry.isLoading ? "Wird geladen…" : `${samples.length} Messpunkte der letzten 10 Minuten`}</p></div><span className="border border-[var(--line)] bg-[var(--paper-muted)] px-2 py-1 text-xs text-[var(--muted)]" title="Der Agent sammelt alle fünf Sekunden und sendet ein überlappendes 60-Sekunden-Fenster alle 30 Sekunden.">Heartbeat · 30 s</span></div><div className="flex-1">{targetTelemetryContent(telemetry, samples, latest, now)}</div></article>;
 }
 
-function targetTelemetryContent(telemetry: TelemetryQuery, samples: TelemetrySample[], latest: TelemetrySample | undefined) {
+function targetTelemetryContent(telemetry: TelemetryQuery, samples: TelemetrySample[], latest: TelemetrySample | undefined, now: number) {
   if (telemetry.error) return <p className="font-semibold text-[var(--error)]" role="alert">{telemetry.error.message}</p>;
   if (telemetry.isLoading && samples.length === 0) return <p className="text-[var(--muted)]">Telemetrie wird geladen…</p>;
   if (samples.length === 0 || latest === undefined) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Noch keine Telemetrie verfügbar.</p>;
-  return <><LatestTelemetryNotice latest={latest} /><p className="mb-3 text-sm text-[var(--muted)]">Letzter Messpunkt: {new Date(latest.collected_at).toLocaleString()} · CPU {formatPercent(latest.cpu_basis_points)} · RAM {formatPercent(latest.memory_basis_points)} · Speicher {formatPercent(latest.storage_basis_points)}</p><div className="grid gap-4 md:grid-cols-3"><TelemetryChart label="CPU" field="cpu_basis_points" samples={samples} /><TelemetryChart label="RAM" field="memory_basis_points" samples={samples} /><TelemetryChart label="Speicher" field="storage_basis_points" samples={samples} /></div></>;
+  return <><LatestTelemetryNotice latest={latest} /><p className="mb-3 text-sm text-[var(--muted)]">Letzter Messpunkt: {new Date(latest.collected_at).toLocaleString()} · CPU {formatPercent(latest.cpu_basis_points)} · RAM {formatPercent(latest.memory_basis_points)} · Speicher {formatPercent(latest.storage_basis_points)}</p>{telemetry.data?.partial ? <p className="mb-3 border border-[var(--warning)] bg-[var(--warning-soft)] p-2 text-xs text-[var(--ink)]" role="status">{telemetry.data.missing_samples > 0 ? `Im 10-Minuten-Verlauf fehlen ${telemetry.data.missing_samples} erwartete Messpunkte.` : "Ein oder mehrere Messpunkte enthalten nicht alle verfügbaren Kennzahlen."}</p> : null}<div className="grid gap-4 md:grid-cols-3"><TelemetryChart label="CPU" field="cpu_basis_points" samples={samples} now={now} /><TelemetryChart label="RAM" field="memory_basis_points" samples={samples} now={now} /><TelemetryChart label="Speicher" field="storage_basis_points" samples={samples} now={now} /></div></>;
 }
 
 function LatestTelemetryNotice({ latest }: Readonly<{ latest: TelemetrySample }>) {
@@ -136,7 +137,7 @@ function LatestTelemetryNotice({ latest }: Readonly<{ latest: TelemetrySample }>
 
 function TargetDockerInventory({ target, host, workloads, discovery, stale, discovering, discoveryError, onDiscover }: Readonly<{ target: Target; host: ContainerItem | undefined; workloads: DockerWorkloadsQuery; discovery: DockerDiscoveryQuery; stale: boolean; discovering: boolean; discoveryError: Error | null; onDiscover: () => void }>) {
   if (target.kind !== "lxc") return null;
-  return <article className="flex min-h-36 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)] xl:col-span-2"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Docker-Inventar</h2><p className="mb-0 text-sm text-[var(--muted)]">Docker-Container werden getrennt vom LXC-Inventar geführt.</p></div><div className="flex flex-wrap gap-2">{host ? <button className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discovering} onClick={onDiscover}>{discovering ? "Erkennung läuft…" : "Docker erkennen"}</button> : null}{host ? <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?host=${host.id}`}>Docker-Inventar öffnen <span className="ml-2" aria-hidden="true">→</span></Link> : null}</div></div><div className="flex-1">{discoveryError ? <p className="mb-3 border border-[var(--error)] bg-[var(--paper-muted)] p-3 text-sm" role="alert">Docker-Erkennung fehlgeschlagen: {dockerDiscoveryFailureLabel(discoveryError.message)}</p> : null}{targetDockerContent(host, workloads, discovery, stale)}</div></article>;
+  return <article className="flex min-h-36 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Docker-Inventar</h2><p className="mb-0 text-sm text-[var(--muted)]">Docker-Container werden getrennt vom LXC-Inventar geführt.</p></div><div className="flex flex-wrap gap-2">{host ? <button className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discovering} onClick={onDiscover}>{discovering ? "Erkennung läuft…" : "Docker erkennen"}</button> : null}{host ? <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?host=${host.id}`}>Docker-Inventar öffnen <span className="ml-2" aria-hidden="true">→</span></Link> : target.state === "managed" ? <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?target=${encodeURIComponent(target.id)}`}>Docker-Erkennung öffnen <span className="ml-2" aria-hidden="true">→</span></Link> : null}</div></div><div className="flex-1">{discoveryError ? <p className="mb-3 border border-[var(--error)] bg-[var(--paper-muted)] p-3 text-sm" role="alert">Docker-Erkennung fehlgeschlagen: {dockerDiscoveryFailureLabel(discoveryError.message)}</p> : null}{host ? targetDockerContent(host, workloads, discovery, stale) : <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Keine alte Container-Verknüpfung nötig: verbundene LXC-Agenten lassen sich direkt über die Docker-Erkennung auswählen.</p>}</div></article>;
 }
 
 function targetDockerContent(host: ContainerItem | undefined, workloads: DockerWorkloadsQuery, discovery: DockerDiscoveryQuery, stale: boolean) {
@@ -200,13 +201,13 @@ function formatPercent(value: number | null | undefined) {
   return value == null ? "—" : `${(value / 100).toFixed(1)}%`;
 }
 
-function TelemetryChart({ label, field, samples }: Readonly<{ label: string; field: TelemetryField; samples: TelemetrySample[] }>) {
+function TelemetryChart({ label, field, samples, now }: Readonly<{ label: string; field: TelemetryField; samples: TelemetrySample[]; now: number }>) {
   const points = samples.map((sample, index) => ({
-    x: samples.length <= 1 ? 10 : 10 + (index / (samples.length - 1)) * 580,
+    x: telemetryXPosition(sample.collected_at, now, 10, 580),
     y: telemetryY(sample[field]),
     sample,
   }));
-  const description = `${label}-Auslastung im Verlauf der letzten 30 Sekunden; ${samples.length} Messpunkte.`;
+  const description = `${label}-Auslastung im Verlauf der letzten 10 Minuten; ${samples.length} Messpunkte.`;
   return <figure aria-label={description} className="min-w-0 rounded border border-[var(--line)] p-3">
     <figcaption className="mb-2 flex justify-between gap-2"><strong>{label}</strong><span className="sr-only">{description}</span><span className="text-sm text-[var(--muted)]">{formatPercent(samples.at(-1)?.[field])}</span></figcaption>
     <svg className="h-28 w-full" viewBox="0 0 600 160" aria-hidden="true">
@@ -218,11 +219,11 @@ function TelemetryChart({ label, field, samples }: Readonly<{ label: string; fie
       <text x="10" y="155" fill="currentColor" fontSize="11">0%</text>
       {points.map((point, index) => {
         const previous = points[index - 1];
-        return previous?.y != null && point.y != null ? <line key={`line-${point.sample.collected_at}`} x1={previous.x} y1={previous.y} x2={point.x} y2={point.y} stroke="var(--accent)" strokeWidth="3" /> : null;
+        return previous?.y != null && point.y != null ? <line key={`line-${point.sample.collected_at}`} x1={previous.x} y1={previous.y} x2={point.x} y2={point.y} stroke="var(--primary)" strokeWidth="3" /> : null;
       })}
-      {points.map((point) => point.y == null ? null : <circle key={point.sample.collected_at} cx={point.x} cy={point.y} r="3.5" fill="var(--accent)"><title>{new Date(point.sample.collected_at).toLocaleTimeString()}: {formatPercent(point.sample[field])}</title></circle>)}
+      {points.map((point) => point.y == null ? null : <circle key={point.sample.collected_at} cx={point.x} cy={point.y} r="3.5" fill="var(--primary)"><title>{new Date(point.sample.collected_at).toLocaleTimeString()}: {formatPercent(point.sample[field])}</title></circle>)}
     </svg>
-    <div className="flex justify-between text-xs text-[var(--muted)]" aria-hidden="true"><span>{new Date(samples[0].collected_at).toLocaleTimeString()}</span><span>{new Date(samples.at(-1)!.collected_at).toLocaleTimeString()}</span></div>
+    <div className="flex justify-between text-xs text-[var(--muted)]" aria-hidden="true"><span>{new Date(now - TELEMETRY_WINDOW_MS).toLocaleTimeString()}</span><span>{new Date(now).toLocaleTimeString()}</span></div>
     <ul className="sr-only">{samples.map((sample) => <li key={sample.collected_at}>{new Date(sample.collected_at).toLocaleString()}: {formatPercent(sample[field])}</li>)}</ul>
   </figure>;
 }

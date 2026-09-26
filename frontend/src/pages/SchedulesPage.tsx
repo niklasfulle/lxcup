@@ -6,8 +6,8 @@ import { queryKeys, useSchedules, useTargets, useUpdatePolicies } from "../queri
 import { cn } from "../classnames";
 
 const panelClass = "border border-[var(--line)] bg-[var(--panel)] p-5 text-[var(--ink)] shadow-sm";
-const fieldClass = "grid min-w-0 gap-1.5 text-xs font-semibold text-[var(--muted)]";
-const inputClass = "mt-0.5 min-h-10 rounded-sm border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm font-normal text-[var(--ink)] transition-colors focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--primary)]/20";
+const fieldClass = "grid content-start min-w-0 gap-1.5 text-xs font-semibold text-[var(--muted)]";
+const inputClass = "block h-10 w-full rounded-sm border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm font-normal leading-5 text-[var(--ink)] transition-colors focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--primary)]/20";
 const primaryButtonClass = "inline-flex min-h-10 items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50";
 
 export function SchedulesPage() {
@@ -61,12 +61,12 @@ export function SchedulesPage() {
     <section className={panelClass} aria-labelledby="schedule-create-title">
         <SectionHeading title="Zeitplan erstellen" description="Lege fest, welcher Job für welches Ziel wiederholt ausgeführt wird." id="schedule-create-title" />
         <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); if (canSubmit) mutation.mutate(); }}>
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-x-4 gap-y-4 sm:grid-cols-2 xl:grid-cols-3">
             <label className={fieldClass}><span>Name</span><input className={inputClass} value={id} onChange={(event) => setId(event.target.value)} placeholder="nightly-inventory" required /></label>
             <label className={fieldClass}><span>Ziel</span><select className={inputClass} value={targetId} onChange={(event) => { setTargetId(event.target.value); if (targetList.find((target) => target.id === event.target.value)?.kind !== "lxc") setOperation((current) => current === "docker_discovery" ? "collect_package_inventory" : current); }} required><option value="">Ziel auswählen</option>{targetList.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>
             <label className={fieldClass}><span>Aufgabe</span><select className={inputClass} value={operation} onChange={(event) => setOperation(event.target.value)}><option value="collect_package_inventory">Paketinventar erfassen</option><option value="health_check">Healthcheck</option><option value="update_packages">Pakete aktualisieren</option>{targetList.find((target) => target.id === targetId)?.kind === "lxc" ? <option value="docker_discovery">Docker-Container erkennen</option> : null}</select></label>
             <label className={fieldClass}><span>Intervall in Minuten</span><input className={inputClass} type="number" min="1" max="10080" value={everyMinutes} onChange={(event) => setEveryMinutes(event.target.value)} required /><span className="font-normal">Zum Beispiel 60 für eine stündliche Ausführung.</span></label>
-            <label className={fieldClass}><span>Zeitzone</span><input className={inputClass} value={timezone} onChange={(event) => setTimezone(event.target.value)} required /><span className="font-normal">Gilt für die Berechnung der nächsten Ausführung.</span></label>
+            <label className={cn(fieldClass, operation === "update_packages" ? "" : "xl:col-span-2")}><span>Zeitzone</span><input className={inputClass} value={timezone} onChange={(event) => setTimezone(event.target.value)} required /><span className="font-normal">Gilt für die Berechnung der nächsten Ausführung.</span></label>
             {operation === "update_packages" ? <label className={fieldClass}><span>Update-Policy</span><select className={inputClass} value={policyId} onChange={(event) => setPolicyId(event.target.value)} required><option value="">Policy auswählen</option>{(policies.data ?? []).filter((policy) => policy.enabled).map((policy) => <option key={policy.id} value={policy.id}>{policy.id}</option>)}</select><Link className="w-fit font-semibold text-lxcup-primary hover:underline" to="/update-policies">Policies verwalten →</Link></label> : null}
           </div>
 

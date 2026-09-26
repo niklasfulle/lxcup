@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { ApiError, apiClient, type AnsibleJobDto, type ApiEvent, type AuthRole, type AuthSession, type ContainerDto, type TargetDto } from "./api";
-import { queryKeys, useAnsibleJobs, useContainers, useTargets, useWorkerAvailability } from "./queries";
+import { ApiError, apiClient, type AnsibleJobDto, type ApiEvent, type AuthRole, type AuthSession, type ContainerDto, type TargetDto, type TelemetryAlertDto } from "./api";
+import { queryKeys, useAnsibleJobs, useContainers, useTargets, useTelemetryAlerts, useWorkerAvailability } from "./queries";
 import { Dashboard } from "./pages/Dashboard";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { WorkflowDetailPage } from "./pages/WorkflowDetailPage";
@@ -21,6 +21,10 @@ import { loadActivityEvents, saveActivityEvents, syncJobActivity } from "./activ
 import { jobStatusBadgeClass, jobStatusLabel } from "./jobStatus";
 
 const ACTIVITY_SIDEBAR_STORAGE_KEY = "lxcup-activity-sidebar-open";
+const TELEMETRY_ALERT_HISTORY_STORAGE_KEY = "lxcup-telemetry-alert-history";
+const NOTIFICATION_READ_STORAGE_KEY = "lxcup-read-notifications";
+
+type TelemetryAlertNotification = TelemetryAlertDto & { status: "active" | "resolved"; resolved_at?: string };
 
 export default function App() {
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
@@ -257,17 +261,71 @@ function WorkerAvailabilityBanner() {
 
 function NotificationCenter({ targets, containers }: Readonly<{ targets: TargetDto[]; containers: ContainerDto[] }>) {
   const jobs = useAnsibleJobs();
+  const telemetryAlerts = useTelemetryAlerts();
   const failed = (jobs.data ?? []).filter((job) => job.status === "failed" || job.status === "reconcile_required");
   const [open, setOpen] = useState(false);
-  const [read, setRead] = useState<string[]>(() => JSON.parse(globalThis.localStorage?.getItem("lxcup-read-notifications") ?? "[]") as string[]);
-  const unread = failed.filter((job) => read.includes(job.id) === false);
+  const [read, setRead] = useState<string[]>(() => readNotificationIds());
+  const [alertHistory, setAlertHistory] = useState<TelemetryAlertNotification[]>(() => readTelemetryAlertHistory());
+  const alertStatuses = useRef(new Map(alertHistory.map((alert) => [alert.id, alert.status])));
+  useEffect(() => {
+    if (telemetryAlerts.data === undefined) return;
+    const reopenedIds = telemetryAlerts.data.filter((alert) => alertStatuses.current.get(alert.id) === "resolved").map((alert) => alert.id);
+    if (reopenedIds.length > 0) {
+      const reopened = new Set(reopenedIds);
+      setRead((current) => persistReadNotificationIds(current.filter((id) => !reopened.has(id))));
+    }
+    const currentIds = new Set(telemetryAlerts.data.map((alert) => alert.id));
+    const nextStatuses = new Map(alertStatuses.current);
+    for (const [id, status] of nextStatuses) {
+      if (status === "active" && !currentIds.has(id)) nextStatuses.set(id, "resolved");
+    }
+    for (const alert of telemetryAlerts.data) nextStatuses.set(alert.id, "active");
+    alertStatuses.current = nextStatuses;
+    setAlertHistory((previous) => {
+      const previousById = new Map(previous.map((alert) => [alert.id, alert]));
+      const next = previous.map((alert) => currentIds.has(alert.id) ? alert : alert.status === "active" ? { ...alert, status: "resolved" as const, resolved_at: new Date().toISOString() } : alert);
+      for (const alert of telemetryAlerts.data) {
+        const old = previousById.get(alert.id);
+        const notification: TelemetryAlertNotification = { ...alert, status: "active", ...(old?.resolved_at ? {} : { resolved_at: undefined }) };
+        const index = next.findIndex((item) => item.id === alert.id);
+        if (index >= 0) next[index] = notification;
+        else next.push(notification);
+      }
+      const trimmed = next.sort((left, right) => Date.parse(right.observed_at) - Date.parse(left.observed_at)).slice(0, 50);
+      globalThis.localStorage?.setItem(TELEMETRY_ALERT_HISTORY_STORAGE_KEY, JSON.stringify(trimmed));
+      return trimmed;
+    });
+  }, [telemetryAlerts.data]);
+  const unread = failed.filter((job) => !read.includes(job.id));
+  const telemetryUnread = alertHistory.filter((alert) => !read.includes(alert.id));
   const saveRead = (next: string[]) => {
-    globalThis.localStorage?.setItem("lxcup-read-notifications", JSON.stringify(next));
-    setRead(next);
+    setRead(persistReadNotificationIds(next));
   };
   const markRead = (id: string) => saveRead(read.includes(id) ? read : [...read, id]);
-  const markAllRead = () => saveRead([...new Set([...read, ...failed.map((job) => job.id)])]);
-  return <div className="relative"><button className="relative inline-flex h-9 w-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] text-sm text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" type="button" aria-label="Benachrichtigungen" aria-expanded={open} onClick={() => setOpen((value) => !value)} title="Benachrichtigungen">🔔{unread.length ? <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] text-white">{unread.length}</span> : null}</button>{open ? <div className="absolute right-0 top-10 z-20 w-[min(24rem,calc(100vw-1rem))] overflow-hidden border border-[var(--line)] bg-[var(--panel)] text-[var(--ink)] shadow-xl"><div className="flex items-center justify-between gap-3 border-b border-[var(--line)] px-3 py-2.5"><div><strong className="block">Benachrichtigungen</strong><span className="text-xs text-[var(--muted)]">{failed.length} fehlgeschlagene Workflows</span></div><button className="text-xs font-semibold text-lxcup-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={unread.length === 0} onClick={markAllRead}>Alle als gelesen markieren</button></div>{notificationBody(failed, markRead, targets, containers)}</div> : null}</div>;
+  const markAllRead = () => saveRead([...new Set([...read, ...failed.map((job) => job.id), ...alertHistory.map((alert) => alert.id)])]);
+  const unreadCount = unread.length + telemetryUnread.length;
+  return <div className="relative"><button className="relative inline-flex h-9 w-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] text-sm text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" type="button" aria-label="Benachrichtigungen" aria-expanded={open} onClick={() => setOpen((value) => !value)} title="Benachrichtigungen">🔔{unreadCount ? <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] text-white">{unreadCount}</span> : null}</button>{open ? <div className="absolute right-0 top-10 z-20 w-[min(24rem,calc(100vw-1rem))] overflow-hidden border border-[var(--line)] bg-[var(--panel)] text-[var(--ink)] shadow-xl"><div className="flex items-center justify-between gap-3 border-b border-[var(--line)] px-3 py-2.5"><div><strong className="block">Benachrichtigungen</strong><span className="text-xs text-[var(--muted)]">{failed.length} fehlgeschlagene Workflows · {alertHistory.filter((alert) => alert.status === "active").length} Telemetrie-Warnungen</span></div><button className="text-xs font-semibold text-lxcup-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={unreadCount === 0} onClick={markAllRead}>Alle als gelesen markieren</button></div>{notificationBody(failed, alertHistory, markRead, targets, containers, telemetryAlerts.isLoading)}</div> : null}</div>;
+}
+
+function readNotificationIds() {
+  try {
+    return JSON.parse(globalThis.localStorage?.getItem(NOTIFICATION_READ_STORAGE_KEY) ?? "[]") as string[];
+  } catch {
+    return [];
+  }
+}
+
+function persistReadNotificationIds(ids: string[]) {
+  globalThis.localStorage?.setItem(NOTIFICATION_READ_STORAGE_KEY, JSON.stringify(ids));
+  return ids;
+}
+
+function readTelemetryAlertHistory(): TelemetryAlertNotification[] {
+  try {
+    return JSON.parse(globalThis.localStorage?.getItem(TELEMETRY_ALERT_HISTORY_STORAGE_KEY) ?? "[]") as TelemetryAlertNotification[];
+  } catch {
+    return [];
+  }
 }
 
 function eventQueryKey(resource: string) {
@@ -295,9 +353,15 @@ function headerPageTitle(pathname: string) {
   return "Seite nicht gefunden";
 }
 
-function notificationBody(failed: AnsibleJobDto[] | undefined, markRead: (id: string) => void, targets: TargetDto[], containers: ContainerDto[]) {
-  if (failed === undefined || failed.length === 0) return <p className="m-0 px-3 py-4 text-sm text-[var(--muted)]">Keine fehlgeschlagenen Jobs.</p>;
+function notificationBody(failed: AnsibleJobDto[] | undefined, alerts: TelemetryAlertNotification[], markRead: (id: string) => void, targets: TargetDto[], containers: ContainerDto[], loadingAlerts: boolean) {
+  if (failed === undefined || failed.length === 0) {
+    const visibleAlerts = alerts.slice(0, 8);
+    if (visibleAlerts.length === 0) return <p className="m-0 px-3 py-4 text-sm text-[var(--muted)]">{loadingAlerts ? "Prüfe Telemetrie…" : "Keine offenen Benachrichtigungen."}</p>;
+    return <div className="max-h-[min(32rem,calc(100dvh-5rem))] overflow-y-auto">{visibleAlerts.map((alert) => <TelemetryAlertItem key={alert.id} alert={alert} markRead={markRead} />)}</div>;
+  }
+  const visibleAlerts = alerts.slice(0, 8);
   return <div className="max-h-[min(32rem,calc(100dvh-5rem))] overflow-y-auto">
+    {visibleAlerts.map((alert) => <TelemetryAlertItem key={alert.id} alert={alert} markRead={markRead} />)}
     {failed.slice(0, 8).map((job) => {
       const resource = notificationResource(job, targets, containers);
       return <Link className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2 border-b border-[var(--line)] px-3 py-3 text-xs transition-colors last:border-0 hover:bg-[var(--primary-soft)]" key={job.id} to={`/workflows/${job.id}`} onClick={() => markRead(job.id)}>
@@ -313,6 +377,26 @@ function notificationBody(failed: AnsibleJobDto[] | undefined, markRead: (id: st
       </Link>;
     })}
   </div>;
+}
+
+function TelemetryAlertItem({ alert, markRead }: Readonly<{ alert: TelemetryAlertNotification; markRead: (id: string) => void }>) {
+  const resolved = alert.status === "resolved";
+  const severityLabel = resolved ? "Behoben" : alert.severity === "critical" ? "Kritisch" : "Warnung";
+  const metricValue = alert.metric === "Telemetrie" ? `Letzter Messpunkt vor ${formatAlertAge(alert.age_seconds ?? 0)}` : `${formatAlertPercent(alert.value_basis_points)} · Grenzwert ${formatAlertPercent(alert.threshold_basis_points)}`;
+  return <Link className="grid gap-2 border-b border-[var(--line)] px-3 py-3 text-xs transition-colors last:border-0 hover:bg-[var(--primary-soft)]" to={`/targets/${alert.target_id}`} onClick={() => markRead(alert.id)}>
+    <div className="flex items-center justify-between gap-2"><span className={cn("inline-flex px-2 py-1 text-[10px] font-bold", resolved ? "bg-[var(--success-soft)] text-[var(--success)]" : alert.severity === "critical" ? "bg-[var(--error-soft)] text-[var(--error)]" : "bg-[var(--warning-soft)] text-[var(--warning)]")}>{severityLabel}</span><time className="text-[10px] text-[var(--muted)]">{new Date(resolved ? alert.resolved_at ?? alert.observed_at : alert.triggered_at).toLocaleString()}</time></div>
+    <strong className="text-sm">{alert.metric === "Telemetrie" ? "Telemetrie veraltet" : `Hohe ${alert.metric}-Auslastung`}</strong>
+    <span className="grid min-w-0 gap-0.5 border-l-2 border-l-lxcup-primary pl-2.5"><span className="text-[10px] font-bold uppercase tracking-wide text-[var(--muted)]">Ressource</span><strong className="truncate text-sm font-semibold">{alert.target_name}</strong><span className="truncate text-xs text-[var(--muted)]">{alert.target_kind} · {alert.target_address}</span></span>
+    <span className="text-xs text-[var(--muted)]">{resolved ? alert.metric === "Telemetrie" ? "Telemetrie wieder aktuell." : "Auslastung wieder im Normalbereich." : metricValue}</span>
+  </Link>;
+}
+
+function formatAlertPercent(value: number | null) {
+  return value === null ? "—" : `${(value / 100).toFixed(1)}%`;
+}
+
+function formatAlertAge(seconds: number) {
+  return seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} Min.`;
 }
 
 function notificationResource(job: AnsibleJobDto, targets: TargetDto[], containers: ContainerDto[]) {

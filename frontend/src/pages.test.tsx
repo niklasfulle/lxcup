@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   workerAvailability: { data: { available: true, last_seen_at: "2026-01-01T00:00:00Z" } as WorkerAvailabilityDto, isLoading: false, error: null as Error | null },
   packageInventory: { data: undefined as any, isLoading: false, error: null as Error | null },
   telemetry: { data: undefined as any, isLoading: false, error: null as Error | null },
+  telemetryAlerts: { data: [] as any[], isLoading: false, error: null as Error | null },
   schedules: { data: [] as any[], isLoading: false, error: null as Error | null },
   updatePolicies: { data: [] as any[], isLoading: false, error: null as Error | null },
   listSecrets: vi.fn(async () => [] as SecretMetadata[]),
@@ -29,9 +30,11 @@ const mocks = vi.hoisted(() => ({
   createContainerAction: vi.fn(async () => ({ id: "task-1", status: "queued" })),
   createSchedule: vi.fn(async (request: any) => ({ ...request, last_run_at: null, next_run_at: "2026-01-01T01:00:00Z", last_error: null })),
   createUpdatePolicy: vi.fn(async (request: any) => request),
-  getAgentHealth: vi.fn(async () => ({ healthy: true, info: { agent_id: "agent-1", platform: "linux", hostname: "host", version: "0.2.0", protocol_version: "1" }, metrics: { collected_at: "2026-01-01", commands_total: 2, commands_failed: 0, last_command_at: null } })),
+  deleteUpdatePolicy: vi.fn(async () => undefined),
+  getAgentHealth: vi.fn(async () => ({ healthy: true, info: { agent_id: "agent-1", platform: "linux", hostname: "host", version: "0.3.1", protocol_version: "1" }, metrics: { collected_at: "2026-01-01", commands_total: 2, commands_failed: 0, last_command_at: null } })),
   getAgentMetrics: vi.fn(async () => ({ commands_total: 2, commands_failed: 0, last_command_at: null })),
   discoverDockerWorkloads: vi.fn(async () => undefined),
+  discoverTargetDocker: vi.fn(async () => ({ target_id: "target-1", target_name: "test-target", available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [{ id: "docker-target-1", name: "web", image: "nginx:1", state: "running", status: "Up", ports: ["80/tcp"], started_at: null, labels: [] }] })),
   adoptDockerWorkload: vi.fn(async () => undefined),
   removeDockerWorkload: vi.fn(async () => undefined),
   subscribe: vi.fn(() => () => undefined),
@@ -52,7 +55,7 @@ const container: ContainerDto = { id: 101, node_id: "node-1", name: "web-lxc", o
 const secret = (id: string, name: string, kind: "ssh_password" | "ssh_known_hosts" | "agent_token" = "ssh_password") => ({ metadata: { metadata: { id, name, kind, scope: { type: "global" as const }, created_at: "2026-01-01", updated_at: "2026-01-01" }, status: "active" as const } });
 
 vi.mock("./queries", () => ({
-  queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id], dockerDiscovery: (id: number) => ["docker-discovery", id], packageInventory: (id: string) => ["targets", id, "package-inventory"], telemetry: (id: string) => ["targets", id, "telemetry"], schedules: ["schedules"], updatePolicies: ["update-policies"] },
+  queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id], dockerDiscovery: (id: number) => ["docker-discovery", id], packageInventory: (id: string) => ["targets", id, "package-inventory"], telemetry: (id: string) => ["targets", id, "telemetry"], telemetryAlerts: ["telemetry-alerts"], schedules: ["schedules"], updatePolicies: ["update-policies"] },
   useTargets: () => mocks.targets,
   useContainers: () => mocks.containers,
   useAnsibleJobs: () => mocks.jobs,
@@ -64,13 +67,14 @@ vi.mock("./queries", () => ({
   useWorkerAvailability: () => mocks.workerAvailability,
   usePackageInventory: () => mocks.packageInventory,
   useTargetTelemetry: () => mocks.telemetry,
+  useTelemetryAlerts: () => mocks.telemetryAlerts,
   useSchedules: () => mocks.schedules,
   useUpdatePolicies: () => mocks.updatePolicies,
 }));
 
 vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
-  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, createUpdatePolicy: mocks.createUpdatePolicy, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe, setCredentials: mocks.setCredentials, setUnauthorizedHandler: mocks.setUnauthorizedHandler, getSession: mocks.getSession, logout: mocks.logout } };
+  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, createUpdatePolicy: mocks.createUpdatePolicy, deleteUpdatePolicy: mocks.deleteUpdatePolicy, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, discoverTargetDocker: mocks.discoverTargetDocker, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe, setCredentials: mocks.setCredentials, setUnauthorizedHandler: mocks.setUnauthorizedHandler, getSession: mocks.getSession, logout: mocks.logout } };
 });
 
 import { Dashboard } from "./pages/Dashboard";
@@ -131,6 +135,9 @@ beforeEach(() => {
   mocks.telemetry.data = undefined;
   mocks.telemetry.isLoading = false;
   mocks.telemetry.error = null;
+  mocks.telemetryAlerts.data = [];
+  mocks.telemetryAlerts.isLoading = false;
+  mocks.telemetryAlerts.error = null;
   mocks.schedules.data = [];
   mocks.schedules.isLoading = false;
   mocks.schedules.error = null;
@@ -211,6 +218,7 @@ describe("inventory pages", () => {
     expect(workflowLink.querySelector("svg")).toHaveClass("h-5", "w-5");
     expect(workflowLink.querySelector("small")).toHaveAttribute("title", "Job job-1");
     expect(screen.getByRole("figure", { name: /CPU-Auslastung im Verlauf/ })).toBeInTheDocument();
+    expect(screen.getAllByRole("figure", { name: /letzten 10 Minuten/ })).toHaveLength(3);
     expect(screen.getByRole("figure", { name: /RAM-Auslastung im Verlauf/ })).toBeInTheDocument();
     expect(screen.getByRole("figure", { name: /Speicher-Auslastung im Verlauf/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Docker-Inventar öffnen/ })).toHaveAttribute("href", "/docker?host=101");
@@ -220,11 +228,54 @@ describe("inventory pages", () => {
     expect(screen.getByText("web")).toBeInTheDocument();
   });
 
+  it("plots telemetry against the rolling time window and gives telemetry the full row", () => {
+    vi.useFakeTimers();
+    try {
+      const now = new Date("2026-09-26T10:00:30Z");
+      vi.setSystemTime(now);
+      mocks.targets.data = [{ ...target, updated_at: now.toISOString() }];
+      mocks.containers.data = [{ ...container, target_id: target.id }];
+      mocks.telemetry.data = {
+        target_id: target.id,
+        collected_at: now.toISOString(),
+        partial: true,
+        missing_samples: 2,
+        samples: [-20, -10, 0].map((seconds, index) => ({
+          collected_at: new Date(now.getTime() + seconds * 1_000).toISOString(),
+          cpu_basis_points: 1_000 + index * 1_000,
+          memory_basis_points: 2_000 + index * 1_000,
+          storage_basis_points: 3_000 + index * 1_000,
+          load_1_milli: 0,
+          network_rx_bytes: null,
+          network_tx_bytes: null,
+          process_count: null,
+        })),
+      };
+
+      renderPage(<TargetDetailPage />, "/targets/target-1");
+
+      const telemetryFigure = screen.getByRole("figure", { name: /CPU-Auslastung im Verlauf/ });
+      const plottedX = [...telemetryFigure.querySelectorAll("circle")].map((point) => Math.round(Number(point.getAttribute("cx"))));
+      expect(plottedX).toEqual([571, 580, 590]);
+      expect(screen.getByRole("status")).toHaveTextContent("fehlen 2 erwartete Messpunkte");
+      expect(telemetryFigure.querySelector('line[stroke="var(--primary)"]')).toBeInTheDocument();
+
+      const telemetryCard = screen.getByRole("heading", { name: "Systemauslastung" }).closest("article");
+      const dockerCard = screen.getByRole("heading", { name: "Docker-Inventar" }).closest("article");
+      expect(telemetryCard).toHaveClass("xl:col-span-2");
+      expect(dockerCard).not.toHaveClass("xl:col-span-2");
+      expect(dockerCard && telemetryCard && (dockerCard.compareDocumentPosition(telemetryCard) & Node.DOCUMENT_POSITION_FOLLOWING)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not infer a Docker host from matching display names", () => {
     mocks.targets.data = [target];
     mocks.containers.data = [{ ...container, name: target.name }];
     renderPage(<TargetDetailPage />, "/targets/target-1");
-    expect(screen.getByText(/Kein verknüpfter LXC-Host gefunden/)).toBeInTheDocument();
+    expect(screen.getByText(/Keine alte Container-Verknüpfung nötig/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Docker-Erkennung öffnen/ })).toHaveAttribute("href", "/docker?target=target-1");
     expect(screen.queryByRole("button", { name: "Docker erkennen" })).not.toBeInTheDocument();
   });
 
@@ -314,20 +365,22 @@ describe("inventory pages", () => {
     expect(screen.getByText("Ausführungen für test-target.")).toBeInTheDocument();
   });
 
-  it("searches and sorts package inventory while rendering telemetry", () => {
+  it("searches and sorts package inventory without mixing in system telemetry", () => {
     mocks.targets.data = [target];
     mocks.jobs.data = [{ id: "inventory-job", operation: "collect_package_inventory", target: { target: "target-1" }, status: "succeeded", created_at: "2026-01-01T00:01:00Z" }];
     mocks.packageInventory.data = { target_id: "target-1", status: "complete", collected_at: "2026-01-01T00:00:00Z", packages: [
-      { name: "curl", installed_version: "8.5", architecture: "amd64", source: "apt" },
-      { name: "zlib", installed_version: "1.2", architecture: null, source: null },
+      { name: "curl", installed_version: "8.5", candidate_version: "8.6", architecture: "amd64", source: "apt" },
+      { name: "zlib", installed_version: "1.2", candidate_version: null, architecture: null, source: null },
     ] };
     mocks.telemetry.data = { target_id: "target-1", collected_at: "2026-01-01T00:00:00Z", samples: [
       { collected_at: "2026-01-01T00:00:00Z", cpu_basis_points: 1200, memory_basis_points: 3400, storage_basis_points: 5600, load_1_milli: 100, network_rx_bytes: null, network_tx_bytes: null, process_count: null },
     ] };
     renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
-    expect(screen.getByRole("figure", { name: /CPU-, RAM/ })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Systemauslastung" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Inventarisierungs-Workflow · Erfolgreich" })).toHaveAttribute("href", "/workflows/inventory-job");
     expect(screen.getByText("2 installierte Pakete")).toBeInTheDocument();
+    expect(screen.getByText("8.6 · Update verfügbar")).toBeInTheDocument();
+    expect(screen.getByText("Noch nicht geprüft")).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("z. B. curl oder 8.5"), { target: { value: "zlib" } });
     expect(screen.getByText("zlib")).toBeInTheDocument();
     expect(screen.queryByText("curl")).not.toBeInTheDocument();
@@ -345,15 +398,15 @@ describe("inventory pages", () => {
         collected_at: new Date(now.getTime() - 30_000).toISOString(),
         samples: [{ collected_at: new Date(now.getTime() - 30_000).toISOString(), cpu_basis_points: 1000, memory_basis_points: 2000, storage_basis_points: 3000, load_1_milli: 0, network_rx_bytes: null, network_tx_bytes: null, process_count: null }],
       };
-      renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
-      expect(screen.getByText("Letzter Messpunkt vor 30 s · Aktuell")).toBeInTheDocument();
-      expect(screen.queryByText(/Seit dem letzten Messpunkt sind mehr als 2 Minuten/)).not.toBeInTheDocument();
+      mocks.targets.data = [{ ...target, updated_at: now.toISOString() }];
+      renderPage(<TargetDetailPage />, "/targets/target-1");
+      expect(screen.getByText("Letzter Messpunkt vor 30 s.")).toBeInTheDocument();
+      expect(screen.queryByText(/Messwerte sind seit mehr als 2 Minuten veraltet/)).not.toBeInTheDocument();
 
       await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
-      expect(screen.queryByText(/Seit dem letzten Messpunkt sind mehr als 2 Minuten/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Messwerte sind seit mehr als 2 Minuten veraltet/)).not.toBeInTheDocument();
       await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
-      expect(screen.getByText(/Seit dem letzten Messpunkt sind mehr als 2 Minuten/)).toBeInTheDocument();
-      expect(screen.getByText("Letzter Messpunkt vor 2 Min. · Veraltet")).toBeInTheDocument();
+      expect(screen.getByText(/Messwerte sind seit mehr als 2 Minuten veraltet/)).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }
@@ -392,27 +445,22 @@ describe("inventory pages", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Inventarisierung konnte nicht gestartet werden: worker unavailable");
   });
 
-  it("shows inventory and telemetry loading, empty and error states", () => {
+  it("shows inventory loading, empty and error states without telemetry", () => {
     mocks.targets.data = [target];
     mocks.packageInventory.isLoading = true;
-    mocks.telemetry.isLoading = true;
     renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
     expect(screen.getByText("Paketinventar wird geladen…")).toBeInTheDocument();
-    expect(screen.getByText("Telemetrie wird geladen…")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Systemauslastung" })).not.toBeInTheDocument();
     cleanup();
     mocks.packageInventory.isLoading = false;
     mocks.packageInventory.data = { target_id: "target-1", status: "not_collected", collected_at: null, packages: [] };
-    mocks.telemetry.isLoading = false;
     renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
     expect(screen.getByText("Noch kein Paketinventar")).toBeInTheDocument();
-    expect(screen.getByText("Noch keine Telemetrie verfügbar.")).toBeInTheDocument();
     cleanup();
     mocks.packageInventory.data = undefined;
     mocks.packageInventory.error = new Error("inventory error");
-    mocks.telemetry.error = new Error("telemetry error");
     renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
     expect(screen.getByText("inventory error")).toBeInTheDocument();
-    expect(screen.getByText("telemetry error")).toBeInTheDocument();
   });
 
   it("renders LXC inventory, node filtering and loading/error states", () => {
@@ -510,6 +558,21 @@ describe("inventory pages", () => {
     expect(screen.getByRole("link", { name: /Zu den Zeitplänen/ })).toHaveAttribute("href", "/schedules");
   });
 
+  it("deletes a policy only after confirmation and keeps the system policy protected", async () => {
+    mocks.targets.data = [target];
+    mocks.updatePolicies.data = [
+      { id: "standard-all-packages-legacy", enabled: true, allowed_targets: [target.id], allowed_packages: [], maintenance_start_minute: 0, maintenance_end_minute: 1439, timezone: "UTC", maximum_risk: "high" },
+      { id: "lxcup-standard-all-packages", enabled: true, allowed_targets: [target.id], allowed_packages: [], maintenance_start_minute: 0, maintenance_end_minute: 1439, timezone: "UTC", maximum_risk: "high" },
+    ];
+    renderPage(<UpdatePoliciesPage />);
+
+    expect(screen.getAllByRole("button", { name: "Policy löschen" })).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "Policy löschen" }));
+
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("standard-all-packages-legacy"));
+    await waitFor(() => expect(mocks.deleteUpdatePolicy).toHaveBeenCalledWith("standard-all-packages-legacy", true));
+  });
+
   it("links to policy management when creating a package-update schedule", async () => {
     mocks.targets.data = [target];
     renderPage(<SchedulesPage />);
@@ -534,6 +597,17 @@ describe("inventory pages", () => {
     await userEvent.click(screen.getByRole("button", { name: "Entfernen" }));
     await userEvent.click(screen.getByRole("button", { name: /Ja, Inventareintrag/ }));
     await waitFor(() => expect(mocks.removeDockerWorkload).toHaveBeenCalledWith(101, "docker-1"));
+  });
+
+  it("offers manually registered LXC targets with a connected agent for Docker discovery", async () => {
+    mocks.targets.data = [{ ...target, state: "managed" }];
+    renderPage(<DockerPage />);
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
+    expect(screen.getByRole("option", { name: "test-target · 192.0.2.10" })).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "LXC mit Agent" }), "target:target-1");
+    await userEvent.click(screen.getByRole("button", { name: "Docker-Container entdecken" }));
+    await waitFor(() => expect(mocks.discoverTargetDocker).toHaveBeenCalledWith("target-1"));
+    expect(await screen.findByText("web")).toBeInTheDocument();
   });
 
   it("covers loading, error and filtered empty inventory states", async () => {
@@ -722,9 +796,9 @@ describe("onboarding and secret pages", () => {
   });
 
   it("shows the version reported by a connected target agent", () => {
-    mocks.targets.data = [{ ...target, agent_version: "0.2.0" }];
+    mocks.targets.data = [{ ...target, agent_version: "0.3.1" }];
     renderPage(<TargetsPage />);
-    expect(screen.getByText("v0.2.0")).toBeInTheDocument();
+    expect(screen.getByText("v0.3.1")).toBeInTheDocument();
   });
 
   it("uses the same resource-card inventory design for LXC, Linux, and Windows", () => {
@@ -735,12 +809,12 @@ describe("onboarding and secret pages", () => {
     ];
 
     for (const resource of resources) {
-      mocks.targets.data = [{ ...target, kind: resource.kind, agent_version: "0.2.0" }];
+      mocks.targets.data = [{ ...target, kind: resource.kind, agent_version: "0.3.1" }];
       renderPage(<TargetsPage area={resource.area} />);
 
       expect(screen.getByRole("list", { name: "Ressourcen" })).toBeInTheDocument();
       expect(screen.getByText(resource.badge)).toBeInTheDocument();
-      expect(screen.getByText("v0.2.0")).toBeInTheDocument();
+      expect(screen.getByText("v0.3.1")).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Paketinventar für test-target" })).toHaveAttribute("href", "/targets/target-1/packages");
       expect(screen.queryByRole("table")).not.toBeInTheDocument();
       cleanup();
@@ -749,15 +823,23 @@ describe("onboarding and secret pages", () => {
 
   it("shows package inventory and telemetry health in each resource card", () => {
     mocks.targets.data = [target];
-    mocks.packageInventory.data = { target_id: target.id, status: "complete", collected_at: "2099-01-01T00:00:00Z", packages: [{ name: "curl", installed_version: "8.5.0", architecture: "amd64", source: "apt" }] };
+    mocks.packageInventory.data = { target_id: target.id, status: "complete", collected_at: "2099-01-01T00:00:00Z", packages: [
+      { name: "curl", installed_version: "8.5.0", candidate_version: "8.5.0", architecture: "amd64", source: "apt" },
+      { name: "openssl", installed_version: "3.0.1", candidate_version: "3.0.2", architecture: "amd64", source: "apt" },
+    ] };
     mocks.telemetry.data = { target_id: target.id, collected_at: "2099-01-01T00:00:00Z", samples: [{ collected_at: "2099-01-01T00:00:00Z", cpu_basis_points: 2500, memory_basis_points: 4000, storage_basis_points: 5000, load_1_milli: 100, network_rx_bytes: 10, network_tx_bytes: 20, process_count: 5 }] };
 
     renderPage(<TargetsPage area="lxc" />);
 
     expect(screen.getByRole("link", { name: "Paketinventar für test-target" })).toHaveAttribute("href", "/targets/target-1/packages");
-    expect(screen.getByText(/1 Pakete/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Systemauslastung für test-target" })).toHaveAttribute("href", "/targets/target-1");
+    expect(screen.getByText(/2 Pakete/)).toBeInTheDocument();
+    expect(screen.getByText("1 Update verfügbar")).toBeInTheDocument();
+    const telemetryLink = screen.getByRole("link", { name: "Systemauslastung für test-target" });
+    expect(telemetryLink).toHaveAttribute("href", "/targets/target-1");
     expect(screen.getByText(/Aktuell/)).toBeInTheDocument();
+    expect(within(telemetryLink).getByText(/CPU 25.0%/)).toBeInTheDocument();
+    expect(within(telemetryLink).getByText(/RAM 40.0%/)).toBeInTheDocument();
+    expect(within(telemetryLink).getByText(/Speicher 50.0%/)).toBeInTheDocument();
   });
 
   it("starts enrollment and displays a failed state", async () => {
@@ -831,12 +913,12 @@ describe("workflow pages", () => {
     mocks.jobs.data = [{ id: "job-1", operation: "update_packages", playbook: "packages/update.yml", playbook_version: "1", target: { target: "target-1" }, mode: "apply", status: "failed", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" }] as any;
     mocks.events.data = [{ sequence: 1, job_id: "job-1", event: { kind: "failed", code: "playbook_failed" }, created_at: "2026-01-01T00:00:00Z" }] as any;
     renderPage(<WorkflowsPage />);
-    await userEvent.selectOptions(screen.getAllByRole("combobox")[0], "target-1");
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Ziel" }), "target-1");
     await userEvent.selectOptions(screen.getAllByRole("combobox")[1], "update_packages");
     await userEvent.selectOptions(screen.getAllByRole("combobox")[2], "plan");
     await userEvent.type(screen.getByPlaceholderText("z. B. nginx,curl"), "nginx,curl");
     await userEvent.selectOptions(screen.getAllByRole("combobox")[3], "safe-packages");
-    await userEvent.click(screen.getByRole("checkbox"));
+    await userEvent.click(screen.getByRole("checkbox", { name: /Ich bestätige Ziel und den Umfang dieser Vorschau/ }));
     await userEvent.click(screen.getByRole("button", { name: "Workflow starten" }));
     await waitFor(() => expect(mocks.createAnsibleJob).toHaveBeenCalled());
     expect(screen.getByText("playbook_failed")).toBeInTheDocument();
@@ -999,5 +1081,23 @@ describe("application shell", () => {
     const breadcrumbs = await screen.findByRole("navigation", { name: "Brotkrumennavigation" });
     expect(within(breadcrumbs).getByText("Seite nicht gefunden")).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Seite nicht gefunden" })).toBeInTheDocument();
+  });
+
+  it("shows telemetry alerts with resource context and marks recovered alerts resolved", async () => {
+    window.localStorage.removeItem("lxcup-read-notifications");
+    window.localStorage.removeItem("lxcup-telemetry-alert-history");
+    mocks.targets.data = [target];
+    mocks.telemetryAlerts.data = [{ id: "target-1:cpu", target_id: "target-1", target_name: "test-target", target_kind: "lxc", target_address: "192.0.2.10", metric: "CPU", severity: "warning", value_basis_points: 9_200, threshold_basis_points: 9_000, age_seconds: null, triggered_at: "2026-09-26T14:00:00Z", observed_at: "2026-09-26T14:05:00Z" }];
+    renderPage(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Benachrichtigungen" }));
+    const alert = await screen.findByRole("link", { name: /Hohe CPU-Auslastung/ });
+    expect(alert).toHaveAttribute("href", "/targets/target-1");
+    expect(alert).toHaveTextContent("test-target");
+    expect(alert).toHaveTextContent("92.0% · Grenzwert 90.0%");
+
+    mocks.telemetryAlerts.data = [];
+    await userEvent.click(screen.getByRole("button", { name: "Alle als gelesen markieren" }));
+    expect(await screen.findByText("Behoben")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Hohe CPU-Auslastung/ })).toHaveTextContent("Auslastung wieder im Normalbereich.");
   });
 });

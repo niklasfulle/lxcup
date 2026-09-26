@@ -11,6 +11,8 @@
   a { @apply no-underline text-inherit; }
   :where(a, button, input, select, textarea):focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
   input, select { @apply w-full border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-sm text-[var(--ink)] outline-none focus:border-blue-500; }
+  select { appearance:none; padding-right:2.25rem; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23647089' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.75'%3E%3Cpath d='m3 4.5 3 3 3-3'/%3E%3C/svg%3E"); background-position:right 0.625rem center; background-repeat:no-repeat; background-size:0.75rem; }
+  :root[data-theme="dark"] select { background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23a7b3c7' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.75'%3E%3Cpath d='m3 4.5 3 3 3-3'/%3E%3C/svg%3E"); }
   table { @apply w-full border-collapse text-sm; }
   th, td { @apply border-b border-[var(--line)] px-2 py-2 text-left; }
   th { @apply bg-[var(--paper-muted)] text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]; }

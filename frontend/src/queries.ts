@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { apiClient, getAnsibleJob, getAnsibleJobEvents, getDockerDiscovery, getEnrollment, getPackageInventory, getTargetTelemetry, getWorkerAvailability, listAnsibleJobs, listDockerWorkloads, listSchedules, listTargets, listUpdatePolicies, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerDiscoveryRunDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type PackageInventoryDto, type ScheduleDto, type TargetDto, type TelemetryDto, type UpdatePolicyDto, type WorkerAvailabilityDto } from "./api";
+import { apiClient, getAnsibleJob, getAnsibleJobEvents, getDockerDiscovery, getEnrollment, getPackageInventory, getTargetTelemetry, getTelemetryAlerts, getWorkerAvailability, listAnsibleJobs, listDockerWorkloads, listSchedules, listTargets, listUpdatePolicies, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerDiscoveryRunDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type PackageInventoryDto, type ScheduleDto, type TargetDto, type TelemetryAlertDto, type TelemetryDto, type UpdatePolicyDto, type WorkerAvailabilityDto } from "./api";
 
 export const queryKeys = {
   targets: ["targets"] as const,
@@ -13,6 +13,7 @@ export const queryKeys = {
   dockerDiscovery: (containerId: number) => ["containers", containerId, "docker-discovery"] as const,
   packageInventory: (targetId: string) => ["targets", targetId, "package-inventory"] as const,
   telemetry: (targetId: string) => ["targets", targetId, "telemetry"] as const,
+  telemetryAlerts: ["telemetry-alerts"] as const,
   schedules: ["schedules"] as const,
   updatePolicies: ["update-policies"] as const,
 };
@@ -124,6 +125,10 @@ export function usePackageInventory(targetId: string | undefined) {
 
 export function useTargetTelemetry(targetId: string | undefined) {
   return useQuery<TelemetryDto>({ queryKey: targetId ? queryKeys.telemetry(targetId) : ["targets", "none", "telemetry"], queryFn: ({ signal }) => getTargetTelemetry(targetId!, signal), enabled: Boolean(targetId), staleTime: 2_000, refetchInterval: 5_000 });
+}
+
+export function useTelemetryAlerts() {
+  return useQuery<TelemetryAlertDto[]>({ queryKey: queryKeys.telemetryAlerts, queryFn: ({ signal }) => getTelemetryAlerts(signal), staleTime: 5_000, refetchInterval: 15_000 });
 }
 
 export function useSchedules() {

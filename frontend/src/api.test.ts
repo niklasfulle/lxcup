@@ -9,6 +9,7 @@ import {
   createSecret,
   createTarget,
   deleteSecret,
+  deleteUpdatePolicy,
   discoverDockerWorkloads,
   getAgentHealth,
   getAgentMetrics,
@@ -67,6 +68,18 @@ describe("ApiClient", () => {
     expect(request).not.toHaveProperty("shell");
   });
 
+  it("builds a read-only package inventory workflow request", () => {
+    const request = buildWorkflowRequest("target-inventory", "collect_package_inventory", "check", "", false);
+
+    expect(request).toMatchObject({
+      operation: "collect_package_inventory",
+      target_id: "target-inventory",
+      mode: "check",
+      parameters: { operation: "collect_package_inventory" },
+      confirmed: false,
+    });
+  });
+
   it("sends bearer tokens only as authorization headers and rejects viewer mutations locally", async () => {
     const client = new ApiClient();
     client.setCredentials("opaque-test-token", "viewer");
@@ -98,6 +111,7 @@ describe("ApiClient", () => {
     await rotateSecret("s", "v2", false);
     await revokeSecret("s", false);
     await deleteSecret("s", false);
+    await deleteUpdatePolicy("legacy-policy", true);
     await createContainerAction(1, "refresh", true);
     await getAgentHealth(1);
     await getAgentMetrics(1);
@@ -108,6 +122,7 @@ describe("ApiClient", () => {
     expect(get).toHaveBeenCalled();
     expect(post).toHaveBeenCalled();
     expect(post).toHaveBeenCalledWith("/api/v1/ansible/jobs/job-reconcile/reconcile", {}, undefined);
+    expect(del).toHaveBeenCalledWith("/api/v1/update-policies/legacy-policy", { confirmed: true }, undefined);
     expect(del).toHaveBeenCalled();
     get.mockRestore();
     post.mockRestore();

@@ -127,13 +127,22 @@ export type DockerDiscoveryRunDto = {
 };
 
 export type DockerDiscoveryResultDto = { run: DockerDiscoveryRunDto; workloads: DockerWorkloadDto[] };
+export type TargetDockerDiscoveryDto = {
+  target_id: string;
+  target_name: string;
+  available: boolean;
+  reason: string | null;
+  collected_at: string;
+  containers: Array<{ id: string; name: string; image: string; state: string; status: string; ports: string[]; started_at: string | null; labels: string[] }>;
+};
 export type PackageInventoryDto = {
   target_id: string;
   status: "complete" | "not_collected";
   collected_at: string | null;
-  packages: Array<{ name: string; installed_version: string; architecture: string | null; source: string | null }>;
+  packages: Array<{ name: string; installed_version: string; candidate_version: string | null; architecture: string | null; source: string | null }>;
 };
-export type TelemetryDto = { target_id: string; collected_at: string | null; samples: Array<{ collected_at: string; cpu_basis_points: number | null; memory_basis_points: number | null; storage_basis_points: number | null; load_1_milli: number | null; network_rx_bytes: number | null; network_tx_bytes: number | null; process_count: number | null }> };
+export type TelemetryDto = { target_id: string; collected_at: string | null; partial: boolean; missing_samples: number; samples: Array<{ collected_at: string; cpu_basis_points: number | null; memory_basis_points: number | null; storage_basis_points: number | null; load_1_milli: number | null; network_rx_bytes: number | null; network_tx_bytes: number | null; process_count: number | null }> };
+export type TelemetryAlertDto = { id: string; target_id: string; target_name: string; target_kind: TargetKind; target_address: string; metric: string; severity: "warning" | "critical"; value_basis_points: number | null; threshold_basis_points: number | null; age_seconds: number | null; triggered_at: string; observed_at: string };
 export type ThresholdRuleDto = { metric: "cpu_basis_points" | "memory_basis_points" | "storage_basis_points" | "heartbeat_age_seconds"; operator: "greater_than_or_equal" | "less_than_or_equal"; value: number };
 export type ScheduleDto = { id: string; operation: string; timezone: string; target_ids: string[]; every_minutes: number; enabled: boolean; threshold: ThresholdRuleDto | null; policy_id: string | null; last_run_at: string | null; next_run_at: string; last_error: string | null };
 export type UpdatePolicyDto = { id: string; allowed_targets: string[]; allowed_packages: string[]; maintenance_start_minute: number; maintenance_end_minute: number; timezone: string; maximum_risk: "low" | "medium" | "high"; enabled: boolean };
@@ -409,11 +418,13 @@ export function listTargets(signal?: AbortSignal) { return apiClient.get<TargetD
 export function createTarget(request: CreateTargetRequest, signal?: AbortSignal) { return apiClient.post<TargetDto>("/api/v1/targets", request, signal); }
 export function getPackageInventory(targetId: string, signal?: AbortSignal) { return apiClient.get<PackageInventoryDto>(`/api/v1/targets/${targetId}/package-inventory`, signal); }
 export function getTargetTelemetry(targetId: string, signal?: AbortSignal) { return apiClient.get<TelemetryDto>(`/api/v1/targets/${targetId}/telemetry`, signal); }
+export function getTelemetryAlerts(signal?: AbortSignal) { return apiClient.get<TelemetryAlertDto[]>("/api/v1/telemetry-alerts", signal); }
 export function listSchedules(signal?: AbortSignal) { return apiClient.get<ScheduleDto[]>("/api/v1/schedules", signal); }
 export function createSchedule(request: Omit<ScheduleDto, "last_run_at" | "next_run_at" | "last_error">, signal?: AbortSignal) { return apiClient.post<ScheduleDto>("/api/v1/schedules", request, signal); }
 export function setScheduleEnabled(id: string, enabled: boolean, signal?: AbortSignal) { return apiClient.patch<ScheduleDto>(`/api/v1/schedules/${encodeURIComponent(id)}`, { enabled }, signal); }
 export function listUpdatePolicies(signal?: AbortSignal) { return apiClient.get<UpdatePolicyDto[]>("/api/v1/update-policies", signal); }
 export function createUpdatePolicy(request: Omit<UpdatePolicyDto, "enabled"> & { enabled?: boolean }, signal?: AbortSignal) { return apiClient.post<UpdatePolicyDto>("/api/v1/update-policies", request, signal); }
+export function deleteUpdatePolicy(id: string, confirmed = true, signal?: AbortSignal) { return apiClient.delete<void>(`/api/v1/update-policies/${encodeURIComponent(id)}`, { confirmed }, signal); }
 
 export function createAnsibleJob(request: CreateAnsibleJobRequest, signal?: AbortSignal) {
   return apiClient.post<AnsibleJobDto>("/api/v1/ansible/jobs", request, signal);
@@ -476,6 +487,10 @@ export function listDockerWorkloads(containerId: number, signal?: AbortSignal) {
 
 export function discoverDockerWorkloads(containerId: number, signal?: AbortSignal) {
   return apiClient.post<DockerDiscoveryResultDto>(`/api/v1/containers/${containerId}/docker/discover`, undefined, signal);
+}
+
+export function discoverTargetDocker(targetId: string, signal?: AbortSignal) {
+  return apiClient.post<TargetDockerDiscoveryDto>(`/api/v1/targets/${encodeURIComponent(targetId)}/docker/discovery`, { confirmed: true }, signal);
 }
 
 export function getDockerDiscovery(containerId: number, signal?: AbortSignal) {
