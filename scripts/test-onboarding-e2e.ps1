@@ -142,7 +142,7 @@ try {
         operation = "deploy_agent"
         target_id = $targetId
         mode = "apply"
-        parameters = @{ operation = "deploy_agent"; agent_version = "0.2.0" }
+        parameters = @{ operation = "deploy_agent"; agent_version = "0.3.1" }
         idempotency_key = "onboarding-deploy-$targetId"
         confirmed = $true
     }
@@ -196,8 +196,8 @@ try {
 
     $target = (Invoke-Controller "Get" "/api/v1/targets").data |
         Where-Object { $_.id -eq $targetId } | Select-Object -First 1
-    if ($target.state -ne "managed" -or $target.agent_version -ne "0.2.0") {
-        throw "The target completed jobs but has not reported a managed 0.2.0 agent heartbeat."
+    if ($target.state -ne "managed" -or $target.agent_version -ne "0.3.1") {
+        throw "The target completed jobs but has not reported a managed 0.3.1 agent heartbeat."
     }
     $inventory = Invoke-Controller "Get" "/api/v1/targets/$targetId/package-inventory"
     if ($inventory.data.status -ne "complete") { throw "The final package inventory is not complete." }

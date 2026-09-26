@@ -1,0 +1,10 @@
+{
+  "version": "0.3.1",
+  "artifacts": [
+    {
+      "platform": "linux-amd64",
+      "file": "linux-amd64",
+      "sha256": "2539ad86bfadccc38d0e5f18adfdf39b8e8512d6d90ad30a0bb2e7ac793d963c"
+    }
+  ]
+}

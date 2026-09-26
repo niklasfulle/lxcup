@@ -6,7 +6,7 @@ Downloadbereich bereitgestellt. Lege pro freigegebener Version einen Ordner an:
 ```text
 artifacts/
   agent/
-    0.2.0/
+    0.3.1/
       linux-amd64
       manifest.json
 ```
@@ -19,7 +19,7 @@ Beispiel:
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "0.3.1",
   "artifacts": [{
     "platform": "linux-amd64",
     "file": "linux-amd64",

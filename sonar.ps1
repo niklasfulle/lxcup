@@ -18,7 +18,7 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidateNotNullOrEmpty()]
-    [string]$ProjectVersion = "0.2.0"
+    [string]$ProjectVersion = "0.3.1"
 )
 
 $ErrorActionPreference = "Stop"
