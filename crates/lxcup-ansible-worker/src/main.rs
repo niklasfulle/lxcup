@@ -20,6 +20,7 @@ use tokio::{process::Command, time::timeout};
 use tracing::Instrument;
 use uuid::Uuid;
 
+mod artifact_store;
 mod execution_support;
 
 #[derive(Deserialize)]
@@ -36,6 +37,7 @@ struct Artifact {
 struct Runtime {
     secrets: EncryptedFileSecretStore,
     artifacts: String,
+    artifact_probe: reqwest::Client,
     user: String,
     controller_url: Option<String>,
 }
@@ -53,10 +55,13 @@ async fn main() {
     recover_interrupted_jobs(&repos)
         .await
         .expect("worker recovery");
+    tokio::spawn(artifact_store::report_availability(
+        repos.worker_heartbeats.clone(),
+        worker_name.clone(),
+        runtime.artifact_probe.clone(),
+        runtime.artifacts.clone(),
+    ));
     loop {
-        if let Err(error) = repos.worker_heartbeats.record(&worker_name).await {
-            tracing::error!(?error, "worker heartbeat failed");
-        }
         if let Err(e) = process(&repos, &runtime, &worker_name).await {
             tracing::error!(?e, "worker cycle failed");
         }
@@ -138,6 +143,8 @@ impl Runtime {
                 .ok_or("LXCUP_ARTIFACT_BASE_URL is missing")?
                 .trim_end_matches('/')
                 .to_owned(),
+            artifact_probe: artifact_store::client()
+                .map_err(|_| "artifact store probe client could not be configured")?,
             user: user.unwrap_or_else(|| "lxcup".into()),
             controller_url: controller_url
                 .map(|value| value.trim_end_matches('/').to_owned())

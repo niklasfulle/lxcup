@@ -48,9 +48,17 @@ async fn postgres_ansible_job_repository_claims_jobs_and_persists_events() {
     assert!(queue_metrics.oldest_queued_at.is_some());
     repositories
         .worker_heartbeats
-        .record("integration-worker")
+        .record("integration-worker", false, chrono::Utc::now())
         .await
         .unwrap();
+    let heartbeat_status = repositories
+        .worker_heartbeats
+        .latest_status()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(heartbeat_status.artifact_store_available, Some(false));
+    assert!(heartbeat_status.artifact_store_checked_at.is_some());
     assert!(
         repositories
             .worker_heartbeats

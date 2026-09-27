@@ -265,6 +265,34 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
     )
     .unwrap();
     repositories.targets.save(&target).await.unwrap();
+    let docker_inventory = lxcup_persistence::PersistedTargetDockerInventory {
+        collected_at: now,
+        containers: vec![lxcup_agent::DockerContainerInfo {
+            id: "docker-target-integration".to_owned(),
+            name: "web".to_owned(),
+            image: "nginx:latest".to_owned(),
+            state: "running".to_owned(),
+            status: "Up".to_owned(),
+            ports: vec!["80/tcp".to_owned()],
+            started_at: None,
+            labels: vec!["app=web".to_owned()],
+        }],
+    };
+    repositories
+        .target_docker_inventory
+        .save(target.id, &docker_inventory)
+        .await
+        .unwrap();
+    assert_eq!(
+        repositories
+            .target_docker_inventory
+            .get(target.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .containers,
+        docker_inventory.containers
+    );
     let telemetry_now = postgres_now();
     let heartbeat = AgentHeartbeat {
         target_id: target.id.as_uuid(),

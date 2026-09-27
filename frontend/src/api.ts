@@ -30,7 +30,7 @@ export type ContainerActionTaskDto = {
   updated_at: string;
 };
 export type AgentHealthDto = { healthy: boolean; info: { agent_id: string; platform: string; hostname: string; version: string; protocol_version: string }; metrics: { collected_at: string; commands_total: number; commands_failed: number; last_command_at: string | null } };
-export type WorkerAvailabilityDto = { available: boolean; last_seen_at: string | null };
+export type WorkerAvailabilityDto = { available: boolean; last_seen_at: string | null; artifact_store_available: boolean | null; artifact_store_checked_at: string | null };
 
 export type ScanDto = {
   id: string;
@@ -491,6 +491,9 @@ export function discoverDockerWorkloads(containerId: number, signal?: AbortSigna
 
 export function discoverTargetDocker(targetId: string, signal?: AbortSignal) {
   return apiClient.post<TargetDockerDiscoveryDto>(`/api/v1/targets/${encodeURIComponent(targetId)}/docker/discovery`, { confirmed: true }, signal);
+}
+export function getTargetDockerInventory(targetId: string, signal?: AbortSignal) {
+  return apiClient.get<TargetDockerDiscoveryDto>(`/api/v1/targets/${encodeURIComponent(targetId)}/docker/discovery`, signal);
 }
 
 export function getDockerDiscovery(containerId: number, signal?: AbortSignal) {

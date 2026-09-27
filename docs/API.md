@@ -41,7 +41,7 @@ Consult OpenAPI for exact payloads and response codes.
 | --- | --- |
 | Health and metrics | `GET /health/live`, `GET /health/ready`, `GET /metrics` |
 | Authentication | `GET /api/v1/auth/session`, `POST /api/v1/auth/logout` |
-| Targets | `GET/POST /api/v1/targets`, `GET /api/v1/targets/{target_id}`, package inventory and telemetry reads, active telemetry alerts at `GET /api/v1/telemetry-alerts`, confirmed Docker discovery via a connected LXC agent at `/api/v1/targets/{target_id}/docker/discovery` |
+| Targets | `GET/POST /api/v1/targets`, `GET /api/v1/targets/{target_id}`, package inventory and telemetry reads, active telemetry alerts at `GET /api/v1/telemetry-alerts`, Docker inventory read and confirmed discovery via a connected LXC agent at `/api/v1/targets/{target_id}/docker/discovery` |
 | Enrollment and agents | `POST /api/v1/enrollments`, `GET /api/v1/enrollments/{enrollment_id}`, `POST /api/v1/agents/heartbeat` |
 | Secrets | list/create, audit, metadata read, rotate, and revoke under `/api/v1/secrets` |
 | Ansible workflows | enqueue, read, retry, and event reads under `/api/v1/ansible/jobs`; worker availability under `/api/v1/ansible/worker-availability` |
@@ -67,6 +67,22 @@ permission. The system-wide standard policy is protected, and a policy used by
 an enabled recurring schedule cannot be deleted until that schedule is paused.
 Deletion invalidates future applies for plans that reference that policy; the
 workflow/job history remains available.
+
+`GET /api/v1/ansible/worker-availability` reports heartbeat freshness and the
+latest artifact-manifest probe (`artifact_store_available` and
+`artifact_store_checked_at`). A `false` artifact value means the worker is
+running but its configured versioned manifest endpoint did not return a
+successful HTTP response on the last probe.
+
+For registered LXC targets, `POST /api/v1/targets/{target_id}/docker/discovery`
+persists each successful Docker inventory snapshot when PostgreSQL is enabled.
+`GET` on the same path returns the latest successful snapshot after reload; a
+failed later probe does not erase previously discovered containers. In
+memory-only development mode snapshots remain available until the controller
+restarts. The agent uses stable discovery reasons such as
+`docker_permission_denied` for Docker-socket access failures and
+`docker_cli_unavailable` when its Docker CLI cannot be launched; raw stderr is
+not returned to the client.
 
 ## Errors and observability
 

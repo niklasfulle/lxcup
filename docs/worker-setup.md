@@ -40,3 +40,13 @@ Der Worker akzeptiert nur die im Manifest genannte Datei und SHA-256-Summe.
 
 Ohne vollständige Executor-Konfiguration schlägt der Worker sicher fehl und
 protokolliert `worker_unavailable`; er behauptet keinen Erfolg.
+
+Der Worker prüft den versionierten Artifact-Store-Manifest-Endpunkt beim Start
+und anschließend alle 15 Sekunden. Bei Nichterreichbarkeit schreibt er eine
+Warnung ins Worker-Log und meldet den Zustand per Heartbeat an den Controller;
+die Oberfläche zeigt dann „Artifact Store nicht verfügbar“. Der Worker prüft
+automatisch weiter und meldet die Wiederherstellung. Compose startet den Worker
+erst, wenn der Artifact Store gesund ist, und startet beide Container nach
+unerwartetem Prozessende erneut (`restart: unless-stopped`). Ein reiner
+`unhealthy`-Status beendet einen noch laufenden Container nicht; siehe dazu das
+Betriebs-Runbook.

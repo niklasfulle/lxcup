@@ -73,6 +73,7 @@ services:
 
   artifacts:
     image: nginx:1.27-alpine
+    restart: unless-stopped
     volumes:
       - ./artifacts:/usr/share/nginx/html:ro
     read_only: true
@@ -91,6 +92,7 @@ services:
     build:
       context: .
       dockerfile: deploy/worker.Dockerfile
+    restart: unless-stopped
     env_file:
       - ${LXCUP_SERVICE_ENV_FILE:-.env}
     environment:
@@ -111,6 +113,7 @@ services:
         condition: service_healthy
       artifacts:
         condition: service_healthy
+        restart: true
     healthcheck:
       test: ["CMD-SHELL", "kill -0 1"]
       interval: 10s

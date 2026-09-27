@@ -21,11 +21,14 @@ mod docker;
 mod package_inventory;
 pub use package_inventory::{PackageInventoryStatus, PersistedPackageInventory};
 mod schedules;
+mod target_docker_inventory;
 mod targets;
 mod telemetry;
 mod update_policies;
 mod worker_heartbeats;
 pub use ansible_jobs::AnsibleQueueMetrics;
+pub use target_docker_inventory::PersistedTargetDockerInventory;
+pub use worker_heartbeats::WorkerHeartbeatStatus;
 
 mod environment;
 
@@ -95,6 +98,11 @@ pub struct DockerWorkloadRepository {
 
 #[derive(Clone)]
 pub struct DockerDiscoveryRepository {
+    pool: PgPool,
+}
+
+#[derive(Clone)]
+pub struct TargetDockerInventoryRepository {
     pool: PgPool,
 }
 
@@ -176,6 +184,7 @@ pub struct AuditEventRepository {
 pub struct Repositories {
     pub docker_workloads: DockerWorkloadRepository,
     pub docker_discovery: DockerDiscoveryRepository,
+    pub target_docker_inventory: TargetDockerInventoryRepository,
     pub package_inventory: PackageInventoryRepository,
     pub schedules: ScheduleRepository,
     pub update_policies: UpdatePolicyRepository,
@@ -198,6 +207,7 @@ impl Repositories {
         Self {
             docker_workloads: DockerWorkloadRepository::new(database),
             docker_discovery: DockerDiscoveryRepository::new(database),
+            target_docker_inventory: TargetDockerInventoryRepository::new(database),
             package_inventory: PackageInventoryRepository::new(database),
             schedules: ScheduleRepository::new(database),
             update_policies: UpdatePolicyRepository::new(database),

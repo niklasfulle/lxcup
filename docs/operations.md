@@ -22,6 +22,15 @@ Frontend und produktiver Caddy besitzen ebenfalls Healthchecks. Der Caddy-
 Healthcheck validiert die Konfiguration; sein Upstream ist der Compose-
 Servicename `lxcup-server`, nicht localhost im Caddy-Container.
 
+Artifact Store und Worker verwenden `restart: unless-stopped`; der Worker wird
+erst gestartet, wenn der Artifact-Store-Healthcheck erfolgreich ist. Ein
+expliziter Compose-Neustart des Artifact Stores startet auch den Worker neu.
+Docker startet Container bei beendetem Prozess erneut, aber nicht allein wegen
+des Status `unhealthy`. Der Worker prüft den Manifest-Endpunkt selbst alle
+15 Sekunden, protokolliert Zustandswechsel und übermittelt den Status in seinem
+Heartbeat. Eine Warnung in der Oberfläche bedeutet daher: Worker lebt, der
+Artifact Store wurde zuletzt aber als nicht verfügbar geprüft.
+
 ## Wichtige Signale
 
 | Signal | Bedeutung | Alarmbedingung |
@@ -79,9 +88,12 @@ docker compose restart lxcup-worker
 ### Artefakte nicht erreichbar
 
 1. `docker compose ps artifacts` prüfen.
-2. Den freigegebenen Manifest-Endpunkt aus dem Worker-Log ohne Credentials
-   testen.
-3. Manifest-Version und SHA-256 niemals manuell überschreiben; das Artefakt
+2. `docker compose logs --since 10m lxcup-worker` auf die Warnung zum Artifact
+   Store prüfen. Der Worker wiederholt die Prüfung automatisch alle 15 Sekunden.
+3. Falls der Artifact Store beendet ist, versucht Docker den Container zu
+   starten. Bei `unhealthy` trotz laufendem Prozess die Ursache prüfen; ein
+   Healthcheck-Neustart ist keine Docker-Compose-Funktion.
+4. Manifest-Version und SHA-256 niemals manuell überschreiben; das Artefakt
    muss erneut freigegeben werden.
 
 ## Nachbearbeitung eines fehlgeschlagenen Jobs

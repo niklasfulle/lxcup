@@ -255,8 +255,9 @@ function formatDuration(seconds: number) { return `${Math.floor(seconds / 3600)}
 
 function WorkerAvailabilityBanner() {
   const availability = useWorkerAvailability();
-  if (availability.data?.available !== false) return null;
-  return <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 border border-[#e7c47f] bg-[var(--warning-soft)] px-3 py-2 text-sm text-[var(--warning)]" role="alert"><strong>Ansible-Worker nicht verfügbar</strong><span>Neue Workflows bleiben eingereiht, bis ein Worker wieder aktiv ist.</span></div>;
+  if (availability.data?.available === false) return <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 border border-[#e7c47f] bg-[var(--warning-soft)] px-3 py-2 text-sm text-[var(--warning)]" role="alert"><strong>Ansible-Worker nicht verfügbar</strong><span>Neue Workflows bleiben eingereiht, bis ein Worker wieder aktiv ist.</span></div>;
+  if (availability.data?.artifact_store_available === false) return <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 border border-[#e7c47f] bg-[var(--warning-soft)] px-3 py-2 text-sm text-[var(--warning)]" role="alert"><strong>Artifact Store nicht verfügbar</strong><span>Der Worker prüft die Verbindung automatisch erneut. Workflows, die Agent-Artefakte benötigen, können bis zur Wiederherstellung fehlschlagen.</span></div>;
+  return null;
 }
 
 function NotificationCenter({ targets, containers }: Readonly<{ targets: TargetDto[]; containers: ContainerDto[] }>) {

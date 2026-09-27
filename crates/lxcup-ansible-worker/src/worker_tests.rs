@@ -124,6 +124,7 @@ fn runtime_with_secrets(
         Runtime {
             secrets: store,
             artifacts: "http://127.0.0.1:1".to_owned(),
+            artifact_probe: reqwest::Client::new(),
             user: "lxcup".to_owned(),
             controller_url: None,
         },

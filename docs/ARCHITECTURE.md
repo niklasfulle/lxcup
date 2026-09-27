@@ -88,7 +88,9 @@ to establish presence. Heartbeat freshness is computed from persisted agent
 signals. Telemetry samples are associated with their target and exposed through
 the target API; current UI depicts a rolling recent window. Docker containers
 are workloads discovered by an agent on a managed host, not standalone
-connections.
+connections. For registered LXC targets, the controller persists the latest
+successful Docker inventory snapshot so it remains visible after a page reload
+or controller restart.
 
 The controller derives telemetry alerts from retained samples. Sustained CPU,
 RAM, and storage thresholds ignore short spikes and break across sample gaps;
@@ -111,6 +113,15 @@ recovery notices and read state in browser storage.
   inventory is accepted only after server-side identity and input checks.
 - The artifact service serves versioned agent artifacts and manifests. It is
   not an arbitrary job input channel.
+
+The worker probes its configured versioned manifest at startup and every
+15 seconds thereafter. It records artifact availability with its two-second
+worker heartbeat, logs availability transitions, and keeps processing
+non-artifact workflows while the store is unavailable. Compose gates initial
+worker startup on a healthy artifact service and restarts both containers after
+unexpected process exit; the UI exposes the latest probe result. Compose does
+not restart a live container solely because its healthcheck reports
+`unhealthy`.
 
 For schema, API, security, and operating procedures, use the linked focused
 documents from [`README.md`](README.md).

@@ -12,9 +12,10 @@ pub use repositories::{
     AgentRegistrationRepository, AnsibleJobRepository, AnsibleQueueMetrics, AuditEvent,
     AuditEventRepository, ContainerRepository, DockerWorkloadRepository, EnvironmentRepository,
     ExecutionEvent, ExecutionRepository, ExecutionResultRecord, NodeRepository,
-    PackageInventoryRepository, PackageInventoryStatus, PersistedPackageInventory, Repositories,
-    RepositoryError, ScanRepository, ScheduleRepository, TargetRepository, UpdatePlanRepository,
-    UpdatePolicyRepository, WorkerHeartbeatRepository,
+    PackageInventoryRepository, PackageInventoryStatus, PersistedPackageInventory,
+    PersistedTargetDockerInventory, Repositories, RepositoryError, ScanRepository,
+    ScheduleRepository, TargetDockerInventoryRepository, TargetRepository, UpdatePlanRepository,
+    UpdatePolicyRepository, WorkerHeartbeatRepository, WorkerHeartbeatStatus,
 };
 
 /// Konfiguration für eine PostgreSQL-Verbindung.

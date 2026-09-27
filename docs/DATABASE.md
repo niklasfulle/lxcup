@@ -26,12 +26,13 @@ level it stores:
 - **Ansible jobs and job events** — registered operation, validated parameters,
   target, status, timestamps, idempotency information, and the ordered
   execution log used by the UI and audit trail.
-- **Agent registrations and worker heartbeats** — managed-agent enrollment and
-  worker availability signals.
+- **Agent registrations and worker heartbeats** — managed-agent enrollment,
+  worker availability, and the latest artifact-store health probe.
 - **Package inventory and target telemetry** — latest package snapshot and
   resource samples associated with a target.
-- **Docker workloads and discovery runs** — discovered workloads and their
-  management/discovery state.
+- **Docker workloads and discovery runs** — legacy container-backed workload
+  state plus the latest successful inventory snapshot for each registered
+  target. Failed discovery does not erase the last successful snapshot.
 - **Schedules and update policies** — recurring registered work and package
   update constraints. Non-system update policies can be deleted through the
   repository; job/event history remains independent of the policy row.
