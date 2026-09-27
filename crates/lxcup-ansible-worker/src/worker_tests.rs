@@ -2,7 +2,15 @@ use super::*;
 use lxcup_ansible::{AnsibleJobRequest, ExecutionMode};
 use lxcup_core::{ActorRole, ResourceLifecycle, SecretId, SecretScope};
 use lxcup_secrets::CreateSecret;
-use std::time::Duration;
+use std::{
+    process::{ExitStatus, Output},
+    time::Duration,
+};
+
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt;
 
 async fn isolated_repositories() -> Option<(Database, sqlx::PgPool, String)> {
     let database_url = std::env::var("DATABASE_TEST_URL").ok()?;
@@ -39,6 +47,42 @@ async fn drop_test_schema(database: Database, admin: sqlx::PgPool, schema: &str)
         .await
         .unwrap();
     admin.close().await;
+}
+
+fn worker_output(success: bool, stdout: &str, stderr: &str) -> Output {
+    let status = test_exit_status(success);
+    Output {
+        status,
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
+}
+
+#[cfg(unix)]
+fn test_exit_status(success: bool) -> ExitStatus {
+    ExitStatus::from_raw(if success { 0 } else { 1 })
+}
+
+#[cfg(windows)]
+fn test_exit_status(success: bool) -> ExitStatus {
+    ExitStatus::from_raw(if success { 0 } else { 1 })
+}
+
+fn package_update_job(target: &Target, key: &str) -> AnsibleJob {
+    AnsibleJob::from_request(AnsibleJobRequest {
+        operation: AnsibleOperation::UpdatePackages,
+        target: ResourceTarget::Target(target.id),
+        lifecycle: ResourceLifecycle::Managed,
+        mode: lxcup_ansible::ExecutionMode::Apply,
+        parameters: AnsibleParameters::UpdatePackages {
+            packages: vec!["curl".to_owned()],
+        },
+        secret_refs: vec![target.agent_secret_ref],
+        idempotency_key: key.to_owned(),
+        confirmed: true,
+        actor_role: ActorRole::Operator,
+    })
+    .unwrap()
 }
 
 fn health_job(target: &Target, key: &str) -> AnsibleJob {
@@ -638,6 +682,278 @@ fn package_inventory_file_reader_handles_missing_invalid_and_valid_files() {
         Some("8.6.0")
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn execution_support_persists_redacted_logs_summaries_reconciliation_and_inventory() {
+    let Some((database, admin, schema)) = isolated_repositories().await else {
+        eprintln!("skipped: DATABASE_TEST_URL is not configured or unavailable");
+        return;
+    };
+    let repos = Repositories::new(&database);
+    let target = Target::new(
+        "execution-support-test",
+        TargetKind::LinuxServer,
+        "192.0.2.30",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    repos.targets.save(&target).await.unwrap();
+
+    let mut applying = package_update_job(&target, &format!("apply-{}", Uuid::new_v4()));
+    applying.transition_to(AnsibleJobStatus::Planned).unwrap();
+    repos.ansible_jobs.save(&applying).await.unwrap();
+    execution_support::mark_job_applying(&repos, &mut applying)
+        .await
+        .unwrap();
+    assert_eq!(
+        execution_support::mark_job_applying(&repos, &mut applying).await,
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    assert_eq!(
+        repos
+            .ansible_jobs
+            .find_by_id(applying.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AnsibleJobStatus::Applying
+    );
+    assert!(
+        repos
+            .ansible_jobs
+            .events(applying.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| matches!(
+                event.event,
+                JobEventKind::StatusChanged {
+                    status: AnsibleJobStatus::Applying
+                }
+            ))
+    );
+
+    let context = InvocationContext {
+        inventory: PathBuf::new(),
+        vars_file: PathBuf::new(),
+        credential: SecretValue::new("ssh-password").unwrap(),
+        agent_token: Some(SecretValue::new("agent-token").unwrap()),
+    };
+    let streamed = worker_output(true, "connected with ssh-password", "token agent-token\n");
+    execution_support::emit_worker_streams(&repos, applying.id, &streamed, &context)
+        .await
+        .unwrap();
+    let events = repos.ansible_jobs.events(applying.id).await.unwrap();
+    let logs = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            JobEventKind::WorkerLog { source, message } => {
+                Some((source.as_str(), message.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(logs.len(), 2);
+    assert_eq!(logs[0], ("stdout", "connected with [REDACTED]"));
+    assert_eq!(logs[1], ("stderr", "token [REDACTED]\n"));
+    assert!(!format!("{events:?}").contains("ssh-password"));
+    assert!(!format!("{events:?}").contains("agent-token"));
+    execution_support::emit_worker_streams(
+        &repos,
+        applying.id,
+        &worker_output(true, "  \n", ""),
+        &context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repos.ansible_jobs.events(applying.id).await.unwrap().len(),
+        events.len()
+    );
+
+    let apply_output = worker_output(
+        true,
+        "TASK [Install package]\nchanged: [target]\nTASK [Verify package]\nok: [target]\nPLAY RECAP\ntarget : ok=2 changed=1 failed=0",
+        "",
+    );
+    execution_support::emit_mode_summary(&repos, &applying, &apply_output)
+        .await
+        .unwrap();
+    let events = repos.ansible_jobs.events(applying.id).await.unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        JobEventKind::TaskFinished { task, changed: true } if task == "Install package"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        JobEventKind::WorkerLog { source, message } if source == "apply" && message.contains("1 Task(s)")
+    )));
+    applying.transition_to(AnsibleJobStatus::Succeeded).unwrap();
+    repos.ansible_jobs.update(&applying).await.unwrap();
+
+    for (mode, source_name) in [
+        (lxcup_ansible::ExecutionMode::Check, "check"),
+        (lxcup_ansible::ExecutionMode::Plan, "plan"),
+    ] {
+        let mut summary_job = health_job(&target, &format!("summary-{}", Uuid::new_v4()));
+        summary_job.mode = mode;
+        repos.ansible_jobs.save(&summary_job).await.unwrap();
+        execution_support::emit_mode_summary(&repos, &summary_job, &apply_output)
+            .await
+            .unwrap();
+        assert!(
+            repos
+                .ansible_jobs
+                .events(summary_job.id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| matches!(
+                    &event.event,
+                    JobEventKind::WorkerLog { source, .. } if source == source_name
+                ))
+        );
+    }
+
+    let mut reconcile_noop = health_job(&target, &format!("reconcile-noop-{}", Uuid::new_v4()));
+    reconcile_noop.mode = lxcup_ansible::ExecutionMode::Reconcile;
+    repos.ansible_jobs.save(&reconcile_noop).await.unwrap();
+    execution_support::emit_mode_summary(&repos, &reconcile_noop, &apply_output)
+        .await
+        .unwrap();
+    assert!(
+        repos
+            .ansible_jobs
+            .events(reconcile_noop.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut source = package_update_job(&target, &format!("source-{}", Uuid::new_v4()));
+    source.transition_to(AnsibleJobStatus::Planned).unwrap();
+    source.transition_to(AnsibleJobStatus::Applying).unwrap();
+    source
+        .transition_to(AnsibleJobStatus::ReconcileRequired)
+        .unwrap();
+    repos.ansible_jobs.save(&source).await.unwrap();
+    let failed_reconcile = worker_output(false, "", "connection refused");
+    execution_support::reconcile_job(&repos, reconcile_noop.id, source.clone(), &failed_reconcile)
+        .await
+        .unwrap();
+    assert_eq!(
+        repos
+            .ansible_jobs
+            .find_by_id(source.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AnsibleJobStatus::ReconcileRequired
+    );
+    let completed_reconcile = worker_output(
+        true,
+        "PLAY RECAP\ntarget : ok=2 changed=0 failed=0 skipped=0",
+        "",
+    );
+    execution_support::reconcile_job(
+        &repos,
+        reconcile_noop.id,
+        source.clone(),
+        &completed_reconcile,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repos
+            .ansible_jobs
+            .find_by_id(source.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AnsibleJobStatus::Succeeded
+    );
+    let mut source_with_changes =
+        package_update_job(&target, &format!("source-changes-{}", Uuid::new_v4()));
+    source_with_changes
+        .transition_to(AnsibleJobStatus::Planned)
+        .unwrap();
+    source_with_changes
+        .transition_to(AnsibleJobStatus::Applying)
+        .unwrap();
+    source_with_changes
+        .transition_to(AnsibleJobStatus::ReconcileRequired)
+        .unwrap();
+    repos.ansible_jobs.save(&source_with_changes).await.unwrap();
+    let changed_reconcile = worker_output(
+        true,
+        "PLAY RECAP\ntarget : ok=2 changed=1 failed=0 skipped=0",
+        "",
+    );
+    execution_support::reconcile_job(
+        &repos,
+        reconcile_noop.id,
+        source_with_changes.clone(),
+        &changed_reconcile,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repos
+            .ansible_jobs
+            .find_by_id(source_with_changes.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AnsibleJobStatus::Failed
+    );
+
+    let inventory_dir = std::env::temp_dir().join(format!("lxcup-exec-support-{}", Uuid::new_v4()));
+    fs::create_dir_all(&inventory_dir).unwrap();
+    assert_eq!(
+        execution_support::persist_package_inventory(
+            &repos,
+            applying.id,
+            &inventory_dir,
+            target.id,
+        )
+        .await,
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    fs::write(
+        inventory_dir.join("package-inventory.json"),
+        r#"{"packages":{"curl":[{"version":"8.5.0","arch":"amd64"}]},"upgradable":["curl/stable 8.6.0 amd64 [upgradable from: 8.5.0]"]}"#,
+    )
+    .unwrap();
+    execution_support::persist_package_inventory(&repos, applying.id, &inventory_dir, target.id)
+        .await
+        .unwrap();
+    let inventory = repos
+        .package_inventory
+        .find_latest(target.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(inventory.snapshot.packages.len(), 1);
+    assert!(repos
+        .ansible_jobs
+        .events(applying.id)
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| matches!(
+            &event.event,
+            JobEventKind::TaskFinished { task, changed: false } if task == "package inventory: 1 packages"
+        )));
+
+    fs::remove_dir_all(inventory_dir).unwrap();
+    drop_test_schema(database, admin, &schema).await;
 }
 
 #[tokio::test]
