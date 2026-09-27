@@ -24,10 +24,10 @@ use thiserror::Error;
 use tokio::process::Command;
 use uuid::Uuid;
 
+mod docker;
 mod parsers;
 use parsers::{
-    normalize_apt_list, parse_docker_containers, parse_dpkg_packages, parse_windows_packages,
-    safe_detail, safe_package,
+    normalize_apt_list, parse_dpkg_packages, parse_windows_packages, safe_detail, safe_package,
 };
 
 pub const PROTOCOL_VERSION: &str = "v1";
@@ -525,7 +525,7 @@ pub fn agent_router(state: LocalAgentState) -> Router {
     Router::new()
         .route("/health", get(agent_health))
         .route("/metrics", get(agent_metrics))
-        .route("/docker/containers", get(agent_docker_containers))
+        .route("/docker/containers", get(docker::agent_docker_containers))
         .route("/packages", get(agent_package_inventory))
         .route("/command", post(agent_command))
         .with_state(state)
@@ -593,50 +593,6 @@ async fn agent_package_inventory(
     Json(AgentPackageInventory {
         collected_at: Utc::now(),
         packages,
-    })
-    .into_response()
-}
-
-async fn agent_docker_containers(
-    State(state): State<LocalAgentState>,
-    headers: axum::http::HeaderMap,
-) -> impl IntoResponse {
-    if !authorized(&state, &headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error":"unauthorized"})),
-        )
-            .into_response();
-    }
-    if state.info.platform == AgentPlatform::Windows {
-        return Json(DockerDiscovery {
-            available: false,
-            reason: Some("unsupported_platform".to_owned()),
-            collected_at: Utc::now(),
-            containers: Vec::new(),
-        })
-        .into_response();
-    }
-    let output = match Command::new("docker")
-        .args([
-            "ps",
-            "--all",
-            "--no-trunc",
-            "--format",
-            "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.State}}\\t{{.Status}}\\t{{.Ports}}\\t{{.CreatedAt}}\\t{{.Labels}}",
-        ])
-        .output()
-        .await
-    {
-        Ok(output) if output.status.success() => output.stdout,
-        _ => return Json(DockerDiscovery { available: false, reason: Some("docker_unavailable".to_owned()), collected_at: Utc::now(), containers: Vec::new() }).into_response(),
-    };
-    let containers = parse_docker_containers(&String::from_utf8_lossy(&output));
-    Json(DockerDiscovery {
-        available: true,
-        reason: None,
-        collected_at: Utc::now(),
-        containers,
     })
     .into_response()
 }

@@ -56,7 +56,7 @@ pub(crate) use telemetry::get_target_telemetry;
 mod telemetry_alerts;
 pub(crate) use telemetry_alerts::list_telemetry_alerts;
 mod target_docker;
-pub(crate) use target_docker::discover_target_docker;
+pub(crate) use target_docker::{discover_target_docker, get_target_docker_inventory};
 mod schedules;
 pub(crate) use schedules::{create_schedule, list_schedules, set_schedule_enabled};
 mod policies;
@@ -457,6 +457,7 @@ struct ApiStore {
     secret_audit: Vec<SecretAuditEvent>,
     docker_workloads: HashMap<(ContainerId, String), DockerWorkloadDto>,
     docker_discovery_runs: Vec<lxcup_core::DockerDiscoveryRun>,
+    target_docker_inventories: HashMap<TargetId, lxcup_persistence::PersistedTargetDockerInventory>,
     schedules: Vec<lxcup_core::JobSchedule>,
     update_policies: Vec<lxcup_core::UpdatePolicy>,
 }
@@ -524,7 +525,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/telemetry-alerts", get(list_telemetry_alerts))
         .route(
             "/api/v1/targets/{target_id}/docker/discovery",
-            post(discover_target_docker),
+            get(get_target_docker_inventory).post(discover_target_docker),
         )
         .route("/api/v1/targets/{target_id}", get(get_target))
         .route(
@@ -723,6 +724,7 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/api/v1/containers/{container_id}/agent/metrics": {"get": {}},
     "/api/v1/containers/{container_id}/docker/discovery": {"get": {"responses": {"200": {"description": "Latest Docker discovery workflow"}}}},
     "/api/v1/containers/{container_id}/docker/discover": {"post": {"responses": {"200": {"description": "Discover Docker workloads"}}}},
+    "/api/v1/targets/{target_id}/docker/discovery": {"get": {"responses": {"200": {"description": "Latest successful Docker inventory for target"}}}, "post": {"responses": {"200": {"description": "Discover and persist Docker workloads"}}}},
     "/api/v1/schedules": {"get": {}, "post": {}},
     "/api/v1/schedules/{schedule_id}": {"patch": {"description": "Enable or pause a recurring schedule"}},
     "/api/v1/update-policies": {"get": {}, "post": {}},

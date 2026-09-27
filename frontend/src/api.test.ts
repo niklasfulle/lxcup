@@ -16,6 +16,7 @@ import {
   getAnsibleJob,
   getAnsibleJobEvents,
   getEnrollment,
+  getTargetDockerInventory,
   listAnsibleJobs,
   listDockerWorkloads,
   listSecretAudit,
@@ -116,10 +117,12 @@ describe("ApiClient", () => {
     await getAgentHealth(1);
     await getAgentMetrics(1);
     await listDockerWorkloads(1);
+    await getTargetDockerInventory("target/id");
     await discoverDockerWorkloads(1);
     await adoptDockerWorkload(1, "docker/id");
     await removeDockerWorkload(1, "docker/id");
     expect(get).toHaveBeenCalled();
+    expect(get).toHaveBeenCalledWith("/api/v1/targets/target%2Fid/docker/discovery", undefined);
     expect(post).toHaveBeenCalled();
     expect(post).toHaveBeenCalledWith("/api/v1/ansible/jobs/job-reconcile/reconcile", {}, undefined);
     expect(del).toHaveBeenCalledWith("/api/v1/update-policies/legacy-policy", { confirmed: true }, undefined);

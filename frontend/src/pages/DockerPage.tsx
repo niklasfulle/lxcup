@@ -3,7 +3,8 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { adoptDockerWorkload, discoverDockerWorkloads, discoverTargetDocker, removeDockerWorkload, type TargetDockerDiscoveryDto } from "../api";
-import { queryKeys, useContainers, useDockerDiscovery, useDockerWorkloads, useTargets } from "../queries";
+import { queryKeys, useContainers, useDockerDiscovery, useDockerWorkloads, useTargetDockerInventory, useTargets } from "../queries";
+import { dockerDiscoveryFailureLabel } from "../dockerDiscoveryStatus";
 
 export function DockerPage() {
   const containers = useContainers();
@@ -16,6 +17,7 @@ export function DockerPage() {
   const [hostSelectorOpen, setHostSelectorOpen] = useState(false);
   const workloads = useDockerWorkloads(hostId);
   const discovery = useDockerDiscovery(hostId);
+  const targetInventory = useTargetDockerInventory(targetId);
   const queryClient = useQueryClient();
   const refresh = () => {
     if (hostId) {
@@ -24,7 +26,17 @@ export function DockerPage() {
     }
   };
   const discover = useMutation({ mutationFn: () => discoverDockerWorkloads(hostId!), onSuccess: refresh });
-  const targetDiscover = useMutation({ mutationFn: () => discoverTargetDocker(targetId!), onSuccess: setTargetDiscoveryResult });
+  const targetDiscover = useMutation({
+    mutationFn: () => discoverTargetDocker(targetId!),
+    onSuccess: async (result) => {
+      setTargetDiscoveryResult(result);
+      if (result.available) {
+        const inventoryKey = queryKeys.targetDockerInventory(result.target_id);
+        await queryClient.cancelQueries({ queryKey: inventoryKey });
+        queryClient.setQueryData(inventoryKey, result);
+      }
+    },
+  });
   const adopt = useMutation({ mutationFn: (dockerId: string) => adoptDockerWorkload(hostId!, dockerId), onSuccess: refresh });
   const remove = useMutation({ mutationFn: (dockerId: string) => removeDockerWorkload(hostId!, dockerId), onSuccess: refresh });
   const [removeCandidate, setRemoveCandidate] = useState<{ id: string; name: string } | null>(null);
@@ -60,28 +72,29 @@ export function DockerPage() {
       </label></div>{availableLxcTargets.length === 0 ? <p className="mt-2 text-xs text-[var(--muted)]">Es gibt noch kein verbundenes LXC mit gemeldetem Agent-Heartbeat.</p> : null}</section> : null}
     {hostId === undefined && targetId === undefined ? null : <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]">
       {targetId !== undefined ? <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Ausgewählter Docker-Host</p><strong>{targetHost?.name ?? "LXC-Ziel"}</strong>{targetHost ? <span className="ml-2 text-xs text-[var(--muted)]">LXC · {targetHost.address}</span> : null}</div><div className="flex flex-wrap items-center gap-2"><button className="inline-flex items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={targetDiscover.isPending || !targetHost} onClick={() => targetDiscover.mutate()}>{targetDiscover.isPending ? "Suche läuft…" : "Docker-Container entdecken"}</button>{targetHost ? <Link className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/targets/${targetHost.id}`}>LXC öffnen</Link> : null}</div></div> : <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Ausgewählter Docker-Host</p><strong>{host ? host.name : "Kein LXC mit Agent ausgewählt"}</strong>{host ? <span className="ml-2 text-xs text-[var(--muted)]">LXC · VMID {host.id}</span> : null}</div><div className="flex flex-wrap items-center gap-2"><button className="inline-flex items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discover.isPending} onClick={() => discover.mutate()}>{discover.isPending ? "Suche läuft…" : "Docker-Container entdecken"}</button>{host ? <Link className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/containers/${host.id}`}>LXC öffnen</Link> : null}</div></div>}
-      {targetId !== undefined ? <TargetDockerResult discovery={targetDiscoveryResult} error={targetDiscover.error} /> : null}
+      {targetId !== undefined ? <TargetDockerResult discovery={targetDiscoveryResult ?? targetInventory.data} error={targetDiscover.error ?? targetInventory.error} /> : null}
       {targetId === undefined && discover.error ? <p className="font-semibold text-[var(--error)]" role="alert">{discover.error.message}</p> : null}
       {targetId === undefined ? <DockerDiscoverySummary hostId={hostId} hostName={host?.name} discovery={discovery} /> : null}
     </section>}
     <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]">
       <div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start"><div><h2>Docker-Inventar</h2><p className="text-[var(--muted)]">„Aufnehmen“ verwaltet den Inventareintrag in lxcup; der Docker-Container bleibt unverändert.</p></div><span className="text-[var(--muted)]">{workloads.data?.length ?? 0} Container</span></div>
-      {targetId !== undefined ? targetInventoryContent(targetDiscoveryResult) : workloadContent(hostId, host?.name, workloads, adopt.isPending, (dockerId) => adopt.mutate(dockerId), (item) => setRemoveCandidate({ id: item.id, name: item.name }))}
+      {targetId !== undefined ? targetInventoryContent(targetInventory.data) : workloadContent(hostId, host?.name, workloads, adopt.isPending, (dockerId) => adopt.mutate(dockerId), (item) => setRemoveCandidate({ id: item.id, name: item.name }))}
     </section>
     <RemoveWorkloadDialog candidate={removeCandidate} pending={remove.isPending} error={remove.error} onCancel={() => setRemoveCandidate(null)} onConfirm={() => removeCandidate && remove.mutate(removeCandidate.id, { onSuccess: () => setRemoveCandidate(null) })} />
   </>;
 }
 
 function TargetDockerResult({ discovery, error }: Readonly<{ discovery: TargetDockerDiscoveryDto | undefined; error: Error | null }>) {
-  if (error) return <p className="font-semibold text-[var(--error)]" role="alert">Docker-Erkennung fehlgeschlagen: {error.message}</p>;
+  if (error) return <p className="font-semibold text-[var(--error)]" role="alert">Docker-Erkennung fehlgeschlagen: {dockerDiscoveryFailureLabel(error.message)}</p>;
   if (!discovery) return <p className="mt-3 text-sm text-[var(--muted)]">Starte die Erkennung. Der Controller kontaktiert den Agenten im privaten LAN über HTTP.</p>;
-  if (!discovery.available) return <p className="mt-3 text-sm text-[var(--warning)]">Docker ist auf {discovery.target_name} nicht verfügbar{discovery.reason ? ` (${discovery.reason})` : ""}.</p>;
+  if (discovery.reason === "not_discovered") return <p className="mt-3 text-sm text-[var(--muted)]">Für diesen LXC ist noch kein Docker-Inventar gespeichert. Starte eine Erkennung.</p>;
+  if (!discovery.available) return <p className="mt-3 text-sm text-[var(--warning)]">{dockerDiscoveryFailureLabel(discovery.reason ?? "docker_unavailable")} · Host: {discovery.target_name}</p>;
   return <p className="mt-3 text-sm text-[var(--muted)]">Erkannt am {new Date(discovery.collected_at).toLocaleString()} · {discovery.containers.length} Container</p>;
 }
 
 function targetInventoryContent(discovery: TargetDockerDiscoveryDto | undefined) {
   if (!discovery) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Wähle ein verbundenes LXC und starte eine Erkennung.</p>;
-  if (!discovery.available || discovery.containers.length === 0) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Keine Docker-Container vom Agenten gemeldet.</p>;
+  if (discovery.containers.length === 0) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">{discovery.reason === "not_discovered" ? "Noch kein Docker-Inventar gespeichert." : "Keine Docker-Container vom Agenten gemeldet."}</p>;
   return <div className="overflow-x-auto"><table><thead><tr><th>Name</th><th>Image</th><th>Ports</th><th>Status</th></tr></thead><tbody>{discovery.containers.map((item) => <tr key={item.id}><td><strong>{item.name}</strong></td><td>{item.image}</td><td>{item.ports.length > 0 ? item.ports.join(", ") : "—"}</td><td>{item.state} · {item.status}</td></tr>)}</tbody></table></div>;
 }
 
@@ -95,7 +108,7 @@ function DockerDiscoverySummary({ hostId, hostName, discovery }: Readonly<{ host
 }
 
 function DiscoveryRunSummary({ hostId, hostName, run }: Readonly<{ hostId: number; hostName: string | undefined; run: NonNullable<ReturnType<typeof useDockerDiscovery>["data"]> }>) {
-  return <p>Host: {hostName ?? `LXC ${hostId}`} · Status: <span className={cn("inline-flex items-center px-2 py-0.5 text-xs font-bold", discoveryStatusClass(run.status))}>{run.status}</span>{" · "}{new Date(run.started_at).toLocaleString()} · {run.container_count} Container{run.error_code ? <span className="font-semibold text-[var(--error)]"> · Fehler: {run.error_code}</span> : null}</p>;
+  return <p>Host: {hostName ?? `LXC ${hostId}`} · Status: <span className={cn("inline-flex items-center px-2 py-0.5 text-xs font-bold", discoveryStatusClass(run.status))}>{run.status}</span>{" · "}{new Date(run.started_at).toLocaleString()} · {run.container_count} Container{run.error_code ? <span className="font-semibold text-[var(--error)]"> · Fehler: {dockerDiscoveryFailureLabel(run.error_code)}</span> : null}</p>;
 }
 
 function discoveryStatusClass(status: string) {

@@ -230,6 +230,20 @@ async fn fetch_docker_inventory(
         }
     };
     if !discovered.available {
+        if discovered.reason.as_deref() == Some("docker_permission_denied") {
+            finish_docker_discovery(state, run, 0, Some("docker_permission_denied")).await?;
+            return Err(ApiError::dependency(
+                "docker_permission_denied",
+                "Der Agent hat keine Berechtigung für den Docker-Socket",
+            ));
+        }
+        if discovered.reason.as_deref() == Some("docker_cli_unavailable") {
+            finish_docker_discovery(state, run, 0, Some("docker_cli_unavailable")).await?;
+            return Err(ApiError::dependency(
+                "docker_cli_unavailable",
+                "Die Docker-CLI ist für den Agenten nicht verfügbar",
+            ));
+        }
         finish_docker_discovery(state, run, 0, Some("docker_unavailable")).await?;
         return Err(ApiError::dependency(
             "docker_unavailable",

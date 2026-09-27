@@ -47,6 +47,20 @@
     create_home: false
     shell: /usr/sbin/nologin
 
+- name: Check whether the Docker socket group is installed
+  ansible.builtin.command: getent group docker
+  register: lxcup_docker_group
+  changed_when: false
+  failed_when: false
+
+- name: Grant the agent Docker discovery access
+  ansible.builtin.user:
+    name: "{{ lxcup_agent_service_user }}"
+    groups: docker
+    append: true
+  when: lxcup_docker_group.rc == 0
+  notify: Restart lxcup agent
+
 - name: Create agent directories
   ansible.builtin.file:
     path: "{{ item }}"

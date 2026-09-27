@@ -89,6 +89,10 @@ For the implemented role behavior and production requirements, see
 - Keep the worker least-privileged and its secret-store mount read-only. Avoid
   expanding network exposure or container privileges without an explicit
   security review.
+- The Linux agent joins the `docker` group only when that group exists, so it
+  can inspect the local Docker daemon. This access is effectively root-level on
+  the managed host; operators must understand the consequence before running
+  the host preparation script or deploying the agent on Docker hosts.
 
 ## Changes and verification
 

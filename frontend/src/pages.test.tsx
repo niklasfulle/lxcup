@@ -14,7 +14,8 @@ const mocks = vi.hoisted(() => ({
   enrollment: { data: undefined as any, isLoading: false, error: null as Error | null },
   workloads: { data: [] as DockerWorkloadDto[], isLoading: false, error: null as Error | null },
   dockerDiscovery: { data: null as any, isLoading: false, error: null as Error | null },
-  workerAvailability: { data: { available: true, last_seen_at: "2026-01-01T00:00:00Z" } as WorkerAvailabilityDto, isLoading: false, error: null as Error | null },
+  targetDockerInventory: { data: undefined as any, isLoading: false, error: null as Error | null },
+  workerAvailability: { data: { available: true, last_seen_at: "2026-01-01T00:00:00Z", artifact_store_available: true, artifact_store_checked_at: "2026-01-01T00:00:00Z" } as WorkerAvailabilityDto, isLoading: false, error: null as Error | null },
   packageInventory: { data: undefined as any, isLoading: false, error: null as Error | null },
   telemetry: { data: undefined as any, isLoading: false, error: null as Error | null },
   telemetryAlerts: { data: [] as any[], isLoading: false, error: null as Error | null },
@@ -55,7 +56,7 @@ const container: ContainerDto = { id: 101, node_id: "node-1", name: "web-lxc", o
 const secret = (id: string, name: string, kind: "ssh_password" | "ssh_known_hosts" | "agent_token" = "ssh_password") => ({ metadata: { metadata: { id, name, kind, scope: { type: "global" as const }, created_at: "2026-01-01", updated_at: "2026-01-01" }, status: "active" as const } });
 
 vi.mock("./queries", () => ({
-  queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id], dockerDiscovery: (id: number) => ["docker-discovery", id], packageInventory: (id: string) => ["targets", id, "package-inventory"], telemetry: (id: string) => ["targets", id, "telemetry"], telemetryAlerts: ["telemetry-alerts"], schedules: ["schedules"], updatePolicies: ["update-policies"] },
+  queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id], dockerDiscovery: (id: number) => ["docker-discovery", id], targetDockerInventory: (id: string) => ["targets", id, "docker-discovery"], packageInventory: (id: string) => ["targets", id, "package-inventory"], telemetry: (id: string) => ["targets", id, "telemetry"], telemetryAlerts: ["telemetry-alerts"], schedules: ["schedules"], updatePolicies: ["update-policies"] },
   useTargets: () => mocks.targets,
   useContainers: () => mocks.containers,
   useAnsibleJobs: () => mocks.jobs,
@@ -64,6 +65,7 @@ vi.mock("./queries", () => ({
   useEnrollment: () => mocks.enrollment,
   useDockerWorkloads: () => mocks.workloads,
   useDockerDiscovery: () => mocks.dockerDiscovery,
+  useTargetDockerInventory: () => mocks.targetDockerInventory,
   useWorkerAvailability: () => mocks.workerAvailability,
   usePackageInventory: () => mocks.packageInventory,
   useTargetTelemetry: () => mocks.telemetry,
@@ -126,7 +128,10 @@ beforeEach(() => {
   mocks.enrollment.error = null;
   mocks.workloads.data = [];
   mocks.dockerDiscovery.data = null;
-  mocks.workerAvailability.data = { available: true, last_seen_at: "2026-01-01T00:00:00Z" };
+  mocks.targetDockerInventory.data = undefined;
+  mocks.targetDockerInventory.isLoading = false;
+  mocks.targetDockerInventory.error = null;
+  mocks.workerAvailability.data = { available: true, last_seen_at: "2026-01-01T00:00:00Z", artifact_store_available: true, artifact_store_checked_at: "2026-01-01T00:00:00Z" };
   mocks.workloads.isLoading = false;
   mocks.workloads.error = null;
   mocks.packageInventory.data = undefined;
@@ -610,6 +615,14 @@ describe("inventory pages", () => {
     expect(await screen.findByText("web")).toBeInTheDocument();
   });
 
+  it("loads the last saved Docker inventory for a target after reopening the page", () => {
+    mocks.targets.data = [{ ...target, state: "managed" }];
+    mocks.targetDockerInventory.data = { target_id: "target-1", target_name: "test-target", available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [{ id: "docker-target-1", name: "web", image: "nginx:1", state: "running", status: "Up", ports: ["80/tcp"], started_at: null, labels: [] }] };
+    renderPage(<DockerPage />, "/docker?target=target-1");
+    expect(screen.getByText("web")).toBeInTheDocument();
+    expect(screen.getByText("nginx:1")).toBeInTheDocument();
+  });
+
   it("covers loading, error and filtered empty inventory states", async () => {
     mocks.targets.isLoading = true;
     renderPage(<Dashboard />);
@@ -644,7 +657,7 @@ describe("inventory pages", () => {
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "101" } });
 
     expect(screen.getByText(/Host: web-lxc/)).toBeInTheDocument();
-    expect(screen.getByText(/Fehler: docker_unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/Fehler: Docker ist auf diesem Host nicht verfügbar/)).toBeInTheDocument();
     expect(screen.getAllByText("web-lxc").length).toBeGreaterThan(0);
     expect(screen.getByText(/exited · Exited/)).toBeInTheDocument();
     expect(screen.getByText(/geändert · entdeckt/)).toBeInTheDocument();
@@ -1046,7 +1059,7 @@ describe("application shell", () => {
       return () => undefined;
     }) as any);
     mocks.targets.data = [target];
-    mocks.workerAvailability.data = { available: false, last_seen_at: null };
+    mocks.workerAvailability.data = { available: false, last_seen_at: null, artifact_store_available: null, artifact_store_checked_at: null };
     mocks.jobs.data = [{ id: "job-alert", operation: "deploy_agent", playbook: "agent/deploy.yml", playbook_version: "1", target: { target: "target-1" }, mode: "apply", status: "failed", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" }, { id: "job-reconcile", operation: "health_check", playbook: "health.yml", playbook_version: "1", target: { target: "target-1" }, mode: "check", status: "reconcile_required", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" }] as any;
     renderPage(<App />);
     await screen.findByRole("link", { name: "lxcup Übersicht" });
@@ -1099,5 +1112,12 @@ describe("application shell", () => {
     await userEvent.click(screen.getByRole("button", { name: "Alle als gelesen markieren" }));
     expect(await screen.findByText("Behoben")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Hohe CPU-Auslastung/ })).toHaveTextContent("Auslastung wieder im Normalbereich.");
+  });
+
+  it("warns when the worker is online but its artifact store is unavailable", async () => {
+    mocks.workerAvailability.data = { available: true, last_seen_at: "2026-01-01T00:00:00Z", artifact_store_available: false, artifact_store_checked_at: "2026-01-01T00:00:00Z" };
+    renderPage(<App />);
+    expect(await screen.findByText("Artifact Store nicht verfügbar")).toBeInTheDocument();
+    expect(screen.getByText(/Der Worker prüft die Verbindung automatisch erneut/)).toBeInTheDocument();
   });
 });

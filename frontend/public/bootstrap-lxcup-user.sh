@@ -26,6 +26,9 @@ install_package() {
 if ! command -v sudo >/dev/null 2>&1; then
   install_package sudo
 fi
+
+# Der Agent und die Bootstrap-Hilfsfunktionen verwenden curl für Downloads und
+# Healthchecks. Die Installation ist absichtlich idempotent.
 if ! command -v curl >/dev/null 2>&1; then
   install_package curl
 fi
@@ -41,11 +44,12 @@ if id "${username}" >/dev/null 2>&1; then
 else
   useradd --create-home --shell /bin/bash "${username}"
   echo "Benutzer ${username} wurde angelegt."
+  echo "Passwort für ${username} setzen:"
+  passwd "${username}"
 fi
 
-echo "Passwort für ${username} setzen:"
-passwd "${username}"
-
+# Ansible-Playbooks benötigen für become administrative Rechte. Das Passwort
+# bleibt auf dem Ziel unverändert und wird vom Worker nur temporär verwendet.
 if getent group sudo >/dev/null 2>&1; then
   usermod -aG sudo "${username}"
 elif getent group wheel >/dev/null 2>&1; then
@@ -54,8 +58,26 @@ else
   echo "Keine sudo- oder wheel-Gruppe gefunden; administrative Rechte müssen manuell eingerichtet werden." >&2
 fi
 
+# Die Docker-Gruppe erlaubt praktisch uneingeschränkte Root-Rechte über den
+# Docker-Daemon. Nur auf Docker-Hosts wird der spätere Agent-Dienstbenutzer
+# vorbereitet; das Agent-Onboarding stellt die Mitgliedschaft ebenfalls sicher.
+if getent group docker >/dev/null 2>&1; then
+  echo "Sicherheitshinweis: Docker-Gruppenzugriff ist praktisch root-äquivalent."
+  if ! id lxcup-agent >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --shell /usr/sbin/nologin lxcup-agent
+  fi
+  usermod -aG docker lxcup-agent
+  echo "Docker-Erkennung aktiviert: lxcup-agent ist Mitglied der Gruppe docker."
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet lxcup-agent.service; then
+    systemctl restart lxcup-agent.service
+    echo "lxcup-agent wurde neu gestartet, damit die neue Gruppenmitgliedschaft wirksam ist."
+  fi
+else
+  echo "Keine Gruppe docker gefunden; Docker-Zugriff wird beim Agent-Onboarding übersprungen."
+fi
+
 echo
 echo "Fertig. Ziel im lxcup-Frontend mit folgenden SSH-Daten registrieren:"
 echo "  SSH-Benutzer: ${username}"
-echo "  Deployment-Secret: das soeben gesetzte Passwort"
+echo "  Deployment-Secret: das Passwort des SSH-Benutzers"
 echo "  Known-Hosts-Secret: Ausgabe von scripts/get-ssh-known-hosts.ps1"

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { apiClient, getAnsibleJob, getAnsibleJobEvents, getDockerDiscovery, getEnrollment, getPackageInventory, getTargetTelemetry, getTelemetryAlerts, getWorkerAvailability, listAnsibleJobs, listDockerWorkloads, listSchedules, listTargets, listUpdatePolicies, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerDiscoveryRunDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type PackageInventoryDto, type ScheduleDto, type TargetDto, type TelemetryAlertDto, type TelemetryDto, type UpdatePolicyDto, type WorkerAvailabilityDto } from "./api";
+import { apiClient, getAnsibleJob, getAnsibleJobEvents, getDockerDiscovery, getEnrollment, getPackageInventory, getTargetDockerInventory, getTargetTelemetry, getTelemetryAlerts, getWorkerAvailability, listAnsibleJobs, listDockerWorkloads, listSchedules, listTargets, listUpdatePolicies, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerDiscoveryRunDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type PackageInventoryDto, type ScheduleDto, type TargetDockerDiscoveryDto, type TargetDto, type TelemetryAlertDto, type TelemetryDto, type UpdatePolicyDto, type WorkerAvailabilityDto } from "./api";
 
 export const queryKeys = {
   targets: ["targets"] as const,
@@ -11,6 +11,7 @@ export const queryKeys = {
   workerAvailability: ["ansible-worker-availability"] as const,
   dockerWorkloads: (containerId: number) => ["containers", containerId, "docker-workloads"] as const,
   dockerDiscovery: (containerId: number) => ["containers", containerId, "docker-discovery"] as const,
+  targetDockerInventory: (targetId: string) => ["targets", targetId, "docker-discovery"] as const,
   packageInventory: (targetId: string) => ["targets", targetId, "package-inventory"] as const,
   telemetry: (targetId: string) => ["targets", targetId, "telemetry"] as const,
   telemetryAlerts: ["telemetry-alerts"] as const,
@@ -111,6 +112,15 @@ export function useDockerDiscovery(containerId: number | undefined) {
     queryFn: ({ signal }) => getDockerDiscovery(containerId!, signal),
     enabled: Boolean(containerId),
     staleTime: 5_000,
+  });
+}
+
+export function useTargetDockerInventory(targetId: string | undefined) {
+  return useQuery<TargetDockerDiscoveryDto>({
+    queryKey: targetId ? queryKeys.targetDockerInventory(targetId) : ["targets", "none", "docker-discovery"],
+    queryFn: ({ signal }) => getTargetDockerInventory(targetId!, signal),
+    enabled: Boolean(targetId),
+    staleTime: 10_000,
   });
 }
 

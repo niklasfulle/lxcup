@@ -5,6 +5,7 @@ use super::{
 };
 use axum::extract::Extension;
 use lxcup_agent::DockerContainerInfo;
+use lxcup_persistence::PersistedTargetDockerInventory;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 
@@ -75,6 +76,18 @@ pub(super) async fn discover_target_docker(
         ApiError::dependency("agent_unreachable", "the LXC agent could not be reached")
     })?;
 
+    if discovery.available {
+        save_target_docker_inventory(
+            &state,
+            target_id,
+            PersistedTargetDockerInventory {
+                collected_at: discovery.collected_at,
+                containers: discovery.containers.clone(),
+            },
+        )
+        .await?;
+    }
+
     Ok(Json(envelope(TargetDockerDiscoveryDto {
         target_id,
         target_name: target.name,
@@ -83,6 +96,83 @@ pub(super) async fn discover_target_docker(
         collected_at: discovery.collected_at,
         containers: discovery.containers,
     })))
+}
+
+pub(super) async fn get_target_docker_inventory(
+    State(state): State<ApiState>,
+    Path(target_id): Path<String>,
+) -> Result<Json<ApiEnvelope<TargetDockerDiscoveryDto>>, ApiError> {
+    let target_id = TargetId::from_uuid(parse_uuid(&target_id, "target id")?);
+    let target = {
+        let store = state.store.read().await;
+        store
+            .targets
+            .iter()
+            .find(|target| target.id == target_id)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found("target not found"))?
+    };
+    let inventory = load_target_docker_inventory(&state, target_id).await?;
+    let (available, reason, collected_at, containers) = match inventory {
+        Some(inventory) => (true, None, inventory.collected_at, inventory.containers),
+        None => (
+            false,
+            Some("not_discovered".to_owned()),
+            chrono::Utc::now(),
+            Vec::new(),
+        ),
+    };
+    Ok(Json(envelope(TargetDockerDiscoveryDto {
+        target_id,
+        target_name: target.name,
+        available,
+        reason,
+        collected_at,
+        containers,
+    })))
+}
+
+async fn save_target_docker_inventory(
+    state: &ApiState,
+    target_id: TargetId,
+    inventory: PersistedTargetDockerInventory,
+) -> Result<(), ApiError> {
+    if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .target_docker_inventory
+            .save(target_id, &inventory)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    } else {
+        state
+            .store
+            .write()
+            .await
+            .target_docker_inventories
+            .insert(target_id, inventory);
+    }
+    Ok(())
+}
+
+async fn load_target_docker_inventory(
+    state: &ApiState,
+    target_id: TargetId,
+) -> Result<Option<PersistedTargetDockerInventory>, ApiError> {
+    if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .target_docker_inventory
+            .get(target_id)
+            .await
+            .map_err(|_| ApiError::storage())
+    } else {
+        Ok(state
+            .store
+            .read()
+            .await
+            .target_docker_inventories
+            .get(&target_id)
+            .cloned())
+    }
 }
 
 async fn resolve_private_agent_address(address: &str) -> Result<SocketAddr, ApiError> {
@@ -115,8 +205,46 @@ fn is_private_network_address(address: IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AGENT_PORT, is_private_network_address, resolve_private_agent_address};
+    use super::{
+        AGENT_PORT, is_private_network_address, load_target_docker_inventory,
+        resolve_private_agent_address, save_target_docker_inventory,
+    };
+    use crate::ApiState;
+    use chrono::Utc;
+    use lxcup_agent::DockerContainerInfo;
+    use lxcup_core::TargetId;
+    use lxcup_persistence::PersistedTargetDockerInventory;
     use std::net::IpAddr;
+
+    #[tokio::test]
+    async fn in_memory_target_docker_inventory_is_available_after_discovery() {
+        let state = ApiState::new();
+        let target_id = TargetId::from_uuid(uuid::Uuid::new_v4());
+        let inventory = PersistedTargetDockerInventory {
+            collected_at: Utc::now(),
+            containers: vec![DockerContainerInfo {
+                id: "container-1".to_owned(),
+                name: "web".to_owned(),
+                image: "nginx:latest".to_owned(),
+                state: "running".to_owned(),
+                status: "Up".to_owned(),
+                ports: vec!["80/tcp".to_owned()],
+                started_at: None,
+                labels: Vec::new(),
+            }],
+        };
+
+        save_target_docker_inventory(&state, target_id, inventory.clone())
+            .await
+            .unwrap();
+
+        let loaded = load_target_docker_inventory(&state, target_id)
+            .await
+            .unwrap()
+            .expect("a successful discovery should remain available in memory");
+        assert_eq!(loaded.containers, inventory.containers);
+        assert_eq!(loaded.collected_at, inventory.collected_at);
+    }
 
     #[test]
     fn private_network_filter_rejects_public_and_accepts_local_addresses() {

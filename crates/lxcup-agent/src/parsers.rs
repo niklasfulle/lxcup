@@ -86,6 +86,22 @@ pub(super) fn parse_docker_containers(output: &str) -> Vec<DockerContainerInfo> 
         .collect()
 }
 
+pub(super) fn docker_failure_reason(
+    stderr: &[u8],
+    spawn_error: Option<std::io::ErrorKind>,
+) -> &'static str {
+    if String::from_utf8_lossy(stderr)
+        .to_ascii_lowercase()
+        .contains("permission denied")
+    {
+        return "docker_permission_denied";
+    }
+    if spawn_error == Some(std::io::ErrorKind::NotFound) {
+        return "docker_cli_unavailable";
+    }
+    "docker_unavailable"
+}
+
 pub(super) fn sanitize_docker_labels(labels: &str) -> Vec<String> {
     labels
         .split(',')

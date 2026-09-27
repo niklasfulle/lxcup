@@ -1,4 +1,5 @@
 use super::*;
+use crate::parsers::{docker_failure_reason, parse_docker_containers};
 use axum::{body::Body, http::Request, response::IntoResponse, routing::get};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tower::ServiceExt;
@@ -69,6 +70,25 @@ fn docker_inventory_parser_keeps_only_complete_rows() {
     assert_eq!(containers[0].name, "api");
     assert_eq!(containers[0].ports, ["80/tcp"]);
     assert_eq!(containers[0].labels, ["app=api"]);
+}
+
+#[test]
+fn docker_failure_reason_distinguishes_socket_permissions_from_missing_cli() {
+    assert_eq!(
+        docker_failure_reason(
+            b"permission denied while trying to connect to the docker API",
+            None
+        ),
+        "docker_permission_denied"
+    );
+    assert_eq!(
+        docker_failure_reason(&[], Some(std::io::ErrorKind::NotFound)),
+        "docker_cli_unavailable"
+    );
+    assert_eq!(
+        docker_failure_reason(b"daemon stopped", None),
+        "docker_unavailable"
+    );
 }
 
 #[test]
