@@ -190,19 +190,10 @@ impl ApiState {
     /// Creates or extends the shared standard package policy to cover all
     /// registered resources. Operator-defined policy settings are preserved.
     pub async fn ensure_default_update_policies(&self) -> Result<usize, ApiError> {
-        let mut target_ids = self
-            .store
-            .read()
-            .await
-            .targets
-            .iter()
-            .map(|target| target.id)
-            .collect::<Vec<_>>();
+        let target_ids = self.registered_target_ids().await;
         if target_ids.is_empty() {
             return Ok(0);
         }
-        target_ids.sort_by_key(|target_id| target_id.as_uuid());
-        target_ids.dedup();
 
         let existing = self
             .store
@@ -226,53 +217,18 @@ impl ApiState {
             return Ok(0);
         }
 
-        if let Some(repositories) = self.repositories.as_ref() {
-            let saved = if existing.is_some() {
-                repositories
-                    .update_policies
-                    .save(&policy)
-                    .await
-                    .map_err(|_| ApiError::storage())
-            } else {
-                match repositories.update_policies.save_if_absent(&policy).await {
-                    Ok(true) => Ok(()),
-                    Ok(false) => {
-                        let persisted = repositories
-                            .update_policies
-                            .list()
-                            .await
-                            .map_err(|_| ApiError::storage())?;
-                        let Some(mut current) = persisted
-                            .into_iter()
-                            .find(|item| item.id == STANDARD_UPDATE_POLICY_ID)
-                        else {
-                            return Ok(0);
-                        };
-                        let old_target_count = current.allowed_targets.len();
-                        current.allowed_targets.extend(policy.allowed_targets);
-                        current
-                            .allowed_targets
-                            .sort_by_key(|target_id| target_id.as_uuid());
-                        current.allowed_targets.dedup();
-                        if current.allowed_targets.len() == old_target_count {
-                            policy = current;
-                            Ok(())
-                        } else {
-                            policy = current;
-                            repositories
-                                .update_policies
-                                .save(&policy)
-                                .await
-                                .map_err(|_| ApiError::storage())
-                        }
-                    }
-                    Err(_) => Err(ApiError::storage()),
-                }
-            };
-            if let Err(error) = saved {
+        let persisted = match self
+            .persist_standard_update_policy(&mut policy, existing.is_some())
+            .await
+        {
+            Ok(persisted) => persisted,
+            Err(error) => {
                 tracing::error!(error = ?error, "could not persist shared standard update policy");
                 return Err(error);
             }
+        };
+        if !persisted {
+            return Ok(0);
         }
 
         let mut store = self.store.write().await;
@@ -286,6 +242,39 @@ impl ApiState {
             store.update_policies.push(policy);
         }
         Ok(1)
+    }
+
+    async fn registered_target_ids(&self) -> Vec<TargetId> {
+        let mut target_ids = self
+            .store
+            .read()
+            .await
+            .targets
+            .iter()
+            .map(|target| target.id)
+            .collect::<Vec<_>>();
+        target_ids.sort_by_key(|target_id| target_id.as_uuid());
+        target_ids.dedup();
+        target_ids
+    }
+
+    async fn persist_standard_update_policy(
+        &self,
+        policy: &mut lxcup_core::UpdatePolicy,
+        already_exists: bool,
+    ) -> Result<bool, ApiError> {
+        let Some(repositories) = self.repositories.as_ref() else {
+            return Ok(true);
+        };
+        if already_exists {
+            return repositories
+                .update_policies
+                .save(policy)
+                .await
+                .map(|()| true)
+                .map_err(|_| ApiError::storage());
+        }
+        persist_new_standard_policy(repositories, policy).await
     }
 
     /// Claims due schedules and turns each target run into the same validated
@@ -434,6 +423,52 @@ impl ApiState {
             "updated",
         ));
     }
+}
+
+async fn persist_new_standard_policy(
+    repositories: &Repositories,
+    policy: &mut lxcup_core::UpdatePolicy,
+) -> Result<bool, ApiError> {
+    match repositories.update_policies.save_if_absent(policy).await {
+        Ok(true) => Ok(true),
+        Ok(false) => merge_concurrent_standard_policy(repositories, policy).await,
+        Err(_) => Err(ApiError::storage()),
+    }
+}
+
+async fn merge_concurrent_standard_policy(
+    repositories: &Repositories,
+    policy: &mut lxcup_core::UpdatePolicy,
+) -> Result<bool, ApiError> {
+    let persisted = repositories
+        .update_policies
+        .list()
+        .await
+        .map_err(|_| ApiError::storage())?;
+    let Some(mut current) = persisted
+        .into_iter()
+        .find(|item| item.id == STANDARD_UPDATE_POLICY_ID)
+    else {
+        return Ok(false);
+    };
+    let original_count = current.allowed_targets.len();
+    current
+        .allowed_targets
+        .extend(policy.allowed_targets.iter().copied());
+    current
+        .allowed_targets
+        .sort_by_key(|target_id| target_id.as_uuid());
+    current.allowed_targets.dedup();
+    *policy = current;
+    if policy.allowed_targets.len() == original_count {
+        return Ok(true);
+    }
+    repositories
+        .update_policies
+        .save(policy)
+        .await
+        .map(|()| true)
+        .map_err(|_| ApiError::storage())
 }
 
 impl Default for ApiState {

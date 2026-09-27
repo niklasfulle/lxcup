@@ -284,7 +284,7 @@ function NotificationCenter({ targets, containers }: Readonly<{ targets: TargetD
     alertStatuses.current = nextStatuses;
     setAlertHistory((previous) => {
       const previousById = new Map(previous.map((alert) => [alert.id, alert]));
-      const next = previous.map((alert) => currentIds.has(alert.id) ? alert : alert.status === "active" ? { ...alert, status: "resolved" as const, resolved_at: new Date().toISOString() } : alert);
+      const next = previous.map((alert) => resolveAlertStatus(alert, currentIds));
       for (const alert of telemetryAlerts.data) {
         const old = previousById.get(alert.id);
         const notification: TelemetryAlertNotification = { ...alert, status: "active", ...(old?.resolved_at ? {} : { resolved_at: undefined }) };
@@ -292,7 +292,9 @@ function NotificationCenter({ targets, containers }: Readonly<{ targets: TargetD
         if (index >= 0) next[index] = notification;
         else next.push(notification);
       }
-      const trimmed = next.sort((left, right) => Date.parse(right.observed_at) - Date.parse(left.observed_at)).slice(0, 50);
+      const sorted = [...next];
+      sorted.sort((left, right) => Date.parse(right.observed_at) - Date.parse(left.observed_at));
+      const trimmed = sorted.slice(0, 50);
       globalThis.localStorage?.setItem(TELEMETRY_ALERT_HISTORY_STORAGE_KEY, JSON.stringify(trimmed));
       return trimmed;
     });
@@ -314,6 +316,11 @@ function readNotificationIds() {
   } catch {
     return [];
   }
+}
+
+function resolveAlertStatus(alert: TelemetryAlertNotification, currentIds: ReadonlySet<string>): TelemetryAlertNotification {
+  if (currentIds.has(alert.id) || alert.status !== "active") return alert;
+  return { ...alert, status: "resolved", resolved_at: new Date().toISOString() };
 }
 
 function persistReadNotificationIds(ids: string[]) {
@@ -382,14 +389,35 @@ function notificationBody(failed: AnsibleJobDto[] | undefined, alerts: Telemetry
 
 function TelemetryAlertItem({ alert, markRead }: Readonly<{ alert: TelemetryAlertNotification; markRead: (id: string) => void }>) {
   const resolved = alert.status === "resolved";
-  const severityLabel = resolved ? "Behoben" : alert.severity === "critical" ? "Kritisch" : "Warnung";
-  const metricValue = alert.metric === "Telemetrie" ? `Letzter Messpunkt vor ${formatAlertAge(alert.age_seconds ?? 0)}` : `${formatAlertPercent(alert.value_basis_points)} · Grenzwert ${formatAlertPercent(alert.threshold_basis_points)}`;
+  const severityLabel = telemetrySeverityLabel(resolved, alert.severity);
+  const metricValue = telemetryMetricValue(alert);
+  const statusClass = telemetryAlertStatusClass(alert, resolved);
+  const recoveryMessage = telemetryRecoveryMessage(alert);
   return <Link className="grid gap-2 border-b border-[var(--line)] px-3 py-3 text-xs transition-colors last:border-0 hover:bg-[var(--primary-soft)]" to={`/targets/${alert.target_id}`} onClick={() => markRead(alert.id)}>
-    <div className="flex items-center justify-between gap-2"><span className={cn("inline-flex px-2 py-1 text-[10px] font-bold", resolved ? "bg-[var(--success-soft)] text-[var(--success)]" : alert.severity === "critical" ? "bg-[var(--error-soft)] text-[var(--error)]" : "bg-[var(--warning-soft)] text-[var(--warning)]")}>{severityLabel}</span><time className="text-[10px] text-[var(--muted)]">{new Date(resolved ? alert.resolved_at ?? alert.observed_at : alert.triggered_at).toLocaleString()}</time></div>
+    <div className="flex items-center justify-between gap-2"><span className={cn("inline-flex px-2 py-1 text-[10px] font-bold", statusClass)}>{severityLabel}</span><time className="text-[10px] text-[var(--muted)]">{new Date(resolved ? alert.resolved_at ?? alert.observed_at : alert.triggered_at).toLocaleString()}</time></div>
     <strong className="text-sm">{alert.metric === "Telemetrie" ? "Telemetrie veraltet" : `Hohe ${alert.metric}-Auslastung`}</strong>
     <span className="grid min-w-0 gap-0.5 border-l-2 border-l-lxcup-primary pl-2.5"><span className="text-[10px] font-bold uppercase tracking-wide text-[var(--muted)]">Ressource</span><strong className="truncate text-sm font-semibold">{alert.target_name}</strong><span className="truncate text-xs text-[var(--muted)]">{alert.target_kind} · {alert.target_address}</span></span>
-    <span className="text-xs text-[var(--muted)]">{resolved ? alert.metric === "Telemetrie" ? "Telemetrie wieder aktuell." : "Auslastung wieder im Normalbereich." : metricValue}</span>
+    <span className="text-xs text-[var(--muted)]">{resolved ? recoveryMessage : metricValue}</span>
   </Link>;
+}
+
+function telemetrySeverityLabel(resolved: boolean, severity: TelemetryAlertNotification["severity"]) {
+  if (resolved) return "Behoben";
+  return severity === "critical" ? "Kritisch" : "Warnung";
+}
+
+function telemetryAlertStatusClass(alert: TelemetryAlertNotification, resolved: boolean) {
+  if (resolved) return "bg-[var(--success-soft)] text-[var(--success)]";
+  return alert.severity === "critical" ? "bg-[var(--error-soft)] text-[var(--error)]" : "bg-[var(--warning-soft)] text-[var(--warning)]";
+}
+
+function telemetryMetricValue(alert: TelemetryAlertNotification) {
+  if (alert.metric === "Telemetrie") return `Letzter Messpunkt vor ${formatAlertAge(alert.age_seconds ?? 0)}`;
+  return `${formatAlertPercent(alert.value_basis_points)} · Grenzwert ${formatAlertPercent(alert.threshold_basis_points)}`;
+}
+
+function telemetryRecoveryMessage(alert: TelemetryAlertNotification) {
+  return alert.metric === "Telemetrie" ? "Telemetrie wieder aktuell." : "Auslastung wieder im Normalbereich.";
 }
 
 function formatAlertPercent(value: number | null) {

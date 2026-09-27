@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   createSchedule: vi.fn(async (request: any) => ({ ...request, last_run_at: null, next_run_at: "2026-01-01T01:00:00Z", last_error: null })),
   createUpdatePolicy: vi.fn(async (request: any) => request),
   deleteUpdatePolicy: vi.fn(async () => undefined),
+  getPackageInventory: vi.fn(async (targetId: string) => ({ target_id: targetId, status: "complete" as const, collected_at: "2026-01-01T00:00:00Z", packages: [{ name: "nginx", installed_version: "1.0", candidate_version: "1.1", architecture: "amd64", source: "stable" }] })),
   getAgentHealth: vi.fn(async () => ({ healthy: true, info: { agent_id: "agent-1", platform: "linux", hostname: "host", version: "0.3.1", protocol_version: "1" }, metrics: { collected_at: "2026-01-01", commands_total: 2, commands_failed: 0, last_command_at: null } })),
   getAgentMetrics: vi.fn(async () => ({ commands_total: 2, commands_failed: 0, last_command_at: null })),
   discoverDockerWorkloads: vi.fn(async () => undefined),
@@ -76,7 +77,7 @@ vi.mock("./queries", () => ({
 
 vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
-  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, createUpdatePolicy: mocks.createUpdatePolicy, deleteUpdatePolicy: mocks.deleteUpdatePolicy, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, discoverTargetDocker: mocks.discoverTargetDocker, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe, setCredentials: mocks.setCredentials, setUnauthorizedHandler: mocks.setUnauthorizedHandler, getSession: mocks.getSession, logout: mocks.logout } };
+  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, createUpdatePolicy: mocks.createUpdatePolicy, deleteUpdatePolicy: mocks.deleteUpdatePolicy, getPackageInventory: mocks.getPackageInventory, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, discoverTargetDocker: mocks.discoverTargetDocker, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe, setCredentials: mocks.setCredentials, setUnauthorizedHandler: mocks.setUnauthorizedHandler, getSession: mocks.getSession, logout: mocks.logout } };
 });
 
 import { Dashboard } from "./pages/Dashboard";
@@ -575,7 +576,7 @@ describe("inventory pages", () => {
     await userEvent.click(screen.getByRole("button", { name: "Policy löschen" }));
 
     expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("standard-all-packages-legacy"));
-    await waitFor(() => expect(mocks.deleteUpdatePolicy).toHaveBeenCalledWith("standard-all-packages-legacy", true));
+    await waitFor(() => expect(mocks.deleteUpdatePolicy).toHaveBeenCalledWith("standard-all-packages-legacy"));
   });
 
   it("links to policy management when creating a package-update schedule", async () => {
@@ -929,7 +930,10 @@ describe("workflow pages", () => {
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "Ziel" }), "target-1");
     await userEvent.selectOptions(screen.getAllByRole("combobox")[1], "update_packages");
     await userEvent.selectOptions(screen.getAllByRole("combobox")[2], "plan");
-    await userEvent.type(screen.getByPlaceholderText("z. B. nginx,curl"), "nginx,curl");
+    await userEvent.click(screen.getByRole("button", { name: "Updates auswählen" }));
+    const updatePicker = await screen.findByRole("dialog", { name: "Verfügbare Updates" });
+    await userEvent.click(within(updatePicker).getByRole("checkbox", { name: /nginx/ }));
+    await userEvent.click(within(updatePicker).getByRole("button", { name: "Übernehmen" }));
     await userEvent.selectOptions(screen.getAllByRole("combobox")[3], "safe-packages");
     await userEvent.click(screen.getByRole("checkbox", { name: /Ich bestätige Ziel und den Umfang dieser Vorschau/ }));
     await userEvent.click(screen.getByRole("button", { name: "Workflow starten" }));
@@ -1073,7 +1077,7 @@ describe("application shell", () => {
     expect(screen.getByText("Ansible-Worker nicht verfügbar")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Zugänge & Agenten" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /LXC einbinden/ })).not.toBeInTheDocument();
-    expect(mocks.subscribe).toHaveBeenCalled();
+    await waitFor(() => expect(mocks.subscribe).toHaveBeenCalled());
     expect(await screen.findByText(/Echtzeitverbindung unterbrochen/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Benachrichtigungen" }));
     expect(document.querySelector("header")).toHaveClass("z-[60]");

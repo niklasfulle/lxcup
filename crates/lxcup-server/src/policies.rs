@@ -70,6 +70,48 @@ pub(super) async fn create_update_policy(
     JsonBody(request): JsonBody<CreateUpdatePolicyRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ApiEnvelope<UpdatePolicy>>), ApiError> {
     require_permission(actor_role, Permission::Configure)?;
+    validate_update_policy_request(&request)?;
+    let mut store = state.store.write().await;
+    if store
+        .update_policies
+        .iter()
+        .any(|policy| policy.id == request.id)
+    {
+        return Err(ApiError::conflict(
+            "policy_exists",
+            "policy id already exists",
+        ));
+    }
+    if request
+        .allowed_targets
+        .iter()
+        .any(|id| !store.targets.iter().any(|target| target.id == *id))
+    {
+        return Err(ApiError::not_found("policy target not found"));
+    }
+    let policy = UpdatePolicy {
+        id: request.id,
+        allowed_targets: request.allowed_targets,
+        allowed_packages: request.allowed_packages,
+        maintenance_start_minute: request.maintenance_start_minute,
+        maintenance_end_minute: request.maintenance_end_minute,
+        timezone: request.timezone,
+        maximum_risk: request.maximum_risk,
+        enabled: request.enabled,
+    };
+    store.update_policies.push(policy.clone());
+    drop(store);
+    if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .update_policies
+            .save(&policy)
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    Ok((axum::http::StatusCode::CREATED, Json(envelope(policy))))
+}
+
+fn validate_update_policy_request(request: &CreateUpdatePolicyRequest) -> Result<(), ApiError> {
     if request.id == STANDARD_UPDATE_POLICY_ID {
         return Err(ApiError::bad_request(
             "reserved_policy_id",
@@ -121,44 +163,7 @@ pub(super) async fn create_update_policy(
             "allowed package names must be bounded safe package identifiers",
         ));
     }
-    let mut store = state.store.write().await;
-    if store
-        .update_policies
-        .iter()
-        .any(|policy| policy.id == request.id)
-    {
-        return Err(ApiError::conflict(
-            "policy_exists",
-            "policy id already exists",
-        ));
-    }
-    if request
-        .allowed_targets
-        .iter()
-        .any(|id| !store.targets.iter().any(|target| target.id == *id))
-    {
-        return Err(ApiError::not_found("policy target not found"));
-    }
-    let policy = UpdatePolicy {
-        id: request.id,
-        allowed_targets: request.allowed_targets,
-        allowed_packages: request.allowed_packages,
-        maintenance_start_minute: request.maintenance_start_minute,
-        maintenance_end_minute: request.maintenance_end_minute,
-        timezone: request.timezone,
-        maximum_risk: request.maximum_risk,
-        enabled: request.enabled,
-    };
-    store.update_policies.push(policy.clone());
-    drop(store);
-    if let Some(repositories) = state.repositories.as_ref() {
-        repositories
-            .update_policies
-            .save(&policy)
-            .await
-            .map_err(|_| ApiError::storage())?;
-    }
-    Ok((axum::http::StatusCode::CREATED, Json(envelope(policy))))
+    Ok(())
 }
 
 pub(super) async fn delete_update_policy(

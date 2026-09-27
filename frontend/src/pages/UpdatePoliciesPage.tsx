@@ -48,7 +48,7 @@ export function UpdatePoliciesPage() {
 
   function confirmPolicyDeletion(policyId: string) {
     const message = `Policy „${policyId}“ wirklich löschen? Bereits erstellte Pläne mit dieser Policy können danach nicht mehr angewendet werden.`;
-    if (window.confirm(message)) deleteMutation.mutate(policyId);
+    if (globalThis.confirm(message)) deleteMutation.mutate(policyId);
   }
 
   return <div className="grid gap-5">

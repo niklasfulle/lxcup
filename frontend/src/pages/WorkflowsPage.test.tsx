@@ -13,7 +13,7 @@ const mockTargets = vi.hoisted(() => ({ items: [
 
 vi.mock("../api", () => ({ createAnsibleJob: vi.fn(async (request: any) => ({ id: `job-${request.target_id}`, operation: request.operation, playbook: "test.yml", playbook_version: "1", target: { target: request.target_id }, mode: request.mode, status: "queued", parameter_hash: "hash", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" })), getPackageInventory: vi.fn(async (target_id: string) => ({ target_id, status: "complete", collected_at: "2026-01-01T00:00:00Z", packages: [{ name: "curl", installed_version: "8.5.0", candidate_version: "8.6.0", architecture: "amd64", source: "stable" }] })) }));
 vi.mock("../queries", () => ({
-  queryKeys: { ansibleJobs: ["ansible-jobs"] },
+  queryKeys: { ansibleJobs: ["ansible-jobs"], packageInventory: (targetId: string) => ["targets", targetId, "package-inventory"] },
   useAnsibleJobs: () => ({ data: [], isLoading: false, error: null }),
   useAnsibleJobEvents: () => ({ data: [], isLoading: false, error: null }),
   useTargets: () => ({ data: mockTargets.items }),

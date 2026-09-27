@@ -2,7 +2,7 @@ import { cn } from "../classnames";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { adoptDockerWorkload, discoverDockerWorkloads, discoverTargetDocker, removeDockerWorkload, type TargetDockerDiscoveryDto } from "../api";
+import { adoptDockerWorkload, discoverDockerWorkloads, discoverTargetDocker, removeDockerWorkload, type ContainerDto, type TargetDockerDiscoveryDto, type TargetDto } from "../api";
 import { queryKeys, useContainers, useDockerDiscovery, useDockerWorkloads, useTargetDockerInventory, useTargets } from "../queries";
 import { dockerDiscoveryFailureLabel } from "../dockerDiscoveryStatus";
 
@@ -43,45 +43,40 @@ export function DockerPage() {
   const host = (containers.data ?? []).find((container) => container.id === hostId);
   const targetHost = (targets.data ?? []).find((target) => target.id === targetId);
   const availableLxcTargets = (targets.data ?? []).filter((target) => target.kind === "lxc" && target.state === "managed");
+  const targetSelected = Boolean(targetId);
+  const containerSelected = Boolean(hostId);
 
   return <>
     <header className="mb-3 flex items-end justify-between gap-4 border-b border-[var(--line)] pb-3 max-[720px]:flex-col max-[720px]:items-start"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Agent-Inventar</p><h1>Docker-Container</h1><p className="text-[var(--muted)]">Erkannte Docker-Container auf eingebundenen LXC-Agenten aufnehmen und verwalten.</p></div><button className={hostSelectorOpen ? "inline-flex min-h-9 items-center justify-center gap-2 border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" : "inline-flex min-h-9 items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700"} type="button" aria-expanded={hostSelectorOpen} aria-controls="docker-host-selector" onClick={() => setHostSelectorOpen((open) => !open)}>{hostSelectorOpen ? "Schließen" : "Hinzufügen"}</button></header>
-    {hostSelectorOpen ? <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]" id="docker-host-selector"><div className="mb-3"><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Docker-Host</p><h2 className="m-0">LXC mit Agent auswählen</h2><p className="mt-1 text-sm text-[var(--muted)]">Docker-Container werden über einen bereits eingebundenen LXC-Agenten erkannt.</p></div><div className="grid max-w-xl grid-cols-1 gap-3"><label className="grid gap-1 text-xs font-semibold text-[var(--muted)]"><span>LXC mit Agent</span>
-        <select value={targetId ? `target:${targetId}` : hostId ?? ""} onChange={(event) => {
-          const selection = event.target.value;
-          if (selection.startsWith("target:")) {
-            const nextTargetId = selection.slice("target:".length);
-            setTargetId(nextTargetId);
-            setHostId(undefined);
-            setTargetDiscoveryResult(undefined);
-            setSearchParams({ target: nextTargetId });
-            setHostSelectorOpen(false);
-            return;
-          }
-          const next = selection ? Number(selection) : undefined;
-          setTargetId(undefined);
-          setTargetDiscoveryResult(undefined);
-          setHostId(next);
-          setSearchParams(next ? { host: String(next) } : {});
-          if (next !== undefined) setHostSelectorOpen(false);
-        }}>
-          <option value="">LXC auswählen</option>
-          {availableLxcTargets.map((target) => <option key={target.id} value={`target:${target.id}`}>{target.name} · {target.address}</option>)}
-          {(containers.data ?? []).map((container) => <option key={`container:${container.id}`} value={container.id}>{container.name} · VMID {container.id}</option>)}
-        </select>
-      </label></div>{availableLxcTargets.length === 0 ? <p className="mt-2 text-xs text-[var(--muted)]">Es gibt noch kein verbundenes LXC mit gemeldetem Agent-Heartbeat.</p> : null}</section> : null}
-    {hostId === undefined && targetId === undefined ? null : <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]">
-      {targetId !== undefined ? <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Ausgewählter Docker-Host</p><strong>{targetHost?.name ?? "LXC-Ziel"}</strong>{targetHost ? <span className="ml-2 text-xs text-[var(--muted)]">LXC · {targetHost.address}</span> : null}</div><div className="flex flex-wrap items-center gap-2"><button className="inline-flex items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={targetDiscover.isPending || !targetHost} onClick={() => targetDiscover.mutate()}>{targetDiscover.isPending ? "Suche läuft…" : "Docker-Container entdecken"}</button>{targetHost ? <Link className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/targets/${targetHost.id}`}>LXC öffnen</Link> : null}</div></div> : <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Ausgewählter Docker-Host</p><strong>{host ? host.name : "Kein LXC mit Agent ausgewählt"}</strong>{host ? <span className="ml-2 text-xs text-[var(--muted)]">LXC · VMID {host.id}</span> : null}</div><div className="flex flex-wrap items-center gap-2"><button className="inline-flex items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discover.isPending} onClick={() => discover.mutate()}>{discover.isPending ? "Suche läuft…" : "Docker-Container entdecken"}</button>{host ? <Link className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/containers/${host.id}`}>LXC öffnen</Link> : null}</div></div>}
-      {targetId !== undefined ? <TargetDockerResult discovery={targetDiscoveryResult ?? targetInventory.data} error={targetDiscover.error ?? targetInventory.error} /> : null}
-      {targetId === undefined && discover.error ? <p className="font-semibold text-[var(--error)]" role="alert">{discover.error.message}</p> : null}
-      {targetId === undefined ? <DockerDiscoverySummary hostId={hostId} hostName={host?.name} discovery={discovery} /> : null}
-    </section>}
+    {hostSelectorOpen ? <DockerHostSelector targets={availableLxcTargets} containers={containers.data ?? []} value={targetId ? `target:${targetId}` : hostId ?? ""} onSelectTarget={(nextTargetId) => { setTargetId(nextTargetId); setHostId(undefined); setTargetDiscoveryResult(undefined); setSearchParams({ target: nextTargetId }); setHostSelectorOpen(false); }} onSelectContainer={(nextHostId) => { setTargetId(undefined); setTargetDiscoveryResult(undefined); setHostId(nextHostId); setSearchParams(nextHostId ? { host: String(nextHostId) } : {}); if (nextHostId !== undefined) setHostSelectorOpen(false); }} /> : null}
+    {targetSelected || containerSelected ? <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]">
+      <SelectedDockerHost targetHost={targetHost} host={host} targetDiscoveryPending={targetDiscover.isPending} discoveryPending={discover.isPending} onDiscoverTarget={() => targetDiscover.mutate()} onDiscoverContainer={() => discover.mutate()} />
+      {targetSelected ? <TargetDockerResult discovery={targetDiscoveryResult ?? targetInventory.data} error={targetDiscover.error ?? targetInventory.error} /> : null}
+      {containerSelected && discover.error ? <p className="font-semibold text-[var(--error)]" role="alert">{discover.error.message}</p> : null}
+      {containerSelected ? <DockerDiscoverySummary hostId={hostId} hostName={host?.name} discovery={discovery} /> : null}
+    </section> : null}
     <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]">
       <div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start"><div><h2>Docker-Inventar</h2><p className="text-[var(--muted)]">„Aufnehmen“ verwaltet den Inventareintrag in lxcup; der Docker-Container bleibt unverändert.</p></div><span className="text-[var(--muted)]">{workloads.data?.length ?? 0} Container</span></div>
-      {targetId !== undefined ? targetInventoryContent(targetInventory.data) : workloadContent(hostId, host?.name, workloads, adopt.isPending, (dockerId) => adopt.mutate(dockerId), (item) => setRemoveCandidate({ id: item.id, name: item.name }))}
+      {targetSelected ? targetInventoryContent(targetDiscoveryResult ?? targetInventory.data) : workloadContent(hostId, host?.name, workloads, adopt.isPending, (dockerId) => adopt.mutate(dockerId), (item) => setRemoveCandidate({ id: item.id, name: item.name }))}
     </section>
     <RemoveWorkloadDialog candidate={removeCandidate} pending={remove.isPending} error={remove.error} onCancel={() => setRemoveCandidate(null)} onConfirm={() => removeCandidate && remove.mutate(removeCandidate.id, { onSuccess: () => setRemoveCandidate(null) })} />
   </>;
+}
+
+function DockerHostSelector({ targets, containers, value, onSelectTarget, onSelectContainer }: Readonly<{ targets: TargetDto[]; containers: ContainerDto[]; value: string | number; onSelectTarget: (targetId: string) => void; onSelectContainer: (hostId: number | undefined) => void }>) {
+  function changeSelection(selection: string) {
+    if (selection.startsWith("target:")) {
+      onSelectTarget(selection.slice("target:".length));
+      return;
+    }
+    onSelectContainer(selection ? Number(selection) : undefined);
+  }
+  return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]" id="docker-host-selector"><div className="mb-3"><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Docker-Host</p><h2 className="m-0">LXC mit Agent auswählen</h2><p className="mt-1 text-sm text-[var(--muted)]">Docker-Container werden über einen bereits eingebundenen LXC-Agenten erkannt.</p></div><div className="grid max-w-xl grid-cols-1 gap-3"><label className="grid gap-1 text-xs font-semibold text-[var(--muted)]"><span>LXC mit Agent</span><select value={value} onChange={(event) => changeSelection(event.target.value)}><option value="">LXC auswählen</option>{targets.map((target) => <option key={target.id} value={`target:${target.id}`}>{target.name} · {target.address}</option>)}{containers.map((container) => <option key={`container:${container.id}`} value={container.id}>{container.name} · VMID {container.id}</option>)}</select></label></div>{targets.length === 0 ? <p className="mt-2 text-xs text-[var(--muted)]">Es gibt noch kein verbundenes LXC mit gemeldetem Agent-Heartbeat.</p> : null}</section>;
+}
+
+function SelectedDockerHost({ targetHost, host, targetDiscoveryPending, discoveryPending, onDiscoverTarget, onDiscoverContainer }: Readonly<{ targetHost: TargetDto | undefined; host: ContainerDto | undefined; targetDiscoveryPending: boolean; discoveryPending: boolean; onDiscoverTarget: () => void; onDiscoverContainer: () => void }>) {
+  if (targetHost) return <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Ausgewählter Docker-Host</p><strong>{targetHost.name}</strong><span className="ml-2 text-xs text-[var(--muted)]">LXC · {targetHost.address}</span></div><div className="flex flex-wrap items-center gap-2"><button className="inline-flex items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={targetDiscoveryPending} onClick={onDiscoverTarget}>{targetDiscoveryPending ? "Suche läuft…" : "Docker-Container entdecken"}</button><Link className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/targets/${targetHost.id}`}>LXC öffnen</Link></div></div>;
+  return <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Ausgewählter Docker-Host</p><strong>{host?.name ?? "Kein LXC mit Agent ausgewählt"}</strong>{host ? <span className="ml-2 text-xs text-[var(--muted)]">LXC · VMID {host.id}</span> : null}</div><div className="flex flex-wrap items-center gap-2"><button className="inline-flex items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discoveryPending} onClick={onDiscoverContainer}>{discoveryPending ? "Suche läuft…" : "Docker-Container entdecken"}</button>{host ? <Link className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/containers/${host.id}`}>LXC öffnen</Link> : null}</div></div>;
 }
 
 function TargetDockerResult({ discovery, error }: Readonly<{ discovery: TargetDockerDiscoveryDto | undefined; error: Error | null }>) {

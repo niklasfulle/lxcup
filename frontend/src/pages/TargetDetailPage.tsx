@@ -124,10 +124,30 @@ function TargetTelemetry({ telemetry, samples, latest, now }: Readonly<{ telemet
 }
 
 function targetTelemetryContent(telemetry: TelemetryQuery, samples: TelemetrySample[], latest: TelemetrySample | undefined, now: number) {
-  if (telemetry.error) return <p className="font-semibold text-[var(--error)]" role="alert">{telemetry.error.message}</p>;
-  if (telemetry.isLoading && samples.length === 0) return <p className="text-[var(--muted)]">Telemetrie wird geladen…</p>;
-  if (samples.length === 0 || latest === undefined) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Noch keine Telemetrie verfügbar.</p>;
-  return <><LatestTelemetryNotice latest={latest} /><p className="mb-3 text-sm text-[var(--muted)]">Letzter Messpunkt: {new Date(latest.collected_at).toLocaleString()} · CPU {formatPercent(latest.cpu_basis_points)} · RAM {formatPercent(latest.memory_basis_points)} · Speicher {formatPercent(latest.storage_basis_points)}</p>{telemetry.data?.partial ? <p className="mb-3 border border-[var(--warning)] bg-[var(--warning-soft)] p-2 text-xs text-[var(--ink)]" role="status">{telemetry.data.missing_samples > 0 ? `Im 10-Minuten-Verlauf fehlen ${telemetry.data.missing_samples} erwartete Messpunkte.` : "Ein oder mehrere Messpunkte enthalten nicht alle verfügbaren Kennzahlen."}</p> : null}<div className="grid gap-4 md:grid-cols-3"><TelemetryChart label="CPU" field="cpu_basis_points" samples={samples} now={now} /><TelemetryChart label="RAM" field="memory_basis_points" samples={samples} now={now} /><TelemetryChart label="Speicher" field="storage_basis_points" samples={samples} now={now} /></div></>;
+  if (telemetry.error) {
+    return <p className="font-semibold text-[var(--error)]" role="alert">{telemetry.error.message}</p>;
+  }
+  if (telemetry.isLoading && samples.length === 0) {
+    return <p className="text-[var(--muted)]">Telemetrie wird geladen…</p>;
+  }
+  if (samples.length === 0 || latest === undefined) {
+    return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Noch keine Telemetrie verfügbar.</p>;
+  }
+  return <>
+    <LatestTelemetryNotice latest={latest} />
+    <p className="mb-3 text-sm text-[var(--muted)]">Letzter Messpunkt: {new Date(latest.collected_at).toLocaleString()} · CPU {formatPercent(latest.cpu_basis_points)} · RAM {formatPercent(latest.memory_basis_points)} · Speicher {formatPercent(latest.storage_basis_points)}</p>
+    <TelemetryPartialNotice telemetry={telemetry} />
+    <div className="grid gap-4 md:grid-cols-3"><TelemetryChart label="CPU" field="cpu_basis_points" samples={samples} now={now} /><TelemetryChart label="RAM" field="memory_basis_points" samples={samples} now={now} /><TelemetryChart label="Speicher" field="storage_basis_points" samples={samples} now={now} /></div>
+  </>;
+}
+
+function TelemetryPartialNotice({ telemetry }: Readonly<{ telemetry: TelemetryQuery }>) {
+  const data = telemetry.data;
+  if (!data?.partial) return null;
+  const message = data.missing_samples > 0
+    ? `Im 10-Minuten-Verlauf fehlen ${data.missing_samples} erwartete Messpunkte.`
+    : "Ein oder mehrere Messpunkte enthalten nicht alle verfügbaren Kennzahlen.";
+  return <output className="mb-3 block border border-[var(--warning)] bg-[var(--warning-soft)] p-2 text-xs text-[var(--ink)]">{message}</output>;
 }
 
 function LatestTelemetryNotice({ latest }: Readonly<{ latest: TelemetrySample }>) {
@@ -137,7 +157,13 @@ function LatestTelemetryNotice({ latest }: Readonly<{ latest: TelemetrySample }>
 
 function TargetDockerInventory({ target, host, workloads, discovery, stale, discovering, discoveryError, onDiscover }: Readonly<{ target: Target; host: ContainerItem | undefined; workloads: DockerWorkloadsQuery; discovery: DockerDiscoveryQuery; stale: boolean; discovering: boolean; discoveryError: Error | null; onDiscover: () => void }>) {
   if (target.kind !== "lxc") return null;
-  return <article className="flex min-h-36 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Docker-Inventar</h2><p className="mb-0 text-sm text-[var(--muted)]">Docker-Container werden getrennt vom LXC-Inventar geführt.</p></div><div className="flex flex-wrap gap-2">{host ? <button className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discovering} onClick={onDiscover}>{discovering ? "Erkennung läuft…" : "Docker erkennen"}</button> : null}{host ? <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?host=${host.id}`}>Docker-Inventar öffnen <span className="ml-2" aria-hidden="true">→</span></Link> : target.state === "managed" ? <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?target=${encodeURIComponent(target.id)}`}>Docker-Erkennung öffnen <span className="ml-2" aria-hidden="true">→</span></Link> : null}</div></div><div className="flex-1">{discoveryError ? <p className="mb-3 border border-[var(--error)] bg-[var(--paper-muted)] p-3 text-sm" role="alert">Docker-Erkennung fehlgeschlagen: {dockerDiscoveryFailureLabel(discoveryError.message)}</p> : null}{host ? targetDockerContent(host, workloads, discovery, stale) : <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Keine alte Container-Verknüpfung nötig: verbundene LXC-Agenten lassen sich direkt über die Docker-Erkennung auswählen.</p>}</div></article>;
+  return <article className="flex min-h-36 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Docker-Inventar</h2><p className="mb-0 text-sm text-[var(--muted)]">Docker-Container werden getrennt vom LXC-Inventar geführt.</p></div><DockerInventoryActions target={target} host={host} discovering={discovering} onDiscover={onDiscover} /></div><div className="flex-1">{discoveryError ? <p className="mb-3 border border-[var(--error)] bg-[var(--paper-muted)] p-3 text-sm" role="alert">Docker-Erkennung fehlgeschlagen: {dockerDiscoveryFailureLabel(discoveryError.message)}</p> : null}{host ? targetDockerContent(host, workloads, discovery, stale) : <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Keine alte Container-Verknüpfung nötig: verbundene LXC-Agenten lassen sich direkt über die Docker-Erkennung auswählen.</p>}</div></article>;
+}
+
+function DockerInventoryActions({ target, host, discovering, onDiscover }: Readonly<{ target: Target; host: ContainerItem | undefined; discovering: boolean; onDiscover: () => void }>) {
+  if (host) return <div className="flex flex-wrap gap-2"><button className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discovering} onClick={onDiscover}>{discovering ? "Erkennung läuft…" : "Docker erkennen"}</button><Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?host=${host.id}`}>Docker-Inventar öffnen <span className="ml-2" aria-hidden="true">→</span></Link></div>;
+  if (target.state !== "managed") return null;
+  return <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?target=${encodeURIComponent(target.id)}`}>Docker-Erkennung öffnen <span className="ml-2" aria-hidden="true">→</span></Link>;
 }
 
 function targetDockerContent(host: ContainerItem | undefined, workloads: DockerWorkloadsQuery, discovery: DockerDiscoveryQuery, stale: boolean) {
