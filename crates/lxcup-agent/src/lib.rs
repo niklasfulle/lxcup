@@ -26,6 +26,9 @@ use uuid::Uuid;
 
 mod docker;
 mod parsers;
+pub use parsers::{
+    is_safe_docker_container_id, parse_docker_stats, parse_remote_image_config_digest,
+};
 use parsers::{
     normalize_apt_list, parse_dpkg_packages, parse_windows_packages, safe_detail, safe_package,
 };
@@ -104,6 +107,115 @@ pub struct SystemTelemetryWindow {
     pub partial: bool,
 }
 
+/// Resource samples reported for Docker containers running on this agent.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DockerTelemetrySample {
+    pub collected_at: DateTime<Utc>,
+    pub container_id: String,
+    pub cpu_basis_points: Option<u16>,
+    pub memory_basis_points: Option<u16>,
+    pub memory_used_bytes: Option<u64>,
+    pub memory_limit_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DockerTelemetryWindow {
+    pub samples: Vec<DockerTelemetrySample>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockerLifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DockerLifecycleRequest {
+    pub container_id: String,
+    pub action: DockerLifecycleAction,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DockerLifecycleResult {
+    pub container_id: String,
+    pub action: DockerLifecycleAction,
+    pub completed_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockerImageUpdateStatus {
+    Current,
+    UpdateAvailable,
+    Pinned,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DockerImageUpdateRequest {
+    pub container_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DockerImageUpdateResult {
+    pub container_id: String,
+    pub image: String,
+    pub current_image_id: Option<String>,
+    pub remote_image_id: Option<String>,
+    pub status: DockerImageUpdateStatus,
+    pub reason: Option<String>,
+    pub checked_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DockerImageUpdateApplyRequest {
+    pub container_id: String,
+    pub expected_remote_image_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DockerImageUpdateApplyResult {
+    pub container_id: String,
+    pub image: String,
+    pub compose_project: String,
+    pub compose_service: String,
+    pub image_id: String,
+    pub completed_at: DateTime<Utc>,
+}
+
+#[derive(Default)]
+pub struct DockerTelemetryBuffer {
+    samples: VecDeque<DockerTelemetrySample>,
+}
+
+impl DockerTelemetryBuffer {
+    pub const WINDOW_SECONDS: i64 = 60;
+    pub const MAX_SAMPLES: usize = 8_000;
+
+    pub fn record(&mut self, samples: impl IntoIterator<Item = DockerTelemetrySample>) {
+        self.samples.extend(samples);
+        while self.samples.len() > Self::MAX_SAMPLES {
+            self.samples.pop_front();
+        }
+        self.remove_expired();
+    }
+
+    pub fn window(&mut self) -> DockerTelemetryWindow {
+        self.remove_expired();
+        DockerTelemetryWindow {
+            samples: self.samples.iter().cloned().collect(),
+        }
+    }
+
+    fn remove_expired(&mut self) {
+        let threshold = Utc::now() - chrono::Duration::seconds(Self::WINDOW_SECONDS);
+        self.samples
+            .retain(|sample| sample.collected_at >= threshold);
+    }
+}
+
 #[derive(Default)]
 pub struct TelemetryBuffer {
     samples: VecDeque<SystemTelemetrySample>,
@@ -153,6 +265,16 @@ pub struct DockerContainerInfo {
     pub status: String,
     pub ports: Vec<String>,
     pub started_at: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub image_id: Option<String>,
+    #[serde(default)]
+    pub restart_count: Option<u64>,
+    #[serde(default)]
+    pub health: Option<String>,
+    #[serde(default)]
+    pub oom_killed: Option<bool>,
     pub labels: Vec<String>,
 }
 
@@ -198,6 +320,8 @@ pub struct AgentHeartbeat {
     pub metrics: AgentMetrics,
     pub sent_at: DateTime<Utc>,
     pub telemetry: SystemTelemetryWindow,
+    #[serde(default)]
+    pub docker_telemetry: DockerTelemetryWindow,
 }
 
 #[derive(Clone)]
@@ -372,6 +496,44 @@ impl AgentClient {
     pub async fn docker_containers(&self) -> Result<DockerDiscovery, AgentError> {
         self.get("/docker/containers").await
     }
+    pub async fn docker_lifecycle(
+        &self,
+        request: &DockerLifecycleRequest,
+    ) -> Result<DockerLifecycleResult, AgentError> {
+        if !is_safe_docker_container_id(&request.container_id) {
+            return Err(AgentError::InvalidRequest("Docker container id is invalid"));
+        }
+        self.post("/docker/containers/action", request).await
+    }
+    pub async fn docker_image_update_check(
+        &self,
+        request: &DockerImageUpdateRequest,
+    ) -> Result<DockerImageUpdateResult, AgentError> {
+        if !is_safe_docker_container_id(&request.container_id) {
+            return Err(AgentError::InvalidRequest("Docker container id is invalid"));
+        }
+        self.post("/docker/containers/image-update-check", request)
+            .await
+    }
+    pub async fn docker_image_update_apply(
+        &self,
+        request: &DockerImageUpdateApplyRequest,
+    ) -> Result<DockerImageUpdateApplyResult, AgentError> {
+        if !is_safe_docker_container_id(&request.container_id)
+            || !request
+                .expected_remote_image_id
+                .strip_prefix("sha256:")
+                .is_some_and(|digest| {
+                    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+        {
+            return Err(AgentError::InvalidRequest(
+                "Docker image update request is invalid",
+            ));
+        }
+        self.post("/docker/containers/image-update-apply", request)
+            .await
+    }
     pub async fn package_inventory(&self) -> Result<AgentPackageInventory, AgentError> {
         self.get("/packages").await
     }
@@ -491,7 +653,9 @@ pub struct LocalAgentState {
     token: Arc<str>,
     metrics: Arc<tokio::sync::Mutex<AgentMetrics>>,
     telemetry: Arc<tokio::sync::Mutex<TelemetryBuffer>>,
+    docker_telemetry: Arc<tokio::sync::Mutex<DockerTelemetryBuffer>>,
     results: Arc<tokio::sync::Mutex<HashMap<String, AgentCommandResponse>>>,
+    docker_command_runner: Arc<dyn docker::DockerCommandRunner>,
 }
 
 impl LocalAgentState {
@@ -506,8 +670,19 @@ impl LocalAgentState {
                 last_command_at: None,
             })),
             telemetry: Arc::new(tokio::sync::Mutex::new(TelemetryBuffer::default())),
+            docker_telemetry: Arc::new(tokio::sync::Mutex::new(DockerTelemetryBuffer::default())),
             results: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            docker_command_runner: Arc::new(docker::ProcessDockerCommandRunner),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_docker_command_runner(
+        mut self,
+        runner: Arc<dyn docker::DockerCommandRunner>,
+    ) -> Self {
+        self.docker_command_runner = runner;
+        self
     }
 
     pub async fn metrics_snapshot(&self) -> AgentMetrics {
@@ -519,6 +694,15 @@ impl LocalAgentState {
     pub async fn telemetry_window(&self) -> SystemTelemetryWindow {
         self.telemetry.lock().await.window()
     }
+    pub async fn record_docker_telemetry(
+        &self,
+        samples: impl IntoIterator<Item = DockerTelemetrySample>,
+    ) {
+        self.docker_telemetry.lock().await.record(samples);
+    }
+    pub async fn docker_telemetry_window(&self) -> DockerTelemetryWindow {
+        self.docker_telemetry.lock().await.window()
+    }
 }
 
 pub fn agent_router(state: LocalAgentState) -> Router {
@@ -526,6 +710,18 @@ pub fn agent_router(state: LocalAgentState) -> Router {
         .route("/health", get(agent_health))
         .route("/metrics", get(agent_metrics))
         .route("/docker/containers", get(docker::agent_docker_containers))
+        .route(
+            "/docker/containers/action",
+            post(docker::agent_docker_lifecycle),
+        )
+        .route(
+            "/docker/containers/image-update-check",
+            post(docker::agent_docker_image_update_check),
+        )
+        .route(
+            "/docker/containers/image-update-apply",
+            post(docker::agent_docker_image_update_apply),
+        )
         .route("/packages", get(agent_package_inventory))
         .route("/command", post(agent_command))
         .with_state(state)

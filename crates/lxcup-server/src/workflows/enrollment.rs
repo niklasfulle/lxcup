@@ -109,8 +109,7 @@ pub(crate) async fn get_enrollment(
         .await
         .enrollments
         .iter()
-        .find(|enrollment| enrollment.id == enrollment_id)
-        .is_some();
+        .any(|enrollment| enrollment.id == enrollment_id);
     if !enrollment_exists {
         return Err(ApiError::not_found("enrollment not found"));
     }

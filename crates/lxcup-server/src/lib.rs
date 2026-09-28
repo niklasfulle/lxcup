@@ -53,10 +53,15 @@ mod package_inventory;
 pub(crate) use package_inventory::get_package_inventory;
 mod telemetry;
 pub(crate) use telemetry::get_target_telemetry;
+mod docker_telemetry;
+pub(crate) use docker_telemetry::get_target_docker_telemetry;
 mod telemetry_alerts;
 pub(crate) use telemetry_alerts::list_telemetry_alerts;
 mod target_docker;
-pub(crate) use target_docker::{discover_target_docker, get_target_docker_inventory};
+pub(crate) use target_docker::{
+    apply_target_docker_image_update, check_target_docker_image_update, discover_target_docker,
+    get_target_docker_inventory, operate_target_docker_container,
+};
 mod schedules;
 pub(crate) use schedules::{create_schedule, list_schedules, set_schedule_enabled};
 mod policies;
@@ -326,6 +331,24 @@ impl ApiState {
         dispatched
     }
 
+    /// Applies configured history retention independently of request traffic.
+    pub async fn prune_retained_data(&self) -> Result<(u64, u64), String> {
+        let Some(repositories) = self.repositories.as_ref() else {
+            return Ok((0, 0));
+        };
+        let telemetry = repositories
+            .telemetry
+            .prune_expired()
+            .await
+            .map_err(|error| format!("telemetry retention: {error}"))?;
+        let docker_events = repositories
+            .target_docker_inventory
+            .prune_expired_events()
+            .await
+            .map_err(|error| format!("Docker event retention: {error}"))?;
+        Ok((telemetry, docker_events))
+    }
+
     async fn scheduled_worker_available(&self) -> bool {
         let Some(repositories) = self.repositories.as_ref() else {
             return true;
@@ -557,10 +580,26 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/targets/{target_id}/telemetry",
             get(get_target_telemetry),
         )
+        .route(
+            "/api/v1/targets/{target_id}/docker/telemetry",
+            get(get_target_docker_telemetry),
+        )
         .route("/api/v1/telemetry-alerts", get(list_telemetry_alerts))
         .route(
             "/api/v1/targets/{target_id}/docker/discovery",
             get(get_target_docker_inventory).post(discover_target_docker),
+        )
+        .route(
+            "/api/v1/targets/{target_id}/docker/containers/{container_id}/action",
+            post(operate_target_docker_container),
+        )
+        .route(
+            "/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-check",
+            post(check_target_docker_image_update),
+        )
+        .route(
+            "/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-apply",
+            post(apply_target_docker_image_update),
         )
         .route("/api/v1/targets/{target_id}", get(get_target))
         .route(
@@ -733,6 +772,10 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/metrics": {"get": {}},
     "/api/v1/enrollments": {"post": {"responses": {"202": {"description": "Enrollment accepted"}}}},
     "/api/v1/telemetry-alerts": {"get": {"responses": {"200": {"description": "Active telemetry threshold and freshness alerts"}}}},
+    "/api/v1/targets/{target_id}/docker/telemetry": {"get": {"responses": {"200": {"description": "Recent per-container Docker CPU and memory telemetry"}}}},
+    "/api/v1/targets/{target_id}/docker/containers/{container_id}/action": {"post": {"responses": {"200": {"description": "Confirmed allow-listed Docker lifecycle action"}}}},
+    "/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-check": {"post": {"responses": {"200": {"description": "Read-only registry digest comparison for a Docker image"}}}},
+    "/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-apply": {"post": {"responses": {"200": {"description": "Explicitly confirmed Compose image update for one Linux service"}}}},
     "/api/v1/enrollments/{enrollment_id}": {"get": {"responses": {"200": {"description": "Enrollment status"}}}},
     "/api/v1/ansible/jobs": {"post": {"responses": {"202": {"description": "Ansible job accepted"}}}},
     "/api/v1/ansible/jobs/{job_id}": {"get": {"responses": {"200": {"description": "Ansible job status"}}}},

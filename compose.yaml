@@ -83,7 +83,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider --quiet http://127.0.0.1/agent/0.3.1/manifest.json"]
+      test: ["CMD-SHELL", "nginx -t && kill -0 1"]
       interval: 10s
       timeout: 5s
       retries: 5

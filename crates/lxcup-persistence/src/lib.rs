@@ -10,12 +10,13 @@ pub mod seeds;
 
 pub use repositories::{
     AgentRegistrationRepository, AnsibleJobRepository, AnsibleQueueMetrics, AuditEvent,
-    AuditEventRepository, ContainerRepository, DockerWorkloadRepository, EnvironmentRepository,
-    ExecutionEvent, ExecutionRepository, ExecutionResultRecord, NodeRepository,
-    PackageInventoryRepository, PackageInventoryStatus, PersistedPackageInventory,
-    PersistedTargetDockerInventory, Repositories, RepositoryError, ScanRepository,
-    ScheduleRepository, TargetDockerInventoryRepository, TargetRepository, UpdatePlanRepository,
-    UpdatePolicyRepository, WorkerHeartbeatRepository, WorkerHeartbeatStatus,
+    AuditEventRepository, ContainerRepository, DockerInventoryEvent, DockerInventoryEventKind,
+    DockerWorkloadRepository, EnvironmentRepository, ExecutionEvent, ExecutionRepository,
+    ExecutionResultRecord, NodeRepository, PackageInventoryRepository, PackageInventoryStatus,
+    PersistedPackageInventory, PersistedTargetDockerInventory, Repositories, RepositoryError,
+    ScanRepository, ScheduleRepository, TargetDockerInventoryRepository, TargetRepository,
+    UpdatePlanRepository, UpdatePolicyRepository, WorkerHeartbeatRepository, WorkerHeartbeatStatus,
+    update_docker_inventory_events,
 };
 
 /// Konfiguration für eine PostgreSQL-Verbindung.

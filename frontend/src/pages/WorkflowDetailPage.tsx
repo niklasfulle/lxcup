@@ -1,5 +1,5 @@
 import { cn } from "../classnames";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { reconcileAnsibleJob, retryAnsibleJob, type AnsibleJobEvent, type AnsibleJobDto, type ContainerDto, type TargetDto } from "../api";
@@ -126,10 +126,13 @@ function workflowLogContent(events: ReturnType<typeof useAnsibleJobEvents>, rawL
 
 function PlanPreview({ summary, preview, copyable }: Readonly<{ summary: string; preview: string; copyable: boolean }>) {
   const [copied, setCopied] = useState(false);
+  const copyResetTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(copyResetTimer.current), []);
   const copy = async () => {
     await navigator.clipboard.writeText(preview || summary);
     setCopied(true);
-    globalThis.setTimeout(() => setCopied(false), 2_000);
+    clearTimeout(copyResetTimer.current);
+    copyResetTimer.current = setTimeout(() => setCopied(false), 2_000);
   };
   return <section className="border-b border-[var(--line)] bg-[var(--primary-soft)] p-4" aria-label="Plan-Vorschau">
     <div className="mb-2 flex flex-wrap items-start justify-between gap-3"><div><h3 className="m-0 text-sm font-semibold text-[var(--ink)]">Erwartete Änderungen</h3><p className="mb-0 mt-1 text-sm text-[var(--muted)]">{summary}</p></div><button className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--paper-muted)] disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={!copyable} onClick={copy}>{copied ? "Vorschau kopiert" : "Vorschau kopieren"}</button></div>

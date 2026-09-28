@@ -123,6 +123,25 @@ mod tests {
     use crate::ContainerId;
 
     #[test]
+    fn active_state_classification_excludes_terminal_states() {
+        for state in [
+            EnrollmentState::Requested,
+            EnrollmentState::Discovering,
+            EnrollmentState::InstallingAgent,
+            EnrollmentState::RegisteringAgent,
+        ] {
+            assert!(state.is_active(), "{state:?} should remain active");
+        }
+        for state in [
+            EnrollmentState::Connected,
+            EnrollmentState::Failed,
+            EnrollmentState::Disabled,
+        ] {
+            assert!(!state.is_active(), "{state:?} should be terminal");
+        }
+    }
+
+    #[test]
     fn enrollment_follows_the_controlled_lifecycle() {
         let mut enrollment = Enrollment::new(ContainerId::new(101), "request-1").unwrap();
 

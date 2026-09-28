@@ -156,6 +156,20 @@ fn spawn_background_workers(state: lxcup_server::ApiState) {
             }
         }
     });
+    let retention_state = state;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
+        loop {
+            interval.tick().await;
+            match retention_state.prune_retained_data().await {
+                Ok((telemetry, docker_events)) if telemetry + docker_events > 0 => {
+                    tracing::info!(telemetry, docker_events, "expired history pruned");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "history retention cleanup failed"),
+            }
+        }
+    });
 }
 
 async fn shutdown_signal() {

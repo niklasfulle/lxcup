@@ -17,6 +17,10 @@ if (@($ports | Select-Object -Unique).Count -ne $ports.Count) {
     throw "E2E host ports must be distinct."
 }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$workspaceManifest = Get-Content -LiteralPath (Join-Path $repoRoot "Cargo.toml") -Raw
+$versionMatch = [regex]::Match($workspaceManifest, '(?m)^version\s*=\s*"([^\"]+)"')
+if (-not $versionMatch.Success) { throw "Could not read the workspace version from Cargo.toml." }
+$agentVersion = $versionMatch.Groups[1].Value
 Push-Location $repoRoot
 $previousPassword = $env:LXCUP_E2E_SSH_PASSWORD
 $suffix = [guid]::NewGuid().ToString("N").Substring(0, 12)
@@ -142,7 +146,7 @@ try {
         operation = "deploy_agent"
         target_id = $targetId
         mode = "apply"
-        parameters = @{ operation = "deploy_agent"; agent_version = "0.3.1" }
+        parameters = @{ operation = "deploy_agent"; agent_version = $agentVersion }
         idempotency_key = "onboarding-deploy-$targetId"
         confirmed = $true
     }
@@ -196,8 +200,8 @@ try {
 
     $target = (Invoke-Controller "Get" "/api/v1/targets").data |
         Where-Object { $_.id -eq $targetId } | Select-Object -First 1
-    if ($target.state -ne "managed" -or $target.agent_version -ne "0.3.1") {
-        throw "The target completed jobs but has not reported a managed 0.3.1 agent heartbeat."
+    if ($target.state -ne "managed" -or $target.agent_version -ne $agentVersion) {
+        throw "The target completed jobs but has not reported a managed $agentVersion agent heartbeat."
     }
     $inventory = Invoke-Controller "Get" "/api/v1/targets/$targetId/package-inventory"
     if ($inventory.data.status -ne "complete") { throw "The final package inventory is not complete." }

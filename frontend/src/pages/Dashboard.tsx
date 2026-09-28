@@ -106,6 +106,7 @@ function TargetRow({ target }: Readonly<{ target: TargetDto }>) {
 }
 
 function agentVersionLabel(target: TargetDto) {
+  if (target.agent_version && target.latest_agent_version && target.agent_version !== target.latest_agent_version) return `Agent veraltet · v${target.agent_version} → v${target.latest_agent_version}`;
   if (target.agent_version) return `Agent ${target.agent_version}`;
   if (target.state === "managed") return "Version unbekannt";
   return "Agent fehlt";

@@ -17,8 +17,7 @@ param(
     [string]$ProjectName = "lxcup",
 
     [Parameter(Mandatory = $false)]
-    [ValidateNotNullOrEmpty()]
-    [string]$ProjectVersion = "0.3.1"
+    [string]$ProjectVersion = ""
 )
 
 $ErrorActionPreference = "Stop"

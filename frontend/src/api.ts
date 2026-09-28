@@ -13,7 +13,7 @@ export type ContainerDto = {
 export type TargetKind = "lxc" | "linux_server" | "windows_server";
 export type TargetTransport = "ssh" | "winrm";
 export type TargetState = "pending" | "managed" | "disabled";
-export type TargetDto = { id: string; name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string; state: TargetState; agent_version?: string | null; created_at: string; updated_at: string };
+export type TargetDto = { id: string; name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string; state: TargetState; agent_version?: string | null; latest_agent_version?: string; created_at: string; updated_at: string };
 export type CreateTargetRequest = { name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string };
 export type EnrollmentState = "requested" | "discovering" | "installing_agent" | "registering_agent" | "connected" | "failed" | "disabled";
 export type EnrollmentDto = { id: string; container_id: number; target_id: string | null; state: EnrollmentState; failure_reason: string | null; created_at: string; updated_at: string };
@@ -133,8 +133,15 @@ export type TargetDockerDiscoveryDto = {
   available: boolean;
   reason: string | null;
   collected_at: string;
-  containers: Array<{ id: string; name: string; image: string; state: string; status: string; ports: string[]; started_at: string | null; labels: string[] }>;
+  containers: Array<{ id: string; name: string; image: string; state: string; status: string; ports: string[]; started_at?: string | null; created_at?: string | null; image_id?: string | null; restart_count?: number | null; health?: string | null; oom_killed?: boolean | null; labels: string[] }>;
+  events?: Array<{ observed_at: string; container_id: string; container_name: string; kind: "added" | "removed" | "image_changed" | "state_changed" | "health_changed" | "restart_count_increased" | "oom_killed"; previous_value: string | null; current_value: string | null }>;
 };
+export type DockerTelemetryDto = { target_id: string; collected_at: string | null; samples: Array<{ collected_at: string; container_id: string; cpu_basis_points: number | null; memory_basis_points: number | null; memory_used_bytes: number | null; memory_limit_bytes: number | null }> };
+export type DockerLifecycleAction = "start" | "stop" | "restart";
+export type DockerImageUpdateResult = { container_id: string; image: string; current_image_id: string | null; remote_image_id: string | null; status: "current" | "update_available" | "pinned" | "unknown"; reason: string | null; checked_at: string };
+export type TargetDockerImageUpdateDto = { target_id: string; target_name: string; result: DockerImageUpdateResult };
+export type DockerImageUpdateApplyResult = { container_id: string; image: string; compose_project: string; compose_service: string; image_id: string; completed_at: string };
+export type TargetDockerImageUpdateApplyDto = { target_id: string; target_name: string; result: DockerImageUpdateApplyResult };
 export type PackageInventoryDto = {
   target_id: string;
   status: "complete" | "not_collected";
@@ -494,6 +501,19 @@ export function discoverTargetDocker(targetId: string, signal?: AbortSignal) {
 }
 export function getTargetDockerInventory(targetId: string, signal?: AbortSignal) {
   return apiClient.get<TargetDockerDiscoveryDto>(`/api/v1/targets/${encodeURIComponent(targetId)}/docker/discovery`, signal);
+}
+export function getTargetDockerTelemetry(targetId: string, signal?: AbortSignal) {
+  return apiClient.get<DockerTelemetryDto>(`/api/v1/targets/${encodeURIComponent(targetId)}/docker/telemetry`, signal);
+}
+export function operateTargetDockerContainer(targetId: string, containerId: string, action: DockerLifecycleAction, signal?: AbortSignal) {
+  return apiClient.post<{ target_id: string; target_name: string; container_id: string; container_name: string; action: DockerLifecycleAction; completed_at: string }>(`/api/v1/targets/${encodeURIComponent(targetId)}/docker/containers/${encodeURIComponent(containerId)}/action`, { action, confirmed: true }, signal);
+}
+export function checkTargetDockerImageUpdate(targetId: string, containerId: string, signal?: AbortSignal) {
+  return apiClient.post<TargetDockerImageUpdateDto>(`/api/v1/targets/${encodeURIComponent(targetId)}/docker/containers/${encodeURIComponent(containerId)}/image-update-check`, undefined, signal);
+}
+
+export function applyTargetDockerImageUpdate(targetId: string, containerId: string, expectedRemoteImageId: string) {
+  return apiClient.post<TargetDockerImageUpdateApplyDto>(`/api/v1/targets/${encodeURIComponent(targetId)}/docker/containers/${encodeURIComponent(containerId)}/image-update-apply`, { confirmed: true, expected_remote_image_id: expectedRemoteImageId });
 }
 
 export function getDockerDiscovery(containerId: number, signal?: AbortSignal) {

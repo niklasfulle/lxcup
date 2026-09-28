@@ -113,6 +113,7 @@ fn schedule_thresholds_use_latest_samples_and_fail_closed_without_telemetry() {
             }],
             partial: false,
         },
+        docker_telemetry: Default::default(),
     };
     for (metric, expected) in [
         (ThresholdMetric::CpuBasisPoints, 2500),

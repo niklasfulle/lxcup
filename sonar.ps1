@@ -17,11 +17,17 @@ param(
     [string]$ProjectName = "lxcup",
 
     [Parameter(Mandatory = $false)]
-    [ValidateNotNullOrEmpty()]
-    [string]$ProjectVersion = "0.3.1"
+    [string]$ProjectVersion = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($ProjectVersion)) {
+    $cargoManifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot "Cargo.toml") -Raw
+    $versionMatch = [regex]::Match($cargoManifest, '(?m)^version\s*=\s*"([^\"]+)"')
+    if (-not $versionMatch.Success) { throw "Could not read the workspace version from Cargo.toml." }
+    $ProjectVersion = $versionMatch.Groups[1].Value
+}
 
 function Find-SonarScanner {
     param([string]$Root)

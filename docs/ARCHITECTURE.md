@@ -90,7 +90,9 @@ the target API; current UI depicts a rolling recent window. Docker containers
 are workloads discovered by an agent on a managed host, not standalone
 connections. For registered LXC targets, the controller persists the latest
 successful Docker inventory snapshot so it remains visible after a page reload
-or controller restart.
+or controller restart. Successful snapshots also retain a bounded history of
+container additions/removals, image/state/health transitions, restarts, and
+observed OOM-killed state.
 
 The controller derives telemetry alerts from retained samples. Sustained CPU,
 RAM, and storage thresholds ignore short spikes and break across sample gaps;

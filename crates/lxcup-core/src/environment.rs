@@ -15,13 +15,19 @@ pub enum EnvironmentStatus {
 
 impl EnvironmentStatus {
     pub const fn can_transition_to(self, next: Self) -> bool {
-        match (self, next) {
-            (Self::Configured, Self::Connected | Self::Failed | Self::Disabled) => true,
-            (Self::Connected, Self::Connected | Self::Failed | Self::Disabled) => true,
-            (Self::Failed, Self::Connected | Self::Failed | Self::Disabled) => true,
-            (Self::Disabled, Self::Configured | Self::Disabled) => true,
-            _ => false,
-        }
+        matches!(
+            (self, next),
+            (
+                Self::Configured,
+                Self::Connected | Self::Failed | Self::Disabled
+            ) | (
+                Self::Connected,
+                Self::Connected | Self::Failed | Self::Disabled
+            ) | (
+                Self::Failed,
+                Self::Connected | Self::Failed | Self::Disabled
+            ) | (Self::Disabled, Self::Configured | Self::Disabled)
+        )
     }
 }
 
@@ -197,5 +203,43 @@ mod tests {
 
         let json = serde_json::to_string(&environment).expect("serialize");
         assert!(!json.contains("token"));
+    }
+
+    #[test]
+    fn configuration_update_normalizes_values_and_clears_old_check_state() {
+        let initial = Utc::now();
+        let mut environment = ProxmoxEnvironment::new(
+            EnvironmentId::new(),
+            "old-name",
+            "https://old.example.test",
+            SecretId::new(),
+            Some(SecretId::new()),
+            initial,
+        )
+        .expect("valid environment");
+        environment
+            .record_check_failure(initial, "old endpoint failed")
+            .expect("failure recorded");
+
+        let updated_at = initial + chrono::Duration::minutes(1);
+        let api_secret_ref = SecretId::new();
+        environment
+            .update_configuration(
+                " new-name ",
+                "https://new.example.test/",
+                api_secret_ref,
+                None,
+                updated_at,
+            )
+            .expect("valid updated configuration");
+
+        assert_eq!(environment.name, "new-name");
+        assert_eq!(environment.endpoint, "https://new.example.test");
+        assert_eq!(environment.api_secret_ref, api_secret_ref);
+        assert_eq!(environment.ca_secret_ref, None);
+        assert_eq!(environment.status, EnvironmentStatus::Configured);
+        assert_eq!(environment.last_checked_at, None);
+        assert_eq!(environment.last_check_error, None);
+        assert_eq!(environment.updated_at, updated_at);
     }
 }

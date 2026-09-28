@@ -44,9 +44,7 @@ pub(crate) struct ScheduleDto {
 
 impl From<&JobSchedule> for ScheduleDto {
     fn from(schedule: &JobSchedule) -> Self {
-        let every_minutes = match schedule.frequency {
-            ScheduleFrequency::EveryMinutes(value) => value,
-        };
+        let ScheduleFrequency::EveryMinutes(every_minutes) = schedule.frequency;
         Self {
             id: schedule.id.clone(),
             operation: schedule.operation.clone(),

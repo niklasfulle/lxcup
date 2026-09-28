@@ -297,6 +297,11 @@ mod tests {
             status: "Up 10 seconds".to_owned(),
             ports: vec!["8080/tcp".to_owned()],
             started_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            created_at: None,
+            image_id: None,
+            restart_count: None,
+            health: None,
+            oom_killed: None,
             labels: vec!["app=web".to_owned()],
         }
     }
@@ -383,6 +388,11 @@ mod tests {
                 status: "Up".to_owned(),
                 ports: vec!["80/tcp".to_owned()],
                 started_at: Some("2026-01-01T00:00:00Z".to_owned()),
+                created_at: None,
+                image_id: None,
+                restart_count: None,
+                health: None,
+                oom_killed: None,
                 labels: vec!["app=web".to_owned()],
             },
         );

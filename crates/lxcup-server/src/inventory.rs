@@ -111,6 +111,87 @@ pub(super) async fn start_scan(
     Ok((StatusCode::ACCEPTED, Json(envelope(dto))))
 }
 
+pub(super) async fn run_scan(
+    State(state): State<ApiState>,
+    Path(scan_id): Path<String>,
+) -> Result<Json<ApiEnvelope<ScanDto>>, ApiError> {
+    let scan_id = parse_uuid(&scan_id, "scan id")?;
+    let scan_id = ScanId::from_uuid(scan_id);
+    let (container_id, agent) = {
+        let mut store = state.store.write().await;
+        let scan = store
+            .scans
+            .iter_mut()
+            .find(|scan| scan.id == scan_id)
+            .ok_or_else(|| ApiError::not_found("scan not found"))?;
+        scan.transition_to(lxcup_core::ScanStatus::Running, chrono::Utc::now())
+            .map_err(|_| ApiError::bad_request("scan_not_runnable", "scan is not runnable"))?;
+        let container_id = scan.container_id;
+        let agent = state
+            .agents
+            .read()
+            .await
+            .get(&container_id)
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::dependency(
+                    "agent_unavailable",
+                    "no agent is registered for this container",
+                )
+            })?;
+        (container_id, agent)
+    };
+    let response = agent
+        .client
+        .command(&AgentCommandRequest {
+            action: AgentAction::Scan,
+            packages: Vec::new(),
+            idempotency_key: scan_id.as_uuid().to_string(),
+        })
+        .await
+        .map_err(|_| {
+            ApiError::dependency("agent_request_failed", "the agent scan request failed")
+        })?;
+    let mut store = state.store.write().await;
+    let scan = store
+        .scans
+        .iter_mut()
+        .find(|scan| scan.id == scan_id)
+        .ok_or_else(|| ApiError::not_found("scan not found"))?;
+    if response.success {
+        match lxcup_apt::build_scan(
+            container_id,
+            lxcup_apt::AptExecutionResult {
+                stdout: response.stdout,
+                stderr: response.stderr,
+                exit_code: Some(response.exit_code),
+            },
+        ) {
+            Ok(mut result) => {
+                result.scan.id = scan_id;
+                *scan = result.scan;
+            }
+            Err(_) => {
+                scan.transition_to(lxcup_core::ScanStatus::Failed, chrono::Utc::now())
+                    .map_err(|_| {
+                        ApiError::bad_request("scan_failed", "the agent returned invalid scan data")
+                    })?;
+            }
+        }
+    } else {
+        scan.transition_to(lxcup_core::ScanStatus::Failed, chrono::Utc::now())
+            .map_err(|_| ApiError::bad_request("scan_failed", "the agent scan failed"))?;
+    }
+    let dto = ScanDto::from(&*scan);
+    drop(store);
+    state.publish(ApiEvent::status(
+        "scan",
+        scan_id.as_uuid().to_string(),
+        dto.status.clone(),
+    ));
+    Ok(Json(envelope(dto)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,85 +280,4 @@ mod tests {
     fn default_authenticated_is_true() {
         assert!(default_authenticated());
     }
-}
-
-pub(super) async fn run_scan(
-    State(state): State<ApiState>,
-    Path(scan_id): Path<String>,
-) -> Result<Json<ApiEnvelope<ScanDto>>, ApiError> {
-    let scan_id = parse_uuid(&scan_id, "scan id")?;
-    let scan_id = ScanId::from_uuid(scan_id);
-    let (container_id, agent) = {
-        let mut store = state.store.write().await;
-        let scan = store
-            .scans
-            .iter_mut()
-            .find(|scan| scan.id == scan_id)
-            .ok_or_else(|| ApiError::not_found("scan not found"))?;
-        scan.transition_to(lxcup_core::ScanStatus::Running, chrono::Utc::now())
-            .map_err(|_| ApiError::bad_request("scan_not_runnable", "scan is not runnable"))?;
-        let container_id = scan.container_id;
-        let agent = state
-            .agents
-            .read()
-            .await
-            .get(&container_id)
-            .cloned()
-            .ok_or_else(|| {
-                ApiError::dependency(
-                    "agent_unavailable",
-                    "no agent is registered for this container",
-                )
-            })?;
-        (container_id, agent)
-    };
-    let response = agent
-        .client
-        .command(&AgentCommandRequest {
-            action: AgentAction::Scan,
-            packages: Vec::new(),
-            idempotency_key: scan_id.as_uuid().to_string(),
-        })
-        .await
-        .map_err(|_| {
-            ApiError::dependency("agent_request_failed", "the agent scan request failed")
-        })?;
-    let mut store = state.store.write().await;
-    let scan = store
-        .scans
-        .iter_mut()
-        .find(|scan| scan.id == scan_id)
-        .ok_or_else(|| ApiError::not_found("scan not found"))?;
-    if response.success {
-        match lxcup_apt::build_scan(
-            container_id,
-            lxcup_apt::AptExecutionResult {
-                stdout: response.stdout,
-                stderr: response.stderr,
-                exit_code: Some(response.exit_code),
-            },
-        ) {
-            Ok(mut result) => {
-                result.scan.id = scan_id;
-                *scan = result.scan;
-            }
-            Err(_) => {
-                scan.transition_to(lxcup_core::ScanStatus::Failed, chrono::Utc::now())
-                    .map_err(|_| {
-                        ApiError::bad_request("scan_failed", "the agent returned invalid scan data")
-                    })?;
-            }
-        }
-    } else {
-        scan.transition_to(lxcup_core::ScanStatus::Failed, chrono::Utc::now())
-            .map_err(|_| ApiError::bad_request("scan_failed", "the agent scan failed"))?;
-    }
-    let dto = ScanDto::from(&*scan);
-    drop(store);
-    state.publish(ApiEvent::status(
-        "scan",
-        scan_id.as_uuid().to_string(),
-        dto.status.clone(),
-    ));
-    Ok(Json(envelope(dto)))
 }

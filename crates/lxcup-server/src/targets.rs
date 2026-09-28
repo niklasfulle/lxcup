@@ -7,7 +7,7 @@ use axum::{
     extract::{Extension, Json as JsonBody, Path, State},
     http::{HeaderMap, StatusCode},
 };
-use chrono::Timelike;
+use chrono::{Duration, Timelike, Utc};
 use lxcup_agent::AgentHeartbeat;
 use lxcup_core::ActorRole;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,8 @@ pub struct TargetDto {
     /// Version reported by the most recent authenticated agent heartbeat.
     /// This remains absent until the agent has connected at least once.
     pub agent_version: Option<String>,
+    /// Version of the agent artifact shipped with this controller build.
+    pub latest_agent_version: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -59,6 +61,7 @@ impl From<&Target> for TargetDto {
             agent_secret_ref: target.agent_secret_ref,
             state: target.state,
             agent_version: None,
+            latest_agent_version: env!("CARGO_PKG_VERSION").to_owned(),
             created_at: target.created_at,
             updated_at: target.updated_at,
         }
@@ -164,6 +167,7 @@ pub(super) async fn receive_agent_heartbeat(
         return Err(ApiError::unauthorized());
     }
     let telemetry_summary = sanitize_telemetry_window(&mut heartbeat);
+    sanitize_docker_telemetry_window(&mut heartbeat);
     if telemetry_summary.rejected() > 0 || telemetry_summary.missing_samples > 0 {
         tracing::warn!(
             target: "lxcup_server::telemetry",
@@ -208,6 +212,38 @@ pub(super) async fn receive_agent_heartbeat(
         }
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn sanitize_docker_telemetry_window(heartbeat: &mut AgentHeartbeat) {
+    const MAX_DOCKER_SAMPLES: usize = 8_000;
+    let now = Utc::now();
+    let mut seen = std::collections::HashSet::new();
+    heartbeat.docker_telemetry.samples.retain(|sample| {
+        let valid_id = (12..=64).contains(&sample.container_id.len())
+            && sample
+                .container_id
+                .chars()
+                .all(|character| character.is_ascii_hexdigit());
+        valid_id
+            && sample
+                .memory_basis_points
+                .is_none_or(|value| value <= 10_000)
+            && sample.collected_at <= now + Duration::seconds(5)
+            && sample.collected_at
+                >= now - Duration::seconds(lxcup_agent::TelemetryBuffer::WINDOW_SECONDS)
+            && seen.insert((
+                sample.container_id.to_ascii_lowercase(),
+                sample.collected_at,
+            ))
+    });
+    heartbeat
+        .docker_telemetry
+        .samples
+        .sort_by_key(|sample| sample.collected_at);
+    if heartbeat.docker_telemetry.samples.len() > MAX_DOCKER_SAMPLES {
+        let excess = heartbeat.docker_telemetry.samples.len() - MAX_DOCKER_SAMPLES;
+        heartbeat.docker_telemetry.samples.drain(..excess);
+    }
 }
 
 /// Treat telemetry as best-effort heartbeat data: discard malformed, stale,
@@ -358,6 +394,7 @@ mod telemetry_sanitization_tests {
                 ],
                 partial: false,
             },
+            docker_telemetry: Default::default(),
         };
 
         let summary = sanitize_telemetry_window(&mut heartbeat);
@@ -407,6 +444,7 @@ mod telemetry_sanitization_tests {
                 ],
                 partial: false,
             },
+            docker_telemetry: Default::default(),
         };
 
         let summary = sanitize_telemetry_window(&mut heartbeat);
@@ -451,6 +489,7 @@ mod telemetry_sanitization_tests {
                 ],
                 partial: false,
             },
+            docker_telemetry: Default::default(),
         };
 
         let summary = sanitize_telemetry_window(&mut heartbeat);

@@ -159,24 +159,24 @@ pub(crate) async fn run_docker_discovery(
     container_id: ContainerId,
 ) -> Result<DockerDiscoveryResultDto, ApiError> {
     let _guard = state.docker_discovery_lock.lock().await;
-    let mut run = start_docker_discovery(&state, container_id).await?;
+    let mut run = start_docker_discovery(state, container_id).await?;
     state.publish(ApiEvent::status(
         "docker_discovery",
         container_id.value().to_string(),
         "running",
     ));
 
-    let discovered = fetch_docker_inventory(&state, container_id, &mut run).await?;
+    let discovered = fetch_docker_inventory(state, container_id, &mut run).await?;
     let container_count = discovered.containers.len() as u32;
     if let Some(repositories) = state.repositories.as_ref() {
         let workloads =
-            persist_docker_inventory(&state, repositories, container_id, &discovered, &mut run)
+            persist_docker_inventory(state, repositories, container_id, &discovered, &mut run)
                 .await?;
-        let run = finish_docker_discovery(&state, &mut run, container_count, None).await?;
+        let run = finish_docker_discovery(state, &mut run, container_count, None).await?;
         return Ok(DockerDiscoveryResultDto { run, workloads });
     }
-    let workloads = reconcile_memory_docker_inventory(&state, container_id, discovered).await;
-    let run = finish_docker_discovery(&state, &mut run, container_count, None).await?;
+    let workloads = reconcile_memory_docker_inventory(state, container_id, discovered).await;
+    let run = finish_docker_discovery(state, &mut run, container_count, None).await?;
     Ok(DockerDiscoveryResultDto { run, workloads })
 }
 

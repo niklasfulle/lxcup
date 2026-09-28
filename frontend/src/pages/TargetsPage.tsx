@@ -82,7 +82,11 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
   });
 
   const deployment = useMutation({
-    mutationFn: (targetId: string) => createAnsibleJob({ operation: "deploy_agent", target_id: targetId, mode: "apply", parameters: { operation: "deploy_agent", agent_version: "0.3.1" }, idempotency_key: `onboarding-deploy-${targetId}`, confirmed: true }),
+    mutationFn: (targetId: string) => {
+      const version = targets.data?.find((target) => target.id === targetId)?.latest_agent_version;
+      if (!version) throw new Error("Die aktuelle Agent-Version des Controllers konnte nicht ermittelt werden.");
+      return createAnsibleJob({ operation: "deploy_agent", target_id: targetId, mode: "apply", parameters: { operation: "deploy_agent", agent_version: version }, idempotency_key: `onboarding-deploy-${targetId}`, confirmed: true });
+    },
     onSuccess: (job) => { setDeploymentJobId(job.id); void queryClient.invalidateQueries({ queryKey: queryKeys.ansibleJobs }); },
   });
   const deploymentJob = useAnsibleJob(deploymentJobId);
@@ -390,6 +394,7 @@ function TargetInventoryCard({ target, jobs }: Readonly<{ target: TargetDto; job
           <section className="grid content-start gap-2 border border-[var(--line)] bg-[var(--panel)] px-3 py-2.5" aria-label="Installierte Agent-Version">
             <h3 className="m-0 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Agent</h3>
             <p className="m-0 text-sm font-semibold" title="Wird vom letzten authentifizierten Heartbeat des Zielsystems gemeldet.">{target.agent_version ? `v${target.agent_version}` : <span className="font-normal text-[var(--muted)]">Noch keine Meldung</span>}</p>
+            {target.agent_version && target.latest_agent_version && target.agent_version !== target.latest_agent_version ? <p className="m-0 text-xs font-semibold text-[var(--warning)]">Update verfügbar: v{target.latest_agent_version}</p> : <p className="m-0 text-xs text-[var(--muted)]">Aktuelle Version: v{target.latest_agent_version ?? "—"}</p>}
           </section>
           <section className="grid content-start gap-2 border border-[var(--line)] bg-[var(--panel)] px-3 py-2.5" aria-label={`Onboarding für ${target.name}`}>
             <h3 className="m-0 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Onboarding</h3>

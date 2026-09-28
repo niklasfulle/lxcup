@@ -1,7 +1,7 @@
 import { cn } from "../classnames";
 import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
 import { useMemo, useState } from "react";
-import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQueryClient, type QueryFunctionContext } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { createAnsibleJob, getPackageInventory, type AnsibleExecutionMode, type AnsibleJobDto, type AnsibleOperation, type CreateAnsibleJobRequest, type PackageInventoryDto, type TargetDto } from "../api";
 import { queryKeys, useAnsibleJobEvents, useAnsibleJobs, useTargets, useUpdatePolicies } from "../queries";
@@ -33,6 +33,7 @@ export function buildWorkflowRequest(
   confirmed: boolean,
   policyId?: string,
   approvedPlanJobId?: string,
+  latestAgentVersion?: string,
 ): CreateAnsibleJobRequest {
   let parameters: Record<string, unknown> = { operation };
   if (operation === "update_packages") {
@@ -40,8 +41,9 @@ export function buildWorkflowRequest(
       ? packages.split(",").map((item) => item.trim()).filter(Boolean)
       : [...packages];
     parameters = { operation, packages: selectedPackages.length > 0 ? selectedPackages : ["*"] };
-  } else if (operation === "deploy_agent" || operation === "update_agent") {
-    parameters = { operation, agent_version: "0.3.1" };
+  } else if (operation === "deploy_agent" || operation === "update_agent" || operation === "repair_agent") {
+    if (!latestAgentVersion) throw new Error("Die aktuelle Agent-Version konnte nicht vom Controller geladen werden.");
+    parameters = { operation, agent_version: latestAgentVersion };
   }
 
   return {
@@ -78,13 +80,13 @@ export function WorkflowsPage() {
   const [approvedPlanJobIds, setApprovedPlanJobIds] = useState<Record<string, string>>({});
   const packageInventories = useQueries({ queries: targetIds.map((targetId) => ({
     queryKey: queryKeys.packageInventory(targetId),
-    queryFn: ({ signal }) => getPackageInventory(targetId, signal),
+    queryFn: ({ signal }: QueryFunctionContext) => getPackageInventory(targetId, signal),
     enabled: operation === "update_packages",
     staleTime: 10_000,
   })) });
   const mutation = useMutation({
     mutationFn: async ({ selectedTargets, planIds }: { selectedTargets: TargetDto[]; planIds: Record<string, string> }) => {
-      const outcomes = await Promise.allSettled(selectedTargets.map((target) => createAnsibleJob(buildWorkflowRequest(target.id, operation, mode, packagesByTarget[target.id] ?? [], confirmed, policyId || undefined, planIds[target.id] || undefined))));
+      const outcomes = await Promise.allSettled(selectedTargets.map((target) => createAnsibleJob(buildWorkflowRequest(target.id, operation, mode, packagesByTarget[target.id] ?? [], confirmed, policyId || undefined, planIds[target.id] || undefined, target.latest_agent_version))));
       return outcomes.map((outcome, index): WorkflowSubmissionResult => outcome.status === "fulfilled"
         ? { target: selectedTargets[index], job: outcome.value, error: null }
         : { target: selectedTargets[index], job: null, error: outcome.reason instanceof Error ? outcome.reason.message : "Unbekannter Fehler" });

@@ -265,7 +265,7 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
     )
     .unwrap();
     repositories.targets.save(&target).await.unwrap();
-    let docker_inventory = lxcup_persistence::PersistedTargetDockerInventory {
+    let mut docker_inventory = lxcup_persistence::PersistedTargetDockerInventory {
         collected_at: now,
         containers: vec![lxcup_agent::DockerContainerInfo {
             id: "docker-target-integration".to_owned(),
@@ -275,12 +275,18 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
             status: "Up".to_owned(),
             ports: vec!["80/tcp".to_owned()],
             started_at: None,
+            created_at: None,
+            image_id: None,
+            restart_count: None,
+            health: None,
+            oom_killed: None,
             labels: vec!["app=web".to_owned()],
         }],
+        events: Vec::new(),
     };
     repositories
         .target_docker_inventory
-        .save(target.id, &docker_inventory)
+        .save(target.id, &mut docker_inventory)
         .await
         .unwrap();
     assert_eq!(
@@ -292,6 +298,34 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
             .unwrap()
             .containers,
         docker_inventory.containers
+    );
+    assert!(
+        repositories
+            .target_docker_inventory
+            .get(target.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .events
+            .is_empty()
+    );
+    docker_inventory.collected_at = now + chrono::Duration::seconds(30);
+    docker_inventory.containers[0].image = "nginx:2".to_owned();
+    repositories
+        .target_docker_inventory
+        .save(target.id, &mut docker_inventory)
+        .await
+        .unwrap();
+    assert!(
+        repositories
+            .target_docker_inventory
+            .get(target.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .events
+            .iter()
+            .any(|event| event.kind == lxcup_persistence::DockerInventoryEventKind::ImageChanged)
     );
     let telemetry_now = postgres_now();
     let heartbeat = AgentHeartbeat {
@@ -335,6 +369,7 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
             ],
             partial: false,
         },
+        docker_telemetry: Default::default(),
     };
     let historical_sample = SystemTelemetrySample {
         collected_at: telemetry_now - chrono::Duration::minutes(9),
@@ -384,6 +419,80 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
     assert_eq!(samples.len(), 2);
     assert_eq!(samples[0].cpu_basis_points, Some(9000));
     assert_eq!(samples[1].cpu_basis_points, Some(1000));
+
+    let expired_at = postgres_now() - chrono::Duration::days(31);
+    let expired_sample = SystemTelemetrySample {
+        collected_at: expired_at,
+        ..historical_sample.clone()
+    };
+    sqlx::query("INSERT INTO target_telemetry_samples (target_id, collected_at, payload) VALUES ($1, $2, $3)")
+        .bind(target.id.as_uuid())
+        .bind(expired_sample.collected_at)
+        .bind(serde_json::to_value(expired_sample).unwrap())
+        .execute(database.pool())
+        .await
+        .unwrap();
+    assert!(repositories.telemetry.prune_expired().await.unwrap() >= 1);
+    let expired_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM target_telemetry_samples WHERE target_id=$1 AND collected_at=$2",
+    )
+    .bind(target.id.as_uuid())
+    .bind(expired_at)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(expired_rows, 0);
+
+    let docker_inventory_row =
+        sqlx::query("SELECT containers FROM target_docker_inventory WHERE target_id=$1")
+            .bind(target.id.as_uuid())
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    let containers: serde_json::Value = sqlx::Row::get(&docker_inventory_row, "containers");
+    let docker_container_id = containers[0]["id"].as_str().unwrap();
+    let old_event = json!({
+        "observed_at": (postgres_now() - chrono::Duration::days(181)),
+        "container_id": docker_container_id,
+        "container_name": "web",
+        "kind": "added",
+        "previous_value": null,
+        "current_value": "present"
+    });
+    let recent_event = json!({
+        "observed_at": postgres_now(),
+        "container_id": docker_container_id,
+        "container_name": "web",
+        "kind": "state_changed",
+        "previous_value": "exited",
+        "current_value": "running"
+    });
+    sqlx::query("UPDATE target_docker_inventory SET events=$2 WHERE target_id=$1")
+        .bind(target.id.as_uuid())
+        .bind(json!([old_event, recent_event]))
+        .execute(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        repositories
+            .target_docker_inventory
+            .prune_expired_events()
+            .await
+            .unwrap(),
+        1
+    );
+    let retained_events = repositories
+        .target_docker_inventory
+        .get(target.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .events;
+    assert_eq!(retained_events.len(), 1);
+    assert_eq!(
+        retained_events[0].kind,
+        lxcup_persistence::DockerInventoryEventKind::StateChanged
+    );
     assert!(
         repositories
             .targets

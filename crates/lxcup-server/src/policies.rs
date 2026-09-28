@@ -431,7 +431,12 @@ mod tests {
             .unwrap_err();
         assert_eq!(denied.code, "permission_denied");
 
-        let cases: [(&str, fn(&mut CreateUpdatePolicyRequest), &str); 12] = [
+        type InvalidPolicyCase = (
+            &'static str,
+            fn(&mut CreateUpdatePolicyRequest),
+            &'static str,
+        );
+        let cases: [InvalidPolicyCase; 12] = [
             (
                 "empty-id",
                 |request: &mut CreateUpdatePolicyRequest| request.id = "  ".to_owned(),

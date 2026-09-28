@@ -32,4 +32,9 @@ describe("TargetLifecycle", () => {
     expect(screen.getByText("Das Ziel ist deaktiviert.")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Workflows öffnen →" })).toHaveAttribute("href", "/workflows");
   });
+
+  it("warns when an enrolled agent is behind the controller artifact version", () => {
+    render(<MemoryRouter><TargetLifecycle target={{ ...pendingTarget, state: "managed", agent_version: "0.3.0", latest_agent_version: "0.3.1" }} /></MemoryRouter>);
+    expect(screen.getByRole("status")).toHaveTextContent("Agent-Version veraltet: installiert v0.3.0, verfügbar v0.3.1.");
+  });
 });

@@ -619,6 +619,21 @@ mod tests {
     };
     use lxcup_core::{SecretKind, SecretScope, SecretValue};
 
+    #[test]
+    fn master_key_hex_parser_validates_length_digits_and_redacts_debug() {
+        let key =
+            SecretMasterKey::from_hex(&format!(" {} ", "ab".repeat(32))).expect("valid hex key");
+        assert_eq!(format!("{key:?}"), "SecretMasterKey([REDACTED])");
+        assert_eq!(
+            SecretMasterKey::from_hex("ab"),
+            Err(super::SecretStoreError::Invalid)
+        );
+        assert_eq!(
+            SecretMasterKey::from_hex(&format!("{}zz", "ab".repeat(31))),
+            Err(super::SecretStoreError::Invalid)
+        );
+    }
+
     fn request(value: &str) -> CreateSecret {
         CreateSecret {
             name: "connection-test".to_owned(),

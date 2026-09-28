@@ -93,6 +93,15 @@ For the implemented role behavior and production requirements, see
   can inspect the local Docker daemon. This access is effectively root-level on
   the managed host; operators must understand the consequence before running
   the host preparation script or deploying the agent on Docker hosts.
+- Docker image updates are destructive and require explicit confirmation plus
+  the destructive/admin permission. Only a Compose-managed Linux service with
+  one replica and a single in-project config file may be recreated. The agent
+  checks the saved Compose service hash and expected remote image digest before
+  pulling, then recreates only the selected service without dependencies.
+  A Docker-group agent is effectively root on its host; do not expand this
+  capability to arbitrary containers or caller-provided Compose paths.
+  There is no automatic rollback; see the operator recovery procedure in
+  [`docker-image-update-recovery.md`](docker-image-update-recovery.md).
 
 ## Changes and verification
 

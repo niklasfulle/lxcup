@@ -119,14 +119,13 @@ async fn postgres_ansible_job_repository_claims_jobs_and_persists_events() {
             .await
             .unwrap()
     );
-    assert_eq!(
+    assert!(
         repositories
             .ansible_jobs
             .claim_next_queued()
             .await
             .unwrap()
             .is_none(),
-        true
     );
     let events = repositories.ansible_jobs.events(job_id).await.unwrap();
     assert_eq!(events.len(), 1);

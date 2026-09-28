@@ -1,6 +1,168 @@
 use super::*;
 
 #[tokio::test]
+async fn compose_image_update_requires_and_uses_a_fresh_successful_check() {
+    use axum::routing::post;
+    use lxcup_secrets::{CreateSecret, SecretStore};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::sync::RwLock;
+
+    let checked_status = Arc::new(RwLock::new(lxcup_agent::DockerImageUpdateStatus::Current));
+    let apply_count = Arc::new(AtomicUsize::new(0));
+    let id = "aaaaaaaaaaaa".to_owned();
+    let expected_digest = format!("sha256:{}", "b".repeat(64));
+    let container = lxcup_agent::DockerContainerInfo {
+        id: id.clone(),
+        name: "web".to_owned(),
+        image: "nginx:stable".to_owned(),
+        state: "running".to_owned(),
+        status: "Up".to_owned(),
+        ports: Vec::new(),
+        started_at: None,
+        created_at: None,
+        image_id: Some(format!("sha256:{}", "a".repeat(64))),
+        restart_count: None,
+        health: None,
+        oom_killed: None,
+        labels: vec!["com.docker.compose.service=web".to_owned()],
+    };
+    let discovery = lxcup_agent::DockerDiscovery {
+        available: true,
+        reason: None,
+        collected_at: chrono::Utc::now(),
+        containers: vec![container.clone()],
+    };
+    let mock_agent = axum::Router::new()
+        .route(
+            "/docker/containers",
+            axum::routing::get(move || {
+                let discovery = discovery.clone();
+                async move { axum::Json(discovery) }
+            }),
+        )
+        .route(
+            "/docker/containers/image-update-check",
+            post({
+                let status = checked_status.clone();
+                let expected_digest = expected_digest.clone();
+                let id = id.clone();
+                let image = container.image.clone();
+                move || {
+                    let status = status.clone();
+                    let expected_digest = expected_digest.clone();
+                    let id = id.clone();
+                    let image = image.clone();
+                    async move {
+                        axum::Json(lxcup_agent::DockerImageUpdateResult {
+                            container_id: id,
+                            image,
+                            current_image_id: Some(format!("sha256:{}", "a".repeat(64))),
+                            remote_image_id: Some(expected_digest),
+                            status: *status.read().await,
+                            reason: None,
+                            checked_at: chrono::Utc::now(),
+                        })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/docker/containers/image-update-apply",
+            post({
+                let count = apply_count.clone();
+                let id = id.clone();
+                let expected_digest = expected_digest.clone();
+                move || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let id = id.clone();
+                    let expected_digest = expected_digest.clone();
+                    async move {
+                        axum::Json(lxcup_agent::DockerImageUpdateApplyResult {
+                            container_id: id,
+                            image: "nginx:stable".to_owned(),
+                            compose_project: "shop".to_owned(),
+                            compose_service: "web".to_owned(),
+                            image_id: expected_digest,
+                            completed_at: chrono::Utc::now(),
+                        })
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 8090))
+        .await
+        .expect("test agent port should be available");
+    let mock_agent_task = tokio::spawn(async move {
+        axum::serve(listener, mock_agent).await.unwrap();
+    });
+
+    let secret_store = InMemorySecretStore::default();
+    let agent_secret = secret_store
+        .create(CreateSecret {
+            name: "compose-update-agent".to_owned(),
+            kind: SecretKind::AgentToken,
+            scope: SecretScope::Global,
+            value: SecretValue::new("compose-update-token").unwrap(),
+        })
+        .unwrap();
+    let mut target = Target::new(
+        "compose-target",
+        TargetKind::Lxc,
+        "127.0.0.1",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        agent_secret.metadata.id,
+    )
+    .unwrap();
+    target.mark_managed();
+    let target_id = target.id;
+    let state = ApiState::new()
+        .with_auth_config(AuthConfig::disabled())
+        .with_secret_store(Arc::new(secret_store));
+    state.store.write().await.targets.push(target);
+
+    let apply_request = || {
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/api/v1/targets/{}/docker/containers/{id}/image-update-apply",
+                target_id.as_uuid()
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "confirmed": true,
+                    "expected_remote_image_id": expected_digest,
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let api = router(state.clone());
+    let stale = api.clone().oneshot(apply_request()).await.unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(apply_count.load(Ordering::SeqCst), 0);
+
+    *checked_status.write().await = lxcup_agent::DockerImageUpdateStatus::UpdateAvailable;
+    let applied = api.oneshot(apply_request()).await.unwrap();
+    assert_eq!(applied.status(), StatusCode::OK);
+    assert_eq!(apply_count.load(Ordering::SeqCst), 1);
+    let saved = state
+        .store
+        .read()
+        .await
+        .target_docker_inventories
+        .get(&target_id)
+        .cloned()
+        .unwrap();
+    assert_eq!(saved.containers[0].id, id);
+    mock_agent_task.abort();
+}
+
+#[tokio::test]
 async fn configured_auth_protects_api_but_not_health() {
     let state = ApiState::new().with_auth_config(
         AuthConfig::disabled()
@@ -234,6 +396,109 @@ async fn agent_registration_exposes_health_and_metrics() {
 }
 
 #[tokio::test]
+async fn docker_lifecycle_route_requires_confirmation_before_accessing_an_agent() {
+    let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/v1/targets/{}/docker/containers/aaaaaaaaaaaa/action",
+                    uuid::Uuid::new_v4()
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"action":"restart","confirmed":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "confirmation_required");
+}
+
+#[tokio::test]
+async fn docker_image_update_check_rejects_unvalidated_container_ids() {
+    let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/v1/targets/{}/docker/containers/not-an-id/image-update-check",
+                    uuid::Uuid::new_v4()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "invalid_container_id");
+}
+
+#[tokio::test]
+async fn compose_image_update_requires_confirmation_before_agent_access() {
+    let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/v1/targets/{}/docker/containers/aaaaaaaaaaaa/image-update-apply",
+                    uuid::Uuid::new_v4()
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"confirmed":false,"expected_remote_image_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "confirmation_required");
+}
+
+#[tokio::test]
+async fn compose_image_update_rejects_an_unvalidated_expected_digest() {
+    let state = ApiState::new().with_auth_config(AuthConfig::disabled());
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/v1/targets/{}/docker/containers/aaaaaaaaaaaa/image-update-apply",
+                    uuid::Uuid::new_v4()
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"confirmed":true,"expected_remote_image_id":"--help"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "invalid_update_request");
+}
+
+#[tokio::test]
 async fn agent_heartbeat_updates_target_state_without_activity_event() {
     let agent_token = "heartbeat-token";
     let secret_store = InMemorySecretStore::default();
@@ -323,6 +588,16 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
             ],
             partial: false,
         },
+        docker_telemetry: lxcup_agent::DockerTelemetryWindow {
+            samples: vec![lxcup_agent::DockerTelemetrySample {
+                collected_at: now,
+                container_id: "aaaaaaaaaaaa".to_owned(),
+                cpu_basis_points: Some(1250),
+                memory_basis_points: Some(410),
+                memory_used_bytes: Some(44_145_050),
+                memory_limit_bytes: Some(1_073_741_824),
+            }],
+        },
     };
     let response = router(state.clone())
         .oneshot(
@@ -370,6 +645,37 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
     assert_eq!(telemetry_json["data"]["partial"], true);
     assert_eq!(telemetry_json["data"]["missing_samples"], 0);
 
+    let docker_telemetry_response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/targets/{}/docker/telemetry",
+                    target_id.as_uuid()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(docker_telemetry_response.status(), StatusCode::OK);
+    let docker_telemetry_body =
+        axum::body::to_bytes(docker_telemetry_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+    let docker_telemetry_json: serde_json::Value =
+        serde_json::from_slice(&docker_telemetry_body).unwrap();
+    assert_eq!(
+        docker_telemetry_json["data"]["samples"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        docker_telemetry_json["data"]["samples"][0]["memory_basis_points"],
+        410
+    );
+
     let targets = router(state.clone())
         .oneshot(
             Request::builder()
@@ -385,6 +691,10 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
         .unwrap();
     let targets_json: serde_json::Value = serde_json::from_slice(&targets_body).unwrap();
     assert_eq!(targets_json["data"][0]["agent_version"], "0.3.1");
+    assert_eq!(
+        targets_json["data"][0]["latest_agent_version"],
+        env!("CARGO_PKG_VERSION")
+    );
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), events.recv())
             .await
@@ -475,6 +785,7 @@ async fn telemetry_alert_endpoint_returns_sustained_load_with_resource_context()
             samples,
             partial: false,
         },
+        docker_telemetry: Default::default(),
     };
     let state = ApiState::new();
     {

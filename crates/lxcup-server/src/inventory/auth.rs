@@ -156,13 +156,10 @@ impl AuthConfig {
         {
             return None;
         }
-        let Some(token) = headers
+        let token = headers
             .get("authorization")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-        else {
-            return None;
-        };
+            .and_then(|value| value.strip_prefix("Bearer "))?;
         if self.admin_token.as_deref() == Some(token) {
             Some(ActorRole::Admin)
         } else if self.operator_token.as_deref() == Some(token) {

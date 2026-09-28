@@ -458,6 +458,25 @@ fn released_agent_030_manifest_matches_binary_checksum() {
 }
 
 #[test]
+fn current_agent_manifest_matches_binary_checksum() {
+    let version = env!("CARGO_PKG_VERSION");
+    let root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../artifacts/agent/{version}"));
+    let manifest: Manifest = serde_json::from_slice(
+        &fs::read(root.join("manifest.json")).expect("current agent manifest must exist"),
+    )
+    .expect("current agent manifest must be valid JSON");
+    assert_eq!(manifest.version, version);
+    let artifact = manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.platform == "linux-amd64")
+        .expect("linux artifact must be registered");
+    let digest = Sha256::digest(fs::read(root.join(&artifact.file)).expect("binary exists"));
+    assert_eq!(format!("{digest:x}"), artifact.sha256);
+}
+
+#[test]
 fn package_inventory_normalization_preserves_versions_and_metadata() {
     let packages = normalize_package_inventory(
         serde_json::json!({

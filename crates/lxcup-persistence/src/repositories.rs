@@ -27,7 +27,10 @@ mod telemetry;
 mod update_policies;
 mod worker_heartbeats;
 pub use ansible_jobs::AnsibleQueueMetrics;
-pub use target_docker_inventory::PersistedTargetDockerInventory;
+pub use target_docker_inventory::{
+    DockerInventoryEvent, DockerInventoryEventKind, PersistedTargetDockerInventory,
+    update_docker_inventory_events,
+};
 pub use worker_heartbeats::WorkerHeartbeatStatus;
 
 mod environment;

@@ -10,6 +10,7 @@ import {
   useExecutionSafety,
   useTargets,
   useSchedules,
+  useTargetDockerInventories,
   useUpdatePolicies,
 } from "./queries";
 import * as api from "./api";
@@ -39,6 +40,11 @@ function DisabledProbe() {
 function TargetHeartbeatProbe() {
   const targets = useTargets();
   return <output>{targets.data?.[0]?.updated_at ?? "loading"}</output>;
+}
+
+function TargetDockerInventoriesProbe() {
+  const inventories = useTargetDockerInventories(["target-1", "target-2"]);
+  return <output>{inventories.map((inventory) => inventory.data?.target_id).filter(Boolean).join(",")}</output>;
 }
 
 describe("query hooks", () => {
@@ -86,5 +92,23 @@ describe("query hooks", () => {
       client.clear();
       vi.useRealTimers();
     }
+  });
+
+  it("loads the persisted Docker inventory for each registered target", async () => {
+    const getInventory = vi.spyOn(api, "getTargetDockerInventory").mockImplementation(async (targetId) => ({
+      target_id: targetId,
+      target_name: `host-${targetId}`,
+      available: true,
+      reason: null,
+      collected_at: "2026-01-01T00:00:00Z",
+      containers: [],
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><TargetDockerInventoriesProbe /></QueryClientProvider>);
+
+    expect(await screen.findByText("target-1,target-2")).toBeInTheDocument();
+    expect(getInventory).toHaveBeenCalledWith("target-1", expect.any(AbortSignal));
+    expect(getInventory).toHaveBeenCalledWith("target-2", expect.any(AbortSignal));
+    client.clear();
   });
 });

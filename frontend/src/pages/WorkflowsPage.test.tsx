@@ -34,6 +34,11 @@ describe("workflow mode contract", () => {
     expect(request.parameters).toEqual({ operation: "update_packages", packages: ["curl", "nginx"] });
   });
 
+  it("uses the controller-reported latest version for agent workflows", () => {
+    const request = buildWorkflowRequest("target-1", "update_agent", "apply", [], true, undefined, undefined, "0.3.2");
+    expect(request.parameters).toEqual({ operation: "update_agent", agent_version: "0.3.2" });
+  });
+
   it("shows available updates in the picker and allows selecting them", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     render(<QueryClientProvider client={client}><MemoryRouter><WorkflowsPage /></MemoryRouter></QueryClientProvider>);

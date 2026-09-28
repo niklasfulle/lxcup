@@ -14,12 +14,21 @@ LXCUP_WORKER_SSH_USER=lxcup
 
 ## Artefakt freigeben
 
+The workspace version in the root `Cargo.toml` is authoritative. To set a
+version, run `.\scripts\set-version.ps1 <version>`; this synchronizes the
+frontend package metadata and Cargo lockfile. The onboarding E2E script and
+Sonar project metadata read the version from Cargo, and the artifact-store
+healthcheck checks the local Nginx service without embedding a release number.
+Run `.\scripts\build-agent-artifact.ps1` to build the Linux-amd64 agent
+and regenerate its versioned SHA-256 manifest. This creates only a local
+artifact; it does not create a Git tag or GitHub release.
+
 Lege das Agent-Binary und ein Manifest unter `artifacts/agent/<version>/` ab.
 Der Worker akzeptiert nur die im Manifest genannte Datei und SHA-256-Summe.
 
 ```json
 {
-  "version": "0.3.1",
+  "version": "<workspace-version-from-Cargo.toml>",
   "artifacts": [{
     "platform": "linux-amd64",
     "file": "linux-amd64",

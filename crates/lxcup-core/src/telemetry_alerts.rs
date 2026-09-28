@@ -189,6 +189,15 @@ fn metric_value(sample: TelemetryLoadSample, metric: TelemetryMetric) -> Option<
 mod tests {
     use super::*;
 
+    #[test]
+    fn metric_and_severity_labels_are_stable_for_display() {
+        assert_eq!(TelemetryMetric::Cpu.label(), "CPU");
+        assert_eq!(TelemetryMetric::Memory.label(), "RAM");
+        assert_eq!(TelemetryMetric::Storage.label(), "Speicher");
+        assert_eq!(TelemetryAlertSeverity::Warning.label(), "Warnung");
+        assert_eq!(TelemetryAlertSeverity::Critical.label(), "Kritisch");
+    }
+
     fn sample(seconds_ago: i64, cpu: u16, memory: u16, storage: u16) -> TelemetryLoadSample {
         TelemetryLoadSample {
             collected_at: Utc::now() - Duration::seconds(seconds_ago),

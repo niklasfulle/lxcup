@@ -1,8 +1,55 @@
 use super::*;
-use crate::parsers::{docker_failure_reason, parse_docker_containers};
+use crate::docker::DockerCommandRunner as _;
+use crate::parsers::{
+    docker_failure_reason, parse_docker_containers, parse_docker_inspect_metadata,
+};
 use axum::{body::Body, http::Request, response::IntoResponse, routing::get};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    future::Future,
+    io,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 use tower::ServiceExt;
+
+#[derive(Default)]
+struct ScriptedDockerRunner {
+    outputs: Mutex<std::collections::VecDeque<crate::docker::DockerCommandOutput>>,
+    commands: Mutex<Vec<(Vec<String>, Option<PathBuf>)>>,
+}
+
+impl crate::docker::DockerCommandRunner for ScriptedDockerRunner {
+    fn output<'a>(
+        &'a self,
+        args: &'a [String],
+        working_directory: Option<&'a Path>,
+    ) -> Pin<Box<dyn Future<Output = io::Result<crate::docker::DockerCommandOutput>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.commands
+                .lock()
+                .unwrap()
+                .push((args.to_vec(), working_directory.map(Path::to_path_buf)));
+            self.outputs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| io::Error::other("no scripted Docker result"))
+        })
+    }
+}
+
+fn docker_result(success: bool, stdout: impl Into<Vec<u8>>) -> crate::docker::DockerCommandOutput {
+    crate::docker::DockerCommandOutput {
+        success,
+        stdout: stdout.into(),
+        stderr: Vec::new(),
+    }
+}
 
 #[test]
 fn config_redacts_tokens_and_requires_safe_urls() {
@@ -64,12 +111,98 @@ fn apt_output_is_normalized_to_the_agent_contract() {
 #[test]
 fn docker_inventory_parser_keeps_only_complete_rows() {
     let containers = parse_docker_containers(
-        "a1\tapi\tghcr.io/acme/api:1\trunning\tUp 2 hours\t80/tcp\t2026-01-01\tapp=api,secret=value\ninvalid",
+        "aaaaaaaaaaaa\tapi\tghcr.io/acme/api:1\trunning\tUp 2 hours\t80/tcp\tapp=api,secret=value\ninvalid",
     );
     assert_eq!(containers.len(), 1);
     assert_eq!(containers[0].name, "api");
     assert_eq!(containers[0].ports, ["80/tcp"]);
     assert_eq!(containers[0].labels, ["app=api"]);
+    assert_eq!(containers[0].started_at, None);
+    assert_eq!(containers[0].created_at, None);
+}
+
+#[test]
+fn docker_stats_parser_normalizes_memory_and_discards_bad_rows() {
+    let now = chrono::Utc::now();
+    let samples = crate::parse_docker_stats(
+        "aaaaaaaaaaaa\t12.5%\t42.1MiB / 1GiB\t4.1%\ninvalid\tNaN\tbad\t101%",
+        now,
+    );
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].container_id, "aaaaaaaaaaaa");
+    assert_eq!(samples[0].cpu_basis_points, Some(1250));
+    assert_eq!(samples[0].memory_basis_points, Some(410));
+    assert_eq!(samples[0].memory_used_bytes, Some(44_145_050));
+    assert_eq!(samples[0].memory_limit_bytes, Some(1_073_741_824));
+}
+
+#[test]
+fn remote_manifest_digest_matches_the_running_platform() {
+    let manifest = r#"[{"Platform":{"os":"linux","architecture":"amd64"},"SchemaV2Manifest":{"config":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}},{"Platform":{"os":"linux","architecture":"arm64"},"SchemaV2Manifest":{"config":{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}]"#;
+    assert_eq!(
+        parse_remote_image_config_digest(manifest, "linux/arm64").as_deref(),
+        Some("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    );
+    assert_eq!(
+        parse_remote_image_config_digest(manifest, "windows/amd64"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn docker_lifecycle_client_rejects_non_hex_ids_before_network_access() {
+    let config = AgentClientConfig::new("https://agent.example", "token").unwrap();
+    let client = AgentClient::new(config).unwrap();
+    let error = client
+        .docker_lifecycle(&DockerLifecycleRequest {
+            container_id: "../../etc/passwd".to_owned(),
+            action: DockerLifecycleAction::Restart,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AgentError::InvalidRequest(_)));
+}
+
+#[test]
+fn docker_inspect_parser_extracts_safe_optional_metadata() {
+    let metadata = parse_docker_inspect_metadata(
+        r#"[{"Id":"aaaaaaaaaaaa","Image":"sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd","Created":"2026-01-01T00:00:00Z","RestartCount":3,"State":{"StartedAt":"2026-01-02T00:00:00Z","OOMKilled":true,"Health":{"Status":"unhealthy"}}}]"#,
+    );
+    let item = metadata.get("aaaaaaaaaaaa").unwrap();
+    assert_eq!(item.created_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+    assert_eq!(item.started_at.as_deref(), Some("2026-01-02T00:00:00Z"));
+    assert_eq!(
+        item.image_id.as_deref(),
+        Some("sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd")
+    );
+    assert_eq!(item.restart_count, Some(3));
+    assert_eq!(item.health.as_deref(), Some("unhealthy"));
+    assert_eq!(item.oom_killed, Some(true));
+
+    let no_health = parse_docker_inspect_metadata(
+        r#"[{"Id":"bbbbbbbbbbbb","Image":"bad value","RestartCount":-1,"State":{"Health":{"Status":"unknown"}}}]"#,
+    );
+    let item = no_health.get("bbbbbbbbbbbb").unwrap();
+    assert_eq!(item.image_id, None);
+    assert_eq!(item.restart_count, None);
+    assert_eq!(item.health, None);
+    assert_eq!(item.oom_killed, None);
+
+    let old_agent_payload = serde_json::json!({
+        "id": "aaaaaaaaaaaa",
+        "name": "web",
+        "image": "nginx:latest",
+        "state": "running",
+        "status": "Up",
+        "ports": [],
+        "started_at": null,
+        "labels": []
+    });
+    let old_agent_info: super::DockerContainerInfo =
+        serde_json::from_value(old_agent_payload).unwrap();
+    assert_eq!(old_agent_info.health, None);
+    assert_eq!(old_agent_info.restart_count, None);
+    assert_eq!(old_agent_info.oom_killed, None);
 }
 
 #[test]
@@ -330,6 +463,522 @@ async fn inventory_routes_enforce_auth_and_report_platform_support() {
         packages.status(),
         StatusCode::OK | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
     ));
+}
+
+#[tokio::test]
+async fn docker_mutation_and_image_update_routes_guard_auth_platform_and_ids() {
+    let windows = agent_router(LocalAgentState::new(
+        AgentInfo {
+            agent_id: "windows-agent".to_owned(),
+            platform: AgentPlatform::Windows,
+            hostname: "windows-host".to_owned(),
+            version: "0.3.3".to_owned(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+        },
+        "docker-token",
+    ));
+    let linux = agent_router(LocalAgentState::new(
+        AgentInfo {
+            agent_id: "linux-agent".to_owned(),
+            platform: AgentPlatform::Linux,
+            hostname: "linux-host".to_owned(),
+            version: "0.3.3".to_owned(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+        },
+        "docker-token",
+    ));
+
+    for (path, payload) in [
+        (
+            "/docker/containers/action",
+            serde_json::json!({"container_id":"aaaaaaaaaaaa", "action":"restart"}),
+        ),
+        (
+            "/docker/containers/image-update-check",
+            serde_json::json!({"container_id":"aaaaaaaaaaaa"}),
+        ),
+        (
+            "/docker/containers/image-update-apply",
+            serde_json::json!({"container_id":"aaaaaaaaaaaa", "expected_remote_image_id":format!("sha256:{}", "a".repeat(64))}),
+        ),
+    ] {
+        let unauthorized = linux
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let unsupported = windows
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("authorization", "Bearer docker-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unsupported.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    for (path, payload) in [
+        (
+            "/docker/containers/action",
+            serde_json::json!({"container_id":"not-an-id", "action":"restart"}),
+        ),
+        (
+            "/docker/containers/image-update-check",
+            serde_json::json!({"container_id":"not-an-id"}),
+        ),
+        (
+            "/docker/containers/image-update-apply",
+            serde_json::json!({"container_id":"not-an-id", "expected_remote_image_id":"invalid"}),
+        ),
+    ] {
+        let invalid = linux
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("authorization", "Bearer docker-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn compose_image_update_recreates_only_the_unchanged_service_without_dependencies() {
+    let project_dir = std::env::temp_dir().join(format!("lxcup-compose-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&project_dir).unwrap();
+    let config_file = project_dir.join("compose.yaml");
+    std::fs::write(&config_file, "services: {web: {image: nginx:stable}}\n").unwrap();
+    let project_dir = project_dir.canonicalize().unwrap();
+    let config_file = config_file.canonicalize().unwrap();
+    let container_id = "a".repeat(64);
+    let previous_image_id = format!("sha256:{}", "a".repeat(64));
+    let remote_image_id = format!("sha256:{}", "b".repeat(64));
+    let labels = serde_json::json!({
+        "com.docker.compose.project": "shop",
+        "com.docker.compose.service": "web",
+        "com.docker.compose.project.working_dir": project_dir.to_string_lossy(),
+        "com.docker.compose.project.config_files": config_file.to_string_lossy(),
+        "com.docker.compose.config-hash": "unchanged-hash",
+        "com.docker.compose.container-number": "1"
+    });
+    let inspect = format!("{container_id}\tnginx:stable\t{previous_image_id}\t{labels}\n");
+    let manifest = format!(
+        r#"[{{"Platform":{{"os":"linux","architecture":"amd64"}},"SchemaV2Manifest":{{"config":{{"digest":"{remote_image_id}"}}}}}}]"#
+    );
+    let runner = Arc::new(ScriptedDockerRunner::default());
+    runner.outputs.lock().unwrap().extend([
+        docker_result(true, inspect),
+        docker_result(true, "unchanged-hash\n"),
+        docker_result(true, "linux/amd64\n"),
+        docker_result(true, manifest),
+        docker_result(true, ""),
+        docker_result(true, format!("{remote_image_id}\n")),
+        docker_result(true, format!("{container_id}\n")),
+        docker_result(true, ""),
+    ]);
+    let state = LocalAgentState::new(
+        AgentInfo {
+            agent_id: "linux-agent".to_owned(),
+            platform: AgentPlatform::Linux,
+            hostname: "linux-host".to_owned(),
+            version: "0.3.3".to_owned(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+        },
+        "docker-token",
+    )
+    .with_docker_command_runner(runner.clone());
+    let response = agent_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/docker/containers/image-update-apply")
+                .header("authorization", "Bearer docker-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "container_id": container_id,
+                        "expected_remote_image_id": remote_image_id
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let applied: DockerImageUpdateApplyResult = serde_json::from_slice(&body).unwrap();
+    assert_eq!(applied.compose_project, "shop");
+    assert_eq!(applied.compose_service, "web");
+    assert_eq!(applied.image_id, remote_image_id);
+
+    let commands = runner.commands.lock().unwrap();
+    assert_eq!(commands.len(), 8);
+    assert!(
+        commands[4]
+            .0
+            .ends_with(&["pull".to_owned(), "web".to_owned()])
+    );
+    assert!(commands[6].0.ends_with(&[
+        "ps".to_owned(),
+        "--all".to_owned(),
+        "--quiet".to_owned(),
+        "web".to_owned()
+    ]));
+    assert!(commands[7].0.ends_with(&[
+        "up".to_owned(),
+        "--detach".to_owned(),
+        "--no-deps".to_owned(),
+        "--force-recreate".to_owned(),
+        "--wait".to_owned(),
+        "--wait-timeout".to_owned(),
+        "120".to_owned(),
+        "web".to_owned()
+    ]));
+    assert_eq!(commands[1].1.as_deref(), Some(project_dir.as_path()));
+    assert_eq!(commands[4].1.as_deref(), Some(project_dir.as_path()));
+    drop(commands);
+    std::fs::remove_dir_all(project_dir).unwrap();
+}
+
+#[tokio::test]
+async fn compose_image_update_stops_when_the_saved_configuration_hash_changed() {
+    let project_dir = std::env::temp_dir().join(format!("lxcup-compose-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&project_dir).unwrap();
+    let config_file = project_dir.join("compose.yaml");
+    std::fs::write(&config_file, "services: {web: {image: nginx:stable}}\n").unwrap();
+    let project_dir = project_dir.canonicalize().unwrap();
+    let config_file = config_file.canonicalize().unwrap();
+    let container_id = "a".repeat(64);
+    let labels = serde_json::json!({
+        "com.docker.compose.project": "shop",
+        "com.docker.compose.service": "web",
+        "com.docker.compose.project.working_dir": project_dir.to_string_lossy(),
+        "com.docker.compose.project.config_files": config_file.to_string_lossy(),
+        "com.docker.compose.config-hash": "old-hash",
+        "com.docker.compose.container-number": "1"
+    });
+    let runner = Arc::new(ScriptedDockerRunner::default());
+    runner.outputs.lock().unwrap().extend([
+        docker_result(
+            true,
+            format!(
+                "{container_id}\tnginx:stable\tsha256:{}\t{labels}\n",
+                "a".repeat(64)
+            ),
+        ),
+        docker_result(true, "new-hash\n"),
+    ]);
+    let state = LocalAgentState::new(
+        AgentInfo {
+            agent_id: "linux-agent".to_owned(),
+            platform: AgentPlatform::Linux,
+            hostname: "linux-host".to_owned(),
+            version: "0.3.3".to_owned(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+        },
+        "docker-token",
+    )
+    .with_docker_command_runner(runner.clone());
+    let response = agent_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/docker/containers/image-update-apply")
+                .header("authorization", "Bearer docker-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "container_id": container_id,
+                        "expected_remote_image_id": format!("sha256:{}", "b".repeat(64))
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    let commands = runner.commands.lock().unwrap();
+    assert_eq!(commands.len(), 2);
+    drop(commands);
+    std::fs::remove_dir_all(project_dir).unwrap();
+}
+
+#[tokio::test]
+async fn docker_discovery_and_image_check_report_metadata_and_registry_state() {
+    let container_id = "c".repeat(64);
+    let previous_image_id = format!("sha256:{}", "d".repeat(64));
+    let remote_image_id = format!("sha256:{}", "e".repeat(64));
+    let runner = Arc::new(ScriptedDockerRunner::default());
+    runner.outputs.lock().unwrap().extend([
+        docker_result(
+            true,
+            format!(
+                "{container_id}\tweb\tnginx:stable\trunning\tUp 1 minute\t80/tcp\tcom.docker.compose.project=shop,com.docker.compose.service=web\n"
+            ),
+        ),
+        docker_result(
+            true,
+            format!(
+                r#"[{{"Id":"{container_id}","Image":"{previous_image_id}","Created":"2026-09-01T00:00:00Z","RestartCount":2,"State":{{"StartedAt":"2026-09-02T00:00:00Z","OOMKilled":false,"Health":{{"Status":"healthy"}}}}}}]"#
+            ),
+        ),
+        docker_result(
+            true,
+            format!("nginx:stable\t{previous_image_id}\n"),
+        ),
+        docker_result(true, "linux/amd64\n"),
+        docker_result(
+            true,
+            format!(
+                r#"[{{"Platform":{{"os":"linux","architecture":"amd64"}},"SchemaV2Manifest":{{"config":{{"digest":"{remote_image_id}"}}}}}}]"#
+            ),
+        ),
+    ]);
+    let state = LocalAgentState::new(
+        AgentInfo {
+            agent_id: "linux-agent".to_owned(),
+            platform: AgentPlatform::Linux,
+            hostname: "linux-host".to_owned(),
+            version: "0.3.3".to_owned(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+        },
+        "docker-token",
+    )
+    .with_docker_command_runner(runner.clone());
+    let api = agent_router(state);
+
+    let discovery = api
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/docker/containers")
+                .header("authorization", "Bearer docker-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(discovery.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(discovery.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let inventory: DockerDiscovery = serde_json::from_slice(&body).unwrap();
+    assert!(inventory.available);
+    assert_eq!(inventory.containers[0].name, "web");
+    assert_eq!(
+        inventory.containers[0].image_id.as_deref(),
+        Some(previous_image_id.as_str())
+    );
+    assert_eq!(inventory.containers[0].restart_count, Some(2));
+    assert_eq!(inventory.containers[0].health.as_deref(), Some("healthy"));
+
+    let checked = api
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/docker/containers/image-update-check")
+                .header("authorization", "Bearer docker-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"container_id":container_id}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(checked.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(checked.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: DockerImageUpdateResult = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result.status, DockerImageUpdateStatus::UpdateAvailable);
+    assert_eq!(
+        result.current_image_id.as_deref(),
+        Some(previous_image_id.as_str())
+    );
+    assert_eq!(
+        result.remote_image_id.as_deref(),
+        Some(remote_image_id.as_str())
+    );
+    assert_eq!(runner.commands.lock().unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn docker_lifecycle_returns_success_and_sanitized_command_errors() {
+    let runner = Arc::new(ScriptedDockerRunner::default());
+    runner.outputs.lock().unwrap().extend([
+        docker_result(true, ""),
+        crate::docker::DockerCommandOutput {
+            success: false,
+            stdout: Vec::new(),
+            stderr: b"permission denied while connecting to docker.sock".to_vec(),
+        },
+    ]);
+    let state = LocalAgentState::new(
+        AgentInfo {
+            agent_id: "linux-agent".to_owned(),
+            platform: AgentPlatform::Linux,
+            hostname: "linux-host".to_owned(),
+            version: "0.3.3".to_owned(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+        },
+        "docker-token",
+    )
+    .with_docker_command_runner(runner.clone());
+    let api = agent_router(state);
+    let container_id = "f".repeat(64);
+
+    let started = api
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/docker/containers/action")
+                .header("authorization", "Bearer docker-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"container_id":container_id,"action":"start"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started.status(), axum::http::StatusCode::OK);
+
+    let denied = api
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/docker/containers/action")
+                .header("authorization", "Bearer docker-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"container_id":container_id,"action":"stop"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), axum::http::StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["error"], "docker_permission_denied");
+    assert_eq!(runner.commands.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn production_docker_runner_reports_version_without_mutating_the_engine() {
+    let args = vec!["--version".to_owned()];
+    let attempt = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::docker::ProcessDockerCommandRunner.output(&args, None),
+    )
+    .await;
+    assert!(
+        attempt.is_ok(),
+        "Docker version probe should return promptly"
+    );
+    if let Err(error) = attempt.unwrap() {
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+        ));
+    }
+}
+
+#[tokio::test]
+async fn docker_discovery_exposes_permission_errors_and_digest_pinned_images() {
+    let pinned_digest = format!("sha256:{}", "a".repeat(64));
+    let runner = Arc::new(ScriptedDockerRunner::default());
+    runner.outputs.lock().unwrap().extend([
+        crate::docker::DockerCommandOutput {
+            success: false,
+            stdout: Vec::new(),
+            stderr: b"permission denied while trying to connect to the Docker daemon".to_vec(),
+        },
+        docker_result(true, format!("nginx@{pinned_digest}\t{pinned_digest}\n")),
+    ]);
+    let state = LocalAgentState::new(
+        AgentInfo {
+            agent_id: "linux-agent".to_owned(),
+            platform: AgentPlatform::Linux,
+            hostname: "linux-host".to_owned(),
+            version: "0.3.3".to_owned(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+        },
+        "docker-token",
+    )
+    .with_docker_command_runner(runner);
+    let api = agent_router(state);
+
+    let unavailable = api
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/docker/containers")
+                .header("authorization", "Bearer docker-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(unavailable.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let discovery: DockerDiscovery = serde_json::from_slice(&body).unwrap();
+    assert!(!discovery.available);
+    assert_eq!(
+        discovery.reason.as_deref(),
+        Some("docker_permission_denied")
+    );
+
+    let checked = api
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/docker/containers/image-update-check")
+                .header("authorization", "Bearer docker-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"container_id":"aaaaaaaaaaaa"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(checked.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: DockerImageUpdateResult = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result.status, DockerImageUpdateStatus::Pinned);
+    assert_eq!(result.reason.as_deref(), Some("digest_pinned"));
 }
 
 #[tokio::test]

@@ -1,11 +1,37 @@
 use std::sync::Arc;
+use tokio::process::Command;
 
 use lxcup_agent::{
     AgentHeartbeat, AgentInfo, AgentPlatform, LocalAgentState, SystemTelemetrySample, agent_router,
+    parse_docker_stats,
 };
 
 fn value_or_default(value: Option<String>, default: &str) -> String {
     value.unwrap_or_else(|| default.to_owned())
+}
+
+async fn collect_docker_telemetry(
+    platform: AgentPlatform,
+) -> Vec<lxcup_agent::DockerTelemetrySample> {
+    if platform != AgentPlatform::Linux {
+        return Vec::new();
+    }
+    let output = match Command::new("docker")
+        .args([
+            "stats",
+            "--all",
+            "--no-stream",
+            "--no-trunc",
+            "--format",
+            "{{.ID}}\\t{{.CPUPerc}}\\t{{.MemUsage}}\\t{{.MemPerc}}",
+        ])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => output.stdout,
+        _ => return Vec::new(),
+    };
+    parse_docker_stats(&String::from_utf8_lossy(&output), chrono::Utc::now())
 }
 
 fn heartbeat_endpoint(controller_url: &str) -> String {
@@ -13,10 +39,6 @@ fn heartbeat_endpoint(controller_url: &str) -> String {
         "{}/api/v1/agents/heartbeat",
         controller_url.trim_end_matches('/')
     )
-}
-
-async fn collect_telemetry() -> SystemTelemetrySample {
-    collect_telemetry_with_cpu(None).await.0
 }
 
 async fn collect_telemetry_with_cpu(
@@ -116,6 +138,7 @@ async fn collect_windows_telemetry(now: chrono::DateTime<chrono::Utc>) -> System
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct ProcTelemetryInput<'a> {
     meminfo: &'a str,
     loadavg: &'a str,
@@ -127,6 +150,7 @@ struct ProcTelemetryInput<'a> {
     collected_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn telemetry_from_proc(
     input: ProcTelemetryInput<'_>,
 ) -> (SystemTelemetrySample, Option<(u64, u64)>) {
@@ -211,6 +235,7 @@ fn telemetry_from_proc(
     )
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_network_counters(network: &str) -> (Option<u64>, Option<u64>) {
     let counters = network.lines().skip(2).filter_map(|line| {
         let (_, values) = line.split_once(':')?;
@@ -307,6 +332,17 @@ async fn run(
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
+    let docker_telemetry_state = state.clone();
+    let docker_platform = config.info.platform;
+    tokio::spawn(async move {
+        loop {
+            let samples = collect_docker_telemetry(docker_platform).await;
+            docker_telemetry_state
+                .record_docker_telemetry(samples)
+                .await;
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+    });
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .expect("agent bind address must be available");
@@ -325,6 +361,7 @@ async fn run(
                     metrics: reporter_state.metrics_snapshot().await,
                     sent_at: chrono::Utc::now(),
                     telemetry: reporter_state.telemetry_window().await,
+                    docker_telemetry: reporter_state.docker_telemetry_window().await,
                 };
                 let sample_count = heartbeat.telemetry.samples.len();
                 match reporter
@@ -520,7 +557,7 @@ mod tests {
     #[tokio::test]
     async fn telemetry_collection_returns_a_timestamped_sample() {
         let before = chrono::Utc::now();
-        let sample = super::collect_telemetry().await;
+        let sample = super::collect_telemetry_with_cpu(None).await.0;
         assert!(sample.collected_at >= before);
         assert!(sample.collected_at <= chrono::Utc::now());
     }

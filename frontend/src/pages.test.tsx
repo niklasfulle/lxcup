@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   workloads: { data: [] as DockerWorkloadDto[], isLoading: false, error: null as Error | null },
   dockerDiscovery: { data: null as any, isLoading: false, error: null as Error | null },
   targetDockerInventory: { data: undefined as any, isLoading: false, error: null as Error | null },
+  targetDockerTelemetry: { data: undefined as any, isLoading: false, error: null as Error | null },
+  targetDockerInventories: [] as any[],
   workerAvailability: { data: { available: true, last_seen_at: "2026-01-01T00:00:00Z", artifact_store_available: true, artifact_store_checked_at: "2026-01-01T00:00:00Z" } as WorkerAvailabilityDto, isLoading: false, error: null as Error | null },
   packageInventory: { data: undefined as any, isLoading: false, error: null as Error | null },
   telemetry: { data: undefined as any, isLoading: false, error: null as Error | null },
@@ -37,6 +39,9 @@ const mocks = vi.hoisted(() => ({
   getAgentMetrics: vi.fn(async () => ({ commands_total: 2, commands_failed: 0, last_command_at: null })),
   discoverDockerWorkloads: vi.fn(async () => undefined),
   discoverTargetDocker: vi.fn(async () => ({ target_id: "target-1", target_name: "test-target", available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [{ id: "docker-target-1", name: "web", image: "nginx:1", state: "running", status: "Up", ports: ["80/tcp"], started_at: null, labels: [] }] })),
+  operateTargetDockerContainer: vi.fn(async (_targetId: string, containerId: string, action: string) => ({ target_id: "target-1", target_name: "test-target", container_id: containerId, container_name: "web", action, completed_at: "2026-01-01T00:00:00Z" })),
+  checkTargetDockerImageUpdate: vi.fn(async (_targetId: string, containerId: string) => ({ target_id: "target-1", target_name: "test-target", result: { container_id: containerId, image: "nginx:latest", current_image_id: "sha256:old", remote_image_id: "sha256:new", status: "update_available", reason: null, checked_at: "2026-01-01T00:00:00Z" } })),
+  applyTargetDockerImageUpdate: vi.fn(async (_targetId: string, containerId: string, _digest: string) => ({ target_id: "target-1", target_name: "test-target", result: { container_id: containerId, image: "nginx:latest", compose_project: "shop", compose_service: "web", image_id: "sha256:new", completed_at: "2026-01-01T00:01:00Z" } })),
   adoptDockerWorkload: vi.fn(async () => undefined),
   removeDockerWorkload: vi.fn(async () => undefined),
   subscribe: vi.fn(() => () => undefined),
@@ -57,7 +62,7 @@ const container: ContainerDto = { id: 101, node_id: "node-1", name: "web-lxc", o
 const secret = (id: string, name: string, kind: "ssh_password" | "ssh_known_hosts" | "agent_token" = "ssh_password") => ({ metadata: { metadata: { id, name, kind, scope: { type: "global" as const }, created_at: "2026-01-01", updated_at: "2026-01-01" }, status: "active" as const } });
 
 vi.mock("./queries", () => ({
-  queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id], dockerDiscovery: (id: number) => ["docker-discovery", id], targetDockerInventory: (id: string) => ["targets", id, "docker-discovery"], packageInventory: (id: string) => ["targets", id, "package-inventory"], telemetry: (id: string) => ["targets", id, "telemetry"], telemetryAlerts: ["telemetry-alerts"], schedules: ["schedules"], updatePolicies: ["update-policies"] },
+  queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id], dockerDiscovery: (id: number) => ["docker-discovery", id], targetDockerInventory: (id: string) => ["targets", id, "docker-discovery"], targetDockerTelemetry: (id: string) => ["targets", id, "docker-telemetry"], packageInventory: (id: string) => ["targets", id, "package-inventory"], telemetry: (id: string) => ["targets", id, "telemetry"], telemetryAlerts: ["telemetry-alerts"], schedules: ["schedules"], updatePolicies: ["update-policies"] },
   useTargets: () => mocks.targets,
   useContainers: () => mocks.containers,
   useAnsibleJobs: () => mocks.jobs,
@@ -67,6 +72,8 @@ vi.mock("./queries", () => ({
   useDockerWorkloads: () => mocks.workloads,
   useDockerDiscovery: () => mocks.dockerDiscovery,
   useTargetDockerInventory: () => mocks.targetDockerInventory,
+  useTargetDockerTelemetry: () => mocks.targetDockerTelemetry,
+  useTargetDockerInventories: () => mocks.targetDockerInventories,
   useWorkerAvailability: () => mocks.workerAvailability,
   usePackageInventory: () => mocks.packageInventory,
   useTargetTelemetry: () => mocks.telemetry,
@@ -77,7 +84,7 @@ vi.mock("./queries", () => ({
 
 vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
-  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, createUpdatePolicy: mocks.createUpdatePolicy, deleteUpdatePolicy: mocks.deleteUpdatePolicy, getPackageInventory: mocks.getPackageInventory, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, discoverTargetDocker: mocks.discoverTargetDocker, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe, setCredentials: mocks.setCredentials, setUnauthorizedHandler: mocks.setUnauthorizedHandler, getSession: mocks.getSession, logout: mocks.logout } };
+  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, createUpdatePolicy: mocks.createUpdatePolicy, deleteUpdatePolicy: mocks.deleteUpdatePolicy, getPackageInventory: mocks.getPackageInventory, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, discoverTargetDocker: mocks.discoverTargetDocker, operateTargetDockerContainer: mocks.operateTargetDockerContainer, checkTargetDockerImageUpdate: mocks.checkTargetDockerImageUpdate, applyTargetDockerImageUpdate: mocks.applyTargetDockerImageUpdate, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe, setCredentials: mocks.setCredentials, setUnauthorizedHandler: mocks.setUnauthorizedHandler, getSession: mocks.getSession, logout: mocks.logout } };
 });
 
 import { Dashboard } from "./pages/Dashboard";
@@ -132,6 +139,11 @@ beforeEach(() => {
   mocks.targetDockerInventory.data = undefined;
   mocks.targetDockerInventory.isLoading = false;
   mocks.targetDockerInventory.error = null;
+  mocks.targetDockerTelemetry.data = undefined;
+  mocks.targetDockerTelemetry.isLoading = false;
+  mocks.targetDockerTelemetry.error = null;
+  mocks.applyTargetDockerImageUpdate.mockClear();
+  mocks.targetDockerInventories = [];
   mocks.workerAvailability.data = { available: true, last_seen_at: "2026-01-01T00:00:00Z", artifact_store_available: true, artifact_store_checked_at: "2026-01-01T00:00:00Z" };
   mocks.workloads.isLoading = false;
   mocks.workloads.error = null;
@@ -597,7 +609,7 @@ describe("inventory pages", () => {
     renderPage(<DockerPage />);
     await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
     await userEvent.selectOptions(screen.getByRole("combobox"), "101");
-    expect(await screen.findByText("web")).toBeInTheDocument();
+    expect((await screen.findAllByText("web")).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole("button", { name: "Aufnehmen" }));
     await waitFor(() => expect(mocks.adoptDockerWorkload).toHaveBeenCalledWith(101, "docker-1"));
     await userEvent.click(screen.getByRole("button", { name: "Entfernen" }));
@@ -613,15 +625,124 @@ describe("inventory pages", () => {
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "LXC mit Agent" }), "target:target-1");
     await userEvent.click(screen.getByRole("button", { name: "Docker-Container entdecken" }));
     await waitFor(() => expect(mocks.discoverTargetDocker).toHaveBeenCalledWith("target-1"));
-    expect(await screen.findByText("web")).toBeInTheDocument();
+    expect((await screen.findAllByText("web")).length).toBeGreaterThan(0);
+  });
+
+  it("requires confirmation before restarting an LXC Docker container", async () => {
+    mocks.targets.data = [{ ...target, state: "managed" }];
+    mocks.targetDockerInventory.data = { target_id: "target-1", target_name: "test-target", available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [{ id: "docker-target-1", name: "web", image: "nginx:1", state: "running", status: "Up", ports: [], started_at: null, labels: [] }] };
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderPage(<DockerPage />, "/docker?target=target-1");
+    await userEvent.click(screen.getByRole("button", { name: "Neustarten" }));
+    expect(confirm).toHaveBeenCalledWith("Docker-Container „web“ wirklich neu starten?");
+    await waitFor(() => expect(mocks.operateTargetDockerContainer).toHaveBeenCalledWith("target-1", "docker-target-1", "restart"));
+    confirm.mockRestore();
+  });
+
+  it("runs Docker bulk actions sequentially and reports partial failures", async () => {
+    mocks.targets.data = [{ ...target, state: "managed" }];
+    mocks.targetDockerInventory.data = { target_id: "target-1", target_name: "test-target", available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [
+      { id: "docker-one", name: "one", image: "app:1", state: "running", status: "Up", ports: [], started_at: null, labels: [] },
+      { id: "docker-two", name: "two", image: "app:1", state: "running", status: "Up", ports: [], started_at: null, labels: [] },
+    ] };
+    mocks.operateTargetDockerContainer.mockResolvedValueOnce({ target_id: "target-1", target_name: "test-target", container_id: "docker-one", container_name: "one", action: "stop", completed_at: "2026-01-01T00:00:00Z" });
+    mocks.operateTargetDockerContainer.mockRejectedValueOnce(new Error("action failed"));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderPage(<DockerPage />, "/docker?target=target-1");
+    await userEvent.click(screen.getByRole("checkbox", { name: "one auswählen" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "two auswählen" }));
+    await userEvent.click(screen.getByRole("button", { name: "Auswahl stoppen" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("1 erfolgreich · 1 fehlgeschlagen"));
+    expect(mocks.operateTargetDockerContainer).toHaveBeenNthCalledWith(1, "target-1", "docker-one", "stop");
+    expect(mocks.operateTargetDockerContainer).toHaveBeenNthCalledWith(2, "target-1", "docker-two", "stop");
+    expect(confirm).toHaveBeenCalledWith("2 Docker-Container wirklich stoppen?");
+    confirm.mockRestore();
+  });
+
+  it("shows read-only Docker image update candidates without applying them", async () => {
+    mocks.targets.data = [{ ...target, state: "managed" }];
+    mocks.targetDockerInventory.data = { target_id: "target-1", target_name: "test-target", available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [{ id: "docker-image-1", name: "web", image: "nginx:latest", state: "running", status: "Up", ports: [], started_at: null, image_id: "sha256:old", labels: [] }] };
+    renderPage(<DockerPage />, "/docker?target=target-1");
+    await userEvent.click(screen.getByRole("button", { name: "Update prüfen" }));
+    expect(await screen.findByText(/Update verfügbar/)).toBeInTheDocument();
+    expect(mocks.checkTargetDockerImageUpdate).toHaveBeenCalledWith("target-1", "docker-image-1");
+    expect(mocks.operateTargetDockerContainer).not.toHaveBeenCalled();
+  });
+
+  it("requires explicit confirmation to recreate an eligible Compose service", async () => {
+    mocks.targets.data = [{ ...target, state: "managed" }];
+    const composeLabels = [
+      "com.docker.compose.project=shop",
+      "com.docker.compose.service=web",
+      "com.docker.compose.project.working_dir=/srv/shop",
+      "com.docker.compose.project.config_files=/srv/shop/compose.yaml",
+      "com.docker.compose.config-hash=hash",
+      "com.docker.compose.container-number=1",
+    ];
+    mocks.targetDockerInventory.data = { target_id: "target-1", target_name: "test-target", available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [{ id: "docker-image-1", name: "web", image: "nginx:latest", state: "running", status: "Up", ports: [], started_at: null, labels: composeLabels }] };
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderPage(<DockerPage />, "/docker?target=target-1");
+    await userEvent.click(screen.getByRole("button", { name: "Update prüfen" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Compose-Service aktualisieren" }));
+    await waitFor(() => expect(mocks.applyTargetDockerImageUpdate).toHaveBeenCalledWith("target-1", "docker-image-1", "sha256:new"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Compose-Service „web“"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Konfiguration: hash wird vor dem Apply erneut geprüft"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Daten im beschreibbaren Container-Layer gehen beim Ersetzen verloren"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Vorher: nginx:latest (sha256:old)"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Nachher: nginx:latest (sha256:new)"));
+    expect(await screen.findByRole("status")).toHaveTextContent("wurde aktualisiert");
+    confirm.mockRestore();
   });
 
   it("loads the last saved Docker inventory for a target after reopening the page", () => {
     mocks.targets.data = [{ ...target, state: "managed" }];
-    mocks.targetDockerInventory.data = { target_id: "target-1", target_name: "test-target", available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [{ id: "docker-target-1", name: "web", image: "nginx:1", state: "running", status: "Up", ports: ["80/tcp"], started_at: null, labels: [] }] };
+    mocks.targetDockerInventory.data = { target_id: "target-1", target_name: "test-target", available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [{ id: "docker-target-1", name: "web", image: "nginx:1", state: "running", status: "Up", ports: ["80/tcp"], started_at: "2026-01-01T00:00:00Z", created_at: "2025-12-31T00:00:00Z", image_id: "sha256:abcdef1234567890", restart_count: 3, health: "healthy", labels: [] }], events: [{ observed_at: "2026-01-01T00:00:00Z", container_id: "docker-target-1", container_name: "web", kind: "image_changed", previous_value: "nginx:0", current_value: "nginx:1" }] };
+    const now = Date.now();
+    mocks.targetDockerTelemetry.data = { target_id: "target-1", collected_at: new Date(now).toISOString(), samples: [0, 10, 20].map((secondsAgo) => ({ collected_at: new Date(now - secondsAgo * 1_000).toISOString(), container_id: "docker-target-1", cpu_basis_points: 9_500, memory_basis_points: 9_200, memory_used_bytes: 990_000_000, memory_limit_bytes: 1_000_000_000 })) };
     renderPage(<DockerPage />, "/docker?target=target-1");
+    expect(screen.getAllByText("web")).toHaveLength(3);
+    expect(screen.getByText("healthy")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(screen.getByText("sha256:abcdef123456…")).toBeInTheDocument();
+    expect(screen.getByText("Image geändert")).toBeInTheDocument();
+    expect(screen.getByText((_, element) => element?.textContent === "nginx:0 → nginx:1")).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "nginx:1" })).toBeInTheDocument();
+    expect(screen.getByText("Container-Auslastung")).toBeInTheDocument();
+    expect(screen.getByText("web: CPU seit mindestens drei Messpunkten über 90 %")).toBeInTheDocument();
+    expect(screen.getByText("web: RAM seit mindestens drei Messpunkten über 90 %")).toBeInTheDocument();
+  });
+
+  it("shows saved LXC Docker inventories on the main page without selecting a host again", () => {
+    mocks.targets.data = [{ ...target, state: "managed" }];
+    mocks.targetDockerInventories = [{
+      data: { target_id: "target-1", target_name: "test-target", available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [{ id: "docker-target-1", name: "web", image: "nginx:1", state: "running", status: "Up", ports: ["80/tcp"], started_at: null, labels: [] }] },
+      isLoading: false,
+      error: null,
+    }];
+
+    renderPage(<DockerPage />);
+
     expect(screen.getByText("web")).toBeInTheDocument();
+    expect(screen.getByText("test-target")).toBeInTheDocument();
     expect(screen.getByText("nginx:1")).toBeInTheDocument();
+  });
+
+  it("groups saved Docker containers by Compose project and filters other workloads", async () => {
+    mocks.targets.data = [{ ...target, state: "managed" }];
+    mocks.targetDockerInventories = [{
+      data: { target_id: "target-1", target_name: "test-target", available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [
+        { id: "compose-app", name: "api", image: "example/api:1", state: "running", status: "Up", ports: [], started_at: null, labels: ["com.docker.compose.project=shop"] },
+        { id: "standalone-db", name: "database", image: "postgres:16", state: "running", status: "Up", ports: [], started_at: null, labels: [] },
+      ] },
+      isLoading: false,
+      error: null,
+    }];
+    renderPage(<DockerPage />);
+    expect(screen.getByText("Compose · shop")).toBeInTheDocument();
+    expect(screen.getByText("Compose · Ohne Compose-Projekt")).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Compose-Projekt filtern" }), "shop");
+    expect(screen.getByText("api")).toBeInTheDocument();
+    expect(screen.queryByText("database")).not.toBeInTheDocument();
   });
 
   it("covers loading, error and filtered empty inventory states", async () => {
@@ -850,7 +971,7 @@ describe("onboarding and secret pages", () => {
     expect(screen.getByText("1 Update verfügbar")).toBeInTheDocument();
     const telemetryLink = screen.getByRole("link", { name: "Systemauslastung für test-target" });
     expect(telemetryLink).toHaveAttribute("href", "/targets/target-1");
-    expect(screen.getByText(/Aktuell/)).toBeInTheDocument();
+    expect(within(telemetryLink).getByText(/Aktuell/)).toBeInTheDocument();
     expect(within(telemetryLink).getByText(/CPU 25.0%/)).toBeInTheDocument();
     expect(within(telemetryLink).getByText(/RAM 40.0%/)).toBeInTheDocument();
     expect(within(telemetryLink).getByText(/Speicher 50.0%/)).toBeInTheDocument();

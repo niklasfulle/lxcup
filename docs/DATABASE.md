@@ -29,10 +29,12 @@ level it stores:
 - **Agent registrations and worker heartbeats** — managed-agent enrollment,
   worker availability, and the latest artifact-store health probe.
 - **Package inventory and target telemetry** — latest package snapshot and
-  resource samples associated with a target.
+  resource samples associated with a target, including bounded per-container
+  Docker CPU and memory samples retained for the recent chart window.
 - **Docker workloads and discovery runs** — legacy container-backed workload
-  state plus the latest successful inventory snapshot for each registered
-  target. Failed discovery does not erase the last successful snapshot.
+  state plus the latest successful inventory snapshot and bounded lifecycle
+  change history for each registered target. Failed discovery does not erase
+  the last successful snapshot or its history.
 - **Schedules and update policies** — recurring registered work and package
   update constraints. Non-system update policies can be deleted through the
   repository; job/event history remains independent of the policy row.
@@ -77,3 +79,12 @@ target is explicitly verified; see the root README and operational runbooks.
 - Preserve audit/job-event history needed to explain changes and failures.
 - Protect database backups and the encrypted secret store together, and test
   restores into a disposable database before relying on them.
+## Telemetry and Docker history retention
+
+System and Docker telemetry samples are retained for 30 days. API chart queries
+remain limited to the rolling 10-minute window. Docker inventory lifecycle
+events are retained for 180 days and remain capped at 200 events per target.
+The server runs a daily cleanup for expired data in bounded batches (5,000
+samples per telemetry table and 100 Docker inventories per run); larger
+backlogs are drained by subsequent daily runs. Active heartbeat traffic is not
+required for old rows to be removed.

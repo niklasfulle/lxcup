@@ -10,6 +10,7 @@ lxcup-agent = { path = "../lxcup-agent" }
 chrono.workspace = true
 lxcup-ansible = { path = "../lxcup-ansible" }
 lxcup-core = { path = "../lxcup-core" }
+serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
