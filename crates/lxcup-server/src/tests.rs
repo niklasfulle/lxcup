@@ -17,4 +17,5 @@ mod docker_enrollment;
 mod inventory;
 mod reconciliation;
 mod removed_resources;
+mod user_auth;
 mod workflows;

@@ -22,21 +22,21 @@ vi.mock("../queries", () => ({
 
 describe("workflow mode contract", () => {
   it("treats an empty package field as all available updates", () => {
-    const request = buildWorkflowRequest("target-1", "update_packages", "plan", [], true, "standard");
+    const request = buildWorkflowRequest({ targetId: "target-1", operation: "update_packages", mode: "plan", packages: [], confirmed: true, policyId: "standard" });
 
     expect(request.parameters).toEqual({ operation: "update_packages", packages: ["*"] });
     expect(request.policy_id).toBe("standard");
   });
 
   it("passes only explicitly selected packages to a targeted plan", () => {
-    const request = buildWorkflowRequest("target-1", "update_packages", "plan", ["curl", "nginx"], true, "standard");
+    const request = buildWorkflowRequest({ targetId: "target-1", operation: "update_packages", mode: "plan", packages: ["curl", "nginx"], confirmed: true, policyId: "standard" });
 
     expect(request.parameters).toEqual({ operation: "update_packages", packages: ["curl", "nginx"] });
   });
 
   it("uses the controller-reported latest version for agent workflows", () => {
-    const request = buildWorkflowRequest("target-1", "update_agent", "apply", [], true, undefined, undefined, "0.3.2");
-    expect(request.parameters).toEqual({ operation: "update_agent", agent_version: "0.3.2" });
+    const request = buildWorkflowRequest({ targetId: "target-1", operation: "update_agent", mode: "apply", packages: [], confirmed: true, latestAgentVersion: "0.4.0" });
+    expect(request.parameters).toEqual({ operation: "update_agent", agent_version: "0.4.0" });
   });
 
   it("shows available updates in the picker and allows selecting them", async () => {

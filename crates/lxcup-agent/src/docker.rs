@@ -407,53 +407,93 @@ pub(super) async fn agent_docker_image_update_apply(
         )
             .into_response();
     }
+    let inspected = match inspect_compose_update_container(&state, &request.container_id).await {
+        Ok(inspected) => inspected,
+        Err(response) => return response,
+    };
+    let remote_image_id =
+        match verify_remote_update_image(&state, &inspected, &request.expected_remote_image_id)
+            .await
+        {
+            Ok(image_id) => image_id,
+            Err(response) => return response,
+        };
+    if let Err(response) = apply_compose_image_update(&state, &inspected, &remote_image_id).await {
+        return response;
+    }
+    Json(DockerImageUpdateApplyResult {
+        container_id: request.container_id,
+        image: inspected.image,
+        compose_project: inspected.compose.project,
+        compose_service: inspected.compose.service,
+        image_id: remote_image_id,
+        completed_at: Utc::now(),
+    })
+    .into_response()
+}
 
+struct InspectedDockerUpdateContainer {
+    container_id: String,
+    image: String,
+    image_id: String,
+    compose: ComposeContext,
+}
+
+async fn inspect_compose_update_container(
+    state: &LocalAgentState,
+    container_id: &str,
+) -> Result<InspectedDockerUpdateContainer, axum::response::Response> {
     let inspect = match state
         .docker_output(
             &[
                 "inspect".to_owned(),
                 "--format".to_owned(),
                 "{{.Id}}\t{{.Config.Image}}\t{{.Image}}\t{{json .Config.Labels}}".to_owned(),
-                request.container_id.clone(),
+                container_id.to_owned(),
             ],
             None,
         )
         .await
     {
         Ok(output) if output.success => String::from_utf8_lossy(&output.stdout).to_string(),
-        _ => return docker_update_error(StatusCode::NOT_FOUND, "container_unavailable"),
+        _ => {
+            return Err(docker_update_error(
+                StatusCode::NOT_FOUND,
+                "container_unavailable",
+            ));
+        }
     };
     let fields = inspect.trim().splitn(4, '\t').collect::<Vec<_>>();
     if fields.len() != 4
-        || !fields[0].starts_with(&request.container_id)
+        || !fields[0].starts_with(container_id)
         || !is_safe_image_id(fields[2])
         || !safe_image_reference(fields[1])
     {
-        return docker_update_error(StatusCode::BAD_GATEWAY, "container_metadata_invalid");
+        return Err(docker_update_error(
+            StatusCode::BAD_GATEWAY,
+            "container_metadata_invalid",
+        ));
     }
-    let labels: Value = match serde_json::from_str(fields[3]) {
-        Ok(labels) => labels,
-        Err(_) => return docker_update_error(StatusCode::BAD_GATEWAY, "compose_labels_invalid"),
-    };
-    let Some(compose) = validated_compose_context(&labels) else {
-        return docker_update_error(StatusCode::CONFLICT, "compose_metadata_required");
-    };
+    let labels: Value = serde_json::from_str(fields[3])
+        .map_err(|_| docker_update_error(StatusCode::BAD_GATEWAY, "compose_labels_invalid"))?;
+    let compose = validated_compose_context(&labels)
+        .ok_or_else(|| docker_update_error(StatusCode::CONFLICT, "compose_metadata_required"))?;
     if labels
         .get("com.docker.compose.container-number")
         .and_then(Value::as_str)
         != Some("1")
     {
-        return docker_update_error(StatusCode::CONFLICT, "compose_replicas_unsupported");
+        return Err(docker_update_error(
+            StatusCode::CONFLICT,
+            "compose_replicas_unsupported",
+        ));
     }
-    let Some(saved_config_hash) = labels
+    let saved_config_hash = labels
         .get("com.docker.compose.config-hash")
         .and_then(Value::as_str)
-    else {
-        return docker_update_error(StatusCode::CONFLICT, "compose_config_hash_required");
-    };
-
-    let image = fields[1];
-    let current_config_hash = tokio::time::timeout(
+        .ok_or_else(|| docker_update_error(StatusCode::CONFLICT, "compose_config_hash_required"))?
+        .to_owned();
+    let config_hash = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         state.docker_output(
             &compose.args(&["config", "--hash", &compose.service]),
@@ -461,27 +501,51 @@ pub(super) async fn agent_docker_image_update_apply(
         ),
     )
     .await;
-    let Ok(Ok(output)) = current_config_hash else {
-        return docker_update_error(StatusCode::BAD_GATEWAY, "compose_config_inspection_failed");
+    let Ok(Ok(output)) = config_hash else {
+        return Err(docker_update_error(
+            StatusCode::BAD_GATEWAY,
+            "compose_config_inspection_failed",
+        ));
     };
     if !output.success || String::from_utf8_lossy(&output.stdout).trim() != saved_config_hash {
-        return docker_update_error(StatusCode::CONFLICT, "compose_config_changed");
+        return Err(docker_update_error(
+            StatusCode::CONFLICT,
+            "compose_config_changed",
+        ));
     }
-    let image_architecture = match state
+    Ok(InspectedDockerUpdateContainer {
+        container_id: fields[0].to_owned(),
+        image: fields[1].to_owned(),
+        image_id: fields[2].to_owned(),
+        compose,
+    })
+}
+
+async fn verify_remote_update_image(
+    state: &LocalAgentState,
+    container: &InspectedDockerUpdateContainer,
+    expected_remote_image_id: &str,
+) -> Result<String, axum::response::Response> {
+    let architecture = match state
         .docker_output(
             &[
                 "image".to_owned(),
                 "inspect".to_owned(),
                 "--format".to_owned(),
                 "{{.Os}}/{{.Architecture}}".to_owned(),
-                fields[2].to_owned(),
+                container.image_id.clone(),
             ],
             None,
         )
         .await
     {
         Ok(output) if output.success => String::from_utf8_lossy(&output.stdout).trim().to_owned(),
-        _ => return docker_update_error(StatusCode::BAD_GATEWAY, "local_platform_unavailable"),
+        _ => {
+            return Err(docker_update_error(
+                StatusCode::BAD_GATEWAY,
+                "local_platform_unavailable",
+            ));
+        }
     };
     let manifest = match tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -490,7 +554,7 @@ pub(super) async fn agent_docker_image_update_apply(
                 "manifest".to_owned(),
                 "inspect".to_owned(),
                 "--verbose".to_owned(),
-                image.to_owned(),
+                container.image.clone(),
             ],
             None,
         ),
@@ -499,36 +563,60 @@ pub(super) async fn agent_docker_image_update_apply(
     {
         Ok(Ok(output)) if output.success => output.stdout,
         _ => {
-            return docker_update_error(
+            return Err(docker_update_error(
                 StatusCode::BAD_GATEWAY,
                 "registry_unavailable_or_unauthorized",
-            );
+            ));
         }
     };
-    let Some(remote_image_id) =
-        parse_remote_image_config_digest(&String::from_utf8_lossy(&manifest), &image_architecture)
-    else {
-        return docker_update_error(
-            StatusCode::BAD_GATEWAY,
-            "remote_platform_digest_unavailable",
-        );
-    };
-    if remote_image_id != request.expected_remote_image_id || remote_image_id == fields[2] {
-        return docker_update_error(StatusCode::CONFLICT, "image_update_check_stale");
+    let remote_image_id =
+        parse_remote_image_config_digest(&String::from_utf8_lossy(&manifest), &architecture)
+            .ok_or_else(|| {
+                docker_update_error(
+                    StatusCode::BAD_GATEWAY,
+                    "remote_platform_digest_unavailable",
+                )
+            })?;
+    if remote_image_id != expected_remote_image_id || remote_image_id == container.image_id {
+        return Err(docker_update_error(
+            StatusCode::CONFLICT,
+            "image_update_check_stale",
+        ));
     }
+    Ok(remote_image_id)
+}
 
-    let compose_context = compose;
+async fn apply_compose_image_update(
+    state: &LocalAgentState,
+    container: &InspectedDockerUpdateContainer,
+    remote_image_id: &str,
+) -> Result<(), axum::response::Response> {
     let pull = tokio::time::timeout(
         std::time::Duration::from_secs(120),
         state.docker_output(
-            &compose_context.args(&["pull", &compose_context.service]),
-            Some(&compose_context.working_dir),
+            &container
+                .compose
+                .args(&["pull", &container.compose.service]),
+            Some(&container.compose.working_dir),
         ),
     )
     .await;
     if !matches!(pull, Ok(Ok(ref output)) if output.success) {
-        return docker_update_error(StatusCode::BAD_GATEWAY, "compose_pull_failed");
+        return Err(docker_update_error(
+            StatusCode::BAD_GATEWAY,
+            "compose_pull_failed",
+        ));
     }
+    verify_pulled_image(state, container, remote_image_id).await?;
+    verify_compose_service_scope(state, container).await?;
+    recreate_compose_service(state, container).await
+}
+
+async fn verify_pulled_image(
+    state: &LocalAgentState,
+    container: &InspectedDockerUpdateContainer,
+    remote_image_id: &str,
+) -> Result<(), axum::response::Response> {
     let pulled = match state
         .docker_output(
             &[
@@ -536,29 +624,48 @@ pub(super) async fn agent_docker_image_update_apply(
                 "inspect".to_owned(),
                 "--format".to_owned(),
                 "{{.Id}}".to_owned(),
-                image.to_owned(),
+                container.image.clone(),
             ],
             None,
         )
         .await
     {
         Ok(output) if output.success => String::from_utf8_lossy(&output.stdout).trim().to_owned(),
-        _ => return docker_update_error(StatusCode::BAD_GATEWAY, "pulled_image_unavailable"),
+        _ => {
+            return Err(docker_update_error(
+                StatusCode::BAD_GATEWAY,
+                "pulled_image_unavailable",
+            ));
+        }
     };
     if pulled != remote_image_id {
-        return docker_update_error(StatusCode::CONFLICT, "pulled_image_digest_mismatch");
+        return Err(docker_update_error(
+            StatusCode::CONFLICT,
+            "pulled_image_digest_mismatch",
+        ));
     }
+    Ok(())
+}
 
+async fn verify_compose_service_scope(
+    state: &LocalAgentState,
+    container: &InspectedDockerUpdateContainer,
+) -> Result<(), axum::response::Response> {
     let service_containers = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         state.docker_output(
-            &compose_context.args(&["ps", "--all", "--quiet", &compose_context.service]),
-            Some(&compose_context.working_dir),
+            &container
+                .compose
+                .args(&["ps", "--all", "--quiet", &container.compose.service]),
+            Some(&container.compose.working_dir),
         ),
     )
     .await;
     let Ok(Ok(output)) = service_containers else {
-        return docker_update_error(StatusCode::BAD_GATEWAY, "compose_service_inspection_failed");
+        return Err(docker_update_error(
+            StatusCode::BAD_GATEWAY,
+            "compose_service_inspection_failed",
+        ));
     };
     let service_output = String::from_utf8_lossy(&output.stdout);
     let ids = service_output
@@ -566,14 +673,23 @@ pub(super) async fn agent_docker_image_update_apply(
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .collect::<Vec<_>>();
-    if !output.success || ids.len() != 1 || !ids[0].starts_with(fields[0]) {
-        return docker_update_error(StatusCode::CONFLICT, "compose_service_scope_changed");
+    if !output.success || ids.len() != 1 || !ids[0].starts_with(&container.container_id) {
+        return Err(docker_update_error(
+            StatusCode::CONFLICT,
+            "compose_service_scope_changed",
+        ));
     }
+    Ok(())
+}
 
+async fn recreate_compose_service(
+    state: &LocalAgentState,
+    container: &InspectedDockerUpdateContainer,
+) -> Result<(), axum::response::Response> {
     let apply = tokio::time::timeout(
         std::time::Duration::from_secs(120),
         state.docker_output(
-            &compose_context.args(&[
+            &container.compose.args(&[
                 "up",
                 "--detach",
                 "--no-deps",
@@ -581,24 +697,19 @@ pub(super) async fn agent_docker_image_update_apply(
                 "--wait",
                 "--wait-timeout",
                 "120",
-                &compose_context.service,
+                &container.compose.service,
             ]),
-            Some(&compose_context.working_dir),
+            Some(&container.compose.working_dir),
         ),
     )
     .await;
     if !matches!(apply, Ok(Ok(ref output)) if output.success) {
-        return docker_update_error(StatusCode::BAD_GATEWAY, "compose_recreate_failed");
+        return Err(docker_update_error(
+            StatusCode::BAD_GATEWAY,
+            "compose_recreate_failed",
+        ));
     }
-    Json(DockerImageUpdateApplyResult {
-        container_id: request.container_id,
-        image: image.to_owned(),
-        compose_project: compose_context.project,
-        compose_service: compose_context.service,
-        image_id: remote_image_id,
-        completed_at: Utc::now(),
-    })
-    .into_response()
+    Ok(())
 }
 
 struct ComposeContext {
@@ -680,37 +791,5 @@ fn is_safe_image_id(value: &str) -> bool {
 }
 
 #[cfg(test)]
-mod compose_validation_tests {
-    use super::{safe_compose_identifier, validated_compose_context};
-
-    #[test]
-    fn compose_names_allow_only_bounded_identifiers() {
-        assert!(safe_compose_identifier("web-api_1"));
-        assert!(!safe_compose_identifier("../web"));
-        assert!(!safe_compose_identifier("-f"));
-        assert!(!safe_compose_identifier(""));
-    }
-
-    #[test]
-    fn non_compose_containers_cannot_be_updated_through_compose() {
-        assert!(validated_compose_context(&serde_json::json!({"other": "label"})).is_none());
-    }
-
-    #[test]
-    fn compose_config_must_resolve_inside_the_declared_project_directory() {
-        let root = std::env::temp_dir().join(format!("lxcup-compose-{}", uuid::Uuid::new_v4()));
-        let outside =
-            std::env::temp_dir().join(format!("lxcup-compose-{}.yaml", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&root).unwrap();
-        std::fs::write(&outside, "services: {}\n").unwrap();
-        let labels = serde_json::json!({
-            "com.docker.compose.project": "shop",
-            "com.docker.compose.service": "web",
-            "com.docker.compose.project.working_dir": root.to_string_lossy().to_string(),
-            "com.docker.compose.project.config_files": outside.to_string_lossy().to_string(),
-        });
-        assert!(validated_compose_context(&labels).is_none());
-        std::fs::remove_file(outside).unwrap();
-        std::fs::remove_dir(root).unwrap();
-    }
-}
+#[path = "docker_tests.rs"]
+mod compose_validation_tests;

@@ -4,8 +4,11 @@ Die Testabdeckung ist ein verpflichtendes Qualitätsgate:
 
 - Mindestziel: 80 % für Zeilen und Funktionen.
 - Zielwert: 90 %.
+- Zusätzlich muss jede einzelne Rust- und Frontend-Produktionsdatei mindestens 80 % Zeilenabdeckung erreichen.
+- Produktions-Quellcodedateien dürfen höchstens 800 Zeilen enthalten; Tests, generierte Dateien und Abhängigkeiten sind ausgenommen.
 - Frontend: Vitest erzwingt mindestens 80 % für Statements, Zeilen, Funktionen und Branches.
 - Rust: `scripts/test-coverage.ps1` führt `cargo llvm-cov` für den gesamten Workspace aus.
+- `scripts/check-source-limits.ps1` prüft die Zeilengrenze unabhängig von den Tests.
 
 Lokal ausführen:
 
@@ -19,4 +22,4 @@ Das strengere Ziel kann bereits geprüft werden:
 .\scripts\test-coverage.ps1 -Minimum 90
 ```
 
-Ein Coverage-Lauf vom 23.09.2026 lag noch unter dem Gate (Rust gesamt ca. 36 % Zeilen, Frontend ca. 26 % Zeilen). Die Schwelle ist deshalb bewusst als sichtbares Gate eingerichtet; die fehlenden Tests müssen vor dem nächsten Release ergänzt werden.
+Die Coverage-Schwellen gelten für Produktionscode. Tests und generierte Dateien werden nicht als Produktionsdateien bewertet.

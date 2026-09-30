@@ -44,3 +44,23 @@ pub(super) async fn get_target_docker_telemetry(
         samples,
     })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::{Path, State};
+
+    #[tokio::test]
+    async fn docker_telemetry_requires_a_registered_target() {
+        let state = ApiState::new();
+        let invalid = get_target_docker_telemetry(State(state.clone()), Path("invalid".to_owned()))
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code, "invalid_id");
+        let missing =
+            get_target_docker_telemetry(State(state), Path(uuid::Uuid::new_v4().to_string()))
+                .await
+                .unwrap_err();
+        assert_eq!(missing.code, "not_found");
+    }
+}

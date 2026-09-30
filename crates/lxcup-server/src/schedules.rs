@@ -268,3 +268,189 @@ fn validate_schedule_policy_targets(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lxcup_core::{SecretId, Target, TargetKind, TargetTransport, UpdatePolicy, UpdateRisk};
+
+    fn request(operation: &str) -> CreateScheduleRequest {
+        CreateScheduleRequest {
+            id: "daily-check".to_owned(),
+            operation: operation.to_owned(),
+            timezone: "Europe/Berlin".to_owned(),
+            target_ids: vec![TargetId::new()],
+            every_minutes: 60,
+            enabled: true,
+            threshold: None,
+            policy_id: None,
+        }
+    }
+
+    fn target(kind: TargetKind) -> Target {
+        Target::new(
+            "schedule-target",
+            kind,
+            "192.0.2.250",
+            TargetTransport::Ssh,
+            SecretId::new(),
+            SecretId::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn schedule_fields_reject_unbounded_or_unregistered_values() {
+        let mut value = request("health_check");
+        value.id.clear();
+        assert_eq!(
+            validate_schedule_fields(&value).unwrap_err().code,
+            "invalid_schedule"
+        );
+        value.id = "x".repeat(129);
+        assert_eq!(
+            validate_schedule_fields(&value).unwrap_err().code,
+            "invalid_schedule"
+        );
+        value.id = "valid".to_owned();
+        value.timezone.clear();
+        assert_eq!(
+            validate_schedule_fields(&value).unwrap_err().code,
+            "invalid_timezone"
+        );
+        value.timezone = "z".repeat(65);
+        assert_eq!(
+            validate_schedule_fields(&value).unwrap_err().code,
+            "invalid_timezone"
+        );
+        value.timezone = "UTC".to_owned();
+        value.every_minutes = 0;
+        assert_eq!(
+            validate_schedule_fields(&value).unwrap_err().code,
+            "invalid_interval"
+        );
+        value.every_minutes = 10081;
+        assert_eq!(
+            validate_schedule_fields(&value).unwrap_err().code,
+            "invalid_interval"
+        );
+        value.every_minutes = 60;
+        value.operation = "unregistered".to_owned();
+        assert_eq!(
+            validate_schedule_fields(&value).unwrap_err().code,
+            "invalid_operation"
+        );
+        value.operation = "update_packages".to_owned();
+        assert_eq!(
+            validate_schedule_fields(&value).unwrap_err().code,
+            "update_policy_required"
+        );
+        value.policy_id = Some("safe".to_owned());
+        value.operation = "docker_discovery".to_owned();
+        value.threshold = Some(ThresholdRule {
+            metric: lxcup_core::ThresholdMetric::CpuBasisPoints,
+            operator: lxcup_core::ThresholdOperator::GreaterThanOrEqual,
+            value: 8000,
+        });
+        assert_eq!(
+            validate_schedule_fields(&value).unwrap_err().code,
+            "invalid_threshold"
+        );
+        value.threshold = None;
+        assert!(validate_schedule_fields(&value).is_ok());
+    }
+
+    #[test]
+    fn schedule_resources_validate_duplicates_targets_docker_kind_and_policy_scope() {
+        let managed = target(TargetKind::LinuxServer);
+        let lxc = target(TargetKind::Lxc);
+        let mut store = ApiStore {
+            targets: vec![managed.clone(), lxc.clone()],
+            ..ApiStore::default()
+        };
+
+        let mut value = request("health_check");
+        value.target_ids.clear();
+        assert_eq!(
+            validate_schedule_resources(&value, &store)
+                .unwrap_err()
+                .code,
+            "target_required"
+        );
+        value.target_ids = vec![TargetId::new()];
+        assert_eq!(
+            validate_schedule_resources(&value, &store)
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+        value.target_ids = vec![managed.id];
+        value.operation = "docker_discovery".to_owned();
+        assert_eq!(
+            validate_schedule_resources(&value, &store)
+                .unwrap_err()
+                .code,
+            "docker_discovery_requires_lxc"
+        );
+        value.target_ids = vec![lxc.id];
+        assert!(validate_schedule_resources(&value, &store).is_ok());
+
+        let mut duplicate = request("health_check");
+        duplicate.target_ids = vec![managed.id];
+        store.schedules.push(JobSchedule {
+            id: duplicate.id.clone(),
+            operation: "health_check".to_owned(),
+            timezone: "UTC".to_owned(),
+            target_ids: vec![managed.id],
+            frequency: ScheduleFrequency::EveryMinutes(60),
+            enabled: true,
+            threshold: None,
+            policy_id: None,
+            last_run_at: None,
+            next_run_at: Utc::now(),
+            last_error: None,
+        });
+        assert_eq!(
+            validate_schedule_resources(&duplicate, &store)
+                .unwrap_err()
+                .code,
+            "schedule_exists"
+        );
+        store.schedules.clear();
+
+        value.operation = "health_check".to_owned();
+        value.target_ids = vec![managed.id];
+        value.policy_id = Some("missing".to_owned());
+        assert_eq!(
+            validate_schedule_resources(&value, &store)
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+        store.update_policies.push(UpdatePolicy {
+            id: "missing".to_owned(),
+            allowed_targets: vec![lxc.id],
+            allowed_packages: vec!["curl".to_owned()],
+            maintenance_start_minute: 0,
+            maintenance_end_minute: 1439,
+            timezone: "UTC".to_owned(),
+            maximum_risk: UpdateRisk::High,
+            enabled: false,
+        });
+        assert_eq!(
+            validate_schedule_resources(&value, &store)
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+        store.update_policies[0].enabled = true;
+        assert_eq!(
+            validate_schedule_resources(&value, &store)
+                .unwrap_err()
+                .code,
+            "update_policy_target_denied"
+        );
+        store.update_policies[0].allowed_targets.push(managed.id);
+        assert!(validate_schedule_resources(&value, &store).is_ok());
+    }
+}

@@ -236,3 +236,7 @@ pub(crate) fn threshold_value(rule: ThresholdRule, heartbeat: &AgentHeartbeat) -
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "scheduled_jobs_tests.rs"]
+mod tests;

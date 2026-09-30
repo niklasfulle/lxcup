@@ -2,22 +2,11 @@ use super::*;
 
 #[tokio::test]
 async fn postgres_ansible_job_repository_claims_jobs_and_persists_events() {
-    let Ok(database_url) = std::env::var("DATABASE_TEST_URL") else {
-        eprintln!("skipped: DATABASE_TEST_URL is not configured");
+    let Some(test_database) = scoped_test_database("ansible_jobs").await else {
         return;
     };
-    let config = DatabaseConfig::from_values(
-        database_url,
-        3,
-        0,
-        Duration::from_secs(10),
-        Duration::from_secs(10),
-        Some(Duration::from_secs(60)),
-    )
-    .unwrap();
-    let database = Database::connect(&config).await.unwrap();
-    database.migrate().await.unwrap();
-    let repositories = Repositories::new(&database);
+    let database = test_database.database();
+    let repositories = Repositories::new(database);
     let target = Target::new(
         "ansible-job-repository-target",
         TargetKind::LinuxServer,
@@ -217,4 +206,5 @@ async fn postgres_ansible_job_repository_claims_jobs_and_persists_events() {
         .execute(pool)
         .await
         .unwrap();
+    test_database.finish().await;
 }

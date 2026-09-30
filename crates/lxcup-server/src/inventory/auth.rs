@@ -1,12 +1,14 @@
 use super::{ApiError, ApiState};
 use axum::{
-    Json,
     extract::State,
-    http::{HeaderMap, Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use chrono::Utc;
 use lxcup_core::ActorRole;
+use lxcup_persistence::{AuthAuditEvent, AuthUserRole};
+use serde_json::json;
 use std::{
     sync::{
         Arc,
@@ -14,6 +16,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use subtle::ConstantTimeEq;
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -218,31 +221,262 @@ pub(crate) async fn request_middleware(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| Uuid::parse_str(value).ok())
         .unwrap_or_else(Uuid::new_v4);
-    // The heartbeat handler validates its own per-target agent token.
-    let public = path == "/health/live"
-        || path == "/health/ready"
-        || path == "/metrics"
-        || path == "/api/v1/agents/heartbeat";
-    let role = state.auth.role(request.headers());
-    if !public && role.is_none() {
-        return ApiError::unauthorized().into_response();
-    }
-    if let Some(role) = role {
-        if !public && !state.auth.allows(&path, request.method(), &role) {
-            return ApiError::forbidden(
-                "permission_denied",
-                "the current role cannot perform this action",
-            )
-            .into_response();
-        }
-        request.extensions_mut().insert(role);
-    }
+    let authenticated_actor =
+        match authenticate_request(&state, &mut request, &path, request_id).await {
+            Ok(actor) => actor,
+            Err(response) => return response,
+        };
+    let method = request.method().clone();
     request.extensions_mut().insert(request_id);
+    let audit_id = match reserve_request_audit(
+        &state,
+        authenticated_actor.as_ref(),
+        &method,
+        &path,
+        request_id,
+    )
+    .await
+    {
+        Ok(audit_id) => audit_id,
+        Err(response) => return response,
+    };
     state.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
     let span = tracing::info_span!("http_request", request_id = %request_id, method = %request.method(), path = %path);
-    let mut response = next.run(request).instrument(span).await;
+    let response = next.run(request).instrument(span).await;
+    finalize_request_response(&state, response, &path, request_id, audit_id).await
+}
+
+async fn authenticate_request(
+    state: &ApiState,
+    request: &mut axum::extract::Request,
+    path: &str,
+    request_id: Uuid,
+) -> Result<Option<super::super::AuthenticatedUser>, Response> {
+    let public = is_public_request(state, path);
+    if state.account_auth_enabled && !public {
+        let (actor, cookie_authenticated) = load_account_actor(state, request.headers()).await?;
+        let role = authorize_account_request(
+            state,
+            &actor,
+            cookie_authenticated,
+            request.method().clone(),
+            request.headers().clone(),
+            path,
+            request_id,
+        )
+        .await?;
+        request.extensions_mut().insert(role);
+        request.extensions_mut().insert(actor.clone());
+        return Ok(Some(actor));
+    }
+
+    let role = state.auth.role(request.headers());
+    authorize_legacy_role(&state.auth, role, public, path, request.method())?;
+    if let Some(role) = role {
+        request.extensions_mut().insert(role);
+    }
+    Ok(None)
+}
+
+fn is_public_request(state: &ApiState, path: &str) -> bool {
+    // The heartbeat handler validates its own per-target agent token.
+    matches!(
+        path,
+        "/health/live" | "/health/ready" | "/metrics" | "/api/v1/agents/heartbeat"
+    ) || (state.account_auth_enabled
+        && matches!(path, "/api/v1/auth/status" | "/api/v1/auth/login"))
+}
+
+async fn load_account_actor(
+    state: &ApiState,
+    headers: &HeaderMap,
+) -> Result<(super::super::AuthenticatedUser, bool), Response> {
+    let Some((token, cookie_authenticated)) = session_credential(headers) else {
+        return Err(ApiError::unauthorized().into_response());
+    };
+    let Some(repositories) = state.repositories.as_ref() else {
+        return Err(ApiError::storage().into_response());
+    };
+    let token_hash = super::super::hash_session_token(token);
+    let session = match repositories.auth.session_by_token_hash(&token_hash).await {
+        Ok(session) => session,
+        Err(_) => return Err(ApiError::storage().into_response()),
+    };
+    let Some(session) = session else {
+        return Err(ApiError::unauthorized().into_response());
+    };
+    let user = session.user;
+    Ok((
+        super::super::AuthenticatedUser {
+            id: user.id,
+            username: user.username,
+            role: user.role,
+            must_change_password: user.must_change_password,
+            token_hash,
+            expires_at: session.expires_at,
+        },
+        cookie_authenticated,
+    ))
+}
+
+async fn authorize_account_request(
+    state: &ApiState,
+    actor: &super::super::AuthenticatedUser,
+    cookie_authenticated: bool,
+    method: Method,
+    headers: HeaderMap,
+    path: &str,
+    request_id: Uuid,
+) -> Result<ActorRole, Response> {
+    if cookie_authenticated && is_unsafe_method(&method) && !valid_csrf_request(&headers) {
+        return Err(audited_forbidden_response(
+            state,
+            actor,
+            &method,
+            path,
+            request_id,
+            "csrf_validation_failed",
+            "the request could not be verified",
+        )
+        .await);
+    }
+    if actor.must_change_password && !is_password_change_allowed_path(path) {
+        return Err(ApiError::forbidden(
+            "password_change_required",
+            "change the initial password before using the application",
+        )
+        .into_response());
+    }
+
+    let role = actor_role(actor.role);
+    if is_admin_only_route(path) && actor.role != AuthUserRole::Admin {
+        return Err(audited_forbidden_response(
+            state,
+            actor,
+            &method,
+            path,
+            request_id,
+            "permission_denied",
+            "the current role cannot perform this action",
+        )
+        .await);
+    }
+    if !state.auth.allows(path, &method, &role) {
+        return Err(audited_forbidden_response(
+            state,
+            actor,
+            &method,
+            path,
+            request_id,
+            "permission_denied",
+            "the current role cannot perform this action",
+        )
+        .await);
+    }
+    Ok(role)
+}
+
+fn is_password_change_allowed_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/v1/auth/session" | "/api/v1/auth/logout" | "/api/v1/auth/password"
+    )
+}
+
+fn actor_role(role: AuthUserRole) -> ActorRole {
+    match role {
+        AuthUserRole::Admin => ActorRole::Admin,
+        AuthUserRole::User => ActorRole::Operator,
+    }
+}
+
+fn authorize_legacy_role(
+    auth: &AuthConfig,
+    role: Option<ActorRole>,
+    public: bool,
+    path: &str,
+    method: &Method,
+) -> Result<(), Response> {
+    if !public && role.is_none() {
+        return Err(ApiError::unauthorized().into_response());
+    }
+    if role.is_some_and(|role| !public && !auth.allows(path, method, &role)) {
+        return Err(ApiError::forbidden(
+            "permission_denied",
+            "the current role cannot perform this action",
+        )
+        .into_response());
+    }
+    Ok(())
+}
+
+async fn audited_forbidden_response(
+    state: &ApiState,
+    actor: &super::super::AuthenticatedUser,
+    method: &Method,
+    path: &str,
+    request_id: Uuid,
+    code: &'static str,
+    message: &'static str,
+) -> Response {
+    append_request_audit(
+        state,
+        actor,
+        method,
+        path,
+        request_id,
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    ApiError::forbidden(code, message).into_response()
+}
+
+async fn reserve_request_audit(
+    state: &ApiState,
+    actor: Option<&super::super::AuthenticatedUser>,
+    method: &Method,
+    path: &str,
+    request_id: Uuid,
+) -> Result<Option<Uuid>, Response> {
+    let Some(actor) = actor.filter(|_| {
+        matches!(
+            *method,
+            Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+        )
+    }) else {
+        return Ok(None);
+    };
+    let event = request_audit_event(actor, method, path, request_id, StatusCode::PROCESSING);
+    let Some(repositories) = state.repositories.as_ref() else {
+        return Err(ApiError::storage().into_response());
+    };
+    if let Err(error) = repositories.auth.append_audit_event(&event).await {
+        tracing::error!(error = ?error, request_id = %request_id, "request audit reservation could not be persisted");
+        return Err(ApiError::storage().into_response());
+    }
+    Ok(Some(event.id))
+}
+
+async fn finalize_request_response(
+    state: &ApiState,
+    mut response: Response,
+    path: &str,
+    request_id: Uuid,
+    audit_id: Option<Uuid>,
+) -> Response {
     if let Ok(value) = request_id.to_string().parse() {
         response.headers_mut().insert("x-request-id", value);
+    }
+    if should_clear_logout_cookies(path, &response) {
+        let headers = match crate::user_auth::cleared_session_cookie_headers(state.secure_cookies) {
+            Ok(headers) => headers,
+            Err(_) => return ApiError::storage().into_response(),
+        };
+        for value in headers.get_all(header::SET_COOKIE).iter() {
+            response
+                .headers_mut()
+                .append(header::SET_COOKIE, value.clone());
+        }
     }
     if response.status().is_client_error() || response.status().is_server_error() {
         state
@@ -250,71 +484,281 @@ pub(crate) async fn request_middleware(
             .requests_failed
             .fetch_add(1, Ordering::Relaxed);
     }
+    persist_request_audit_outcome(state, audit_id, response.status(), request_id).await;
     response
 }
 
-pub(crate) async fn live_health() -> impl IntoResponse {
-    Json(serde_json::json!({ "status": "ok" }))
+fn should_clear_logout_cookies(path: &str, response: &Response) -> bool {
+    path == "/api/v1/auth/logout" && response.status().is_success()
 }
 
-pub(crate) async fn ready_health(State(state): State<ApiState>) -> impl IntoResponse {
-    let targets_ready = state
-        .store
-        .read()
+async fn persist_request_audit_outcome(
+    state: &ApiState,
+    audit_id: Option<Uuid>,
+    status: StatusCode,
+    request_id: Uuid,
+) {
+    let Some(audit_id) = audit_id else {
+        return;
+    };
+    let Some(repositories) = state.repositories.as_ref() else {
+        return;
+    };
+    let outcome = if status.is_success() {
+        "completed"
+    } else {
+        "failed"
+    };
+    match repositories
+        .auth
+        .update_audit_event_status(audit_id, status.as_u16() as i16, outcome)
         .await
-        .targets
-        .iter()
-        .all(|target| target.state != lxcup_core::TargetState::Disabled);
-    let database_ready = match state.repositories.as_ref() {
-        Some(repositories) => repositories.ansible_jobs.ping().await.is_ok(),
-        None => true,
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::error!(request_id = %request_id, "request audit reservation disappeared before completion")
+        }
+        Err(error) => {
+            tracing::error!(error = ?error, request_id = %request_id, "request audit outcome could not be persisted; reservation remains pending")
+        }
+    }
+}
+
+async fn append_request_audit(
+    state: &ApiState,
+    actor: &super::super::AuthenticatedUser,
+    method: &Method,
+    path: &str,
+    request_id: Uuid,
+    status: StatusCode,
+) {
+    let Some(repositories) = state.repositories.as_ref() else {
+        return;
     };
-    let ready = targets_ready && database_ready;
-    let status = if ready {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    (
-        status,
-        Json(serde_json::json!({
-            "status": if ready { "ready" } else { "degraded" },
-            "checks": {
-                "database": if database_ready { "ready" } else { "not_ready" },
-                "targets": if targets_ready { "ready" } else { "degraded" },
+    let event = request_audit_event(actor, method, path, request_id, status);
+    if let Err(error) = repositories.auth.append_audit_event(&event).await {
+        tracing::error!(error = ?error, "user activity audit event could not be persisted");
+    }
+}
+
+fn request_audit_event(
+    actor: &super::super::AuthenticatedUser,
+    method: &Method,
+    path: &str,
+    request_id: Uuid,
+    status: StatusCode,
+) -> AuthAuditEvent {
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let _ = segments.next();
+    let _ = segments.next();
+    let resource_type = segments.next().unwrap_or("api");
+    let resource_id = segments.next().filter(|value| !is_action_segment(value));
+    AuthAuditEvent {
+        id: Uuid::new_v4(),
+        actor_user_id: Some(actor.id),
+        actor_username: actor.username.clone(),
+        actor_role: actor.role,
+        action: audit_action(method, path),
+        resource_type: resource_type.to_owned(),
+        resource_id: resource_id.map(str::to_owned),
+        request_id: Some(request_id),
+        status_code: status.as_u16() as i16,
+        details: json!({
+            "path": path,
+            "state": if status == StatusCode::PROCESSING {
+                "pending"
+            } else if status.is_success() {
+                "completed"
+            } else {
+                "failed"
             }
-        })),
+        }),
+        created_at: Utc::now(),
+    }
+}
+
+fn audit_action(method: &Method, path: &str) -> String {
+    let parts = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    match (method.as_str(), parts.as_slice()) {
+        ("POST", ["api", "v1", "auth", "logout"]) => "auth.logout".to_owned(),
+        ("POST", ["api", "v1", "auth", "password"]) => "auth.password_changed".to_owned(),
+        ("POST", ["api", "v1", "targets"]) => "target.created".to_owned(),
+        ("DELETE", ["api", "v1", "targets", _]) => "target.deleted".to_owned(),
+        ("POST", ["api", "v1", "targets", _, "docker", "discovery"]) => {
+            "docker.discovery_requested".to_owned()
+        }
+        (
+            "POST",
+            [
+                "api",
+                "v1",
+                "targets",
+                _,
+                "docker",
+                "containers",
+                _,
+                "action",
+            ],
+        ) => "docker.lifecycle_action".to_owned(),
+        (
+            "POST",
+            [
+                "api",
+                "v1",
+                "targets",
+                _,
+                "docker",
+                "containers",
+                _,
+                "image-update-check",
+            ],
+        ) => "docker.image_update_checked".to_owned(),
+        (
+            "POST",
+            [
+                "api",
+                "v1",
+                "targets",
+                _,
+                "docker",
+                "containers",
+                _,
+                "image-update-apply",
+            ],
+        ) => "docker.image_update_applied".to_owned(),
+        ("POST", ["api", "v1", "secrets"]) => "secret.created".to_owned(),
+        ("DELETE", ["api", "v1", "secrets", _]) => "secret.deleted".to_owned(),
+        ("POST", ["api", "v1", "secrets", _, "rotate"]) => "secret.rotated".to_owned(),
+        ("POST", ["api", "v1", "secrets", _, "revoke"]) => "secret.revoked".to_owned(),
+        ("POST", ["api", "v1", "ansible", "jobs"]) => "workflow.queued".to_owned(),
+        ("POST", ["api", "v1", "ansible", "jobs", _, "retry"]) => "workflow.retried".to_owned(),
+        ("POST", ["api", "v1", "ansible", "jobs", _, "reconcile"]) => {
+            "workflow.reconciled".to_owned()
+        }
+        ("POST", ["api", "v1", "schedules"]) => "schedule.created".to_owned(),
+        ("PATCH", ["api", "v1", "schedules", _]) => "schedule.updated".to_owned(),
+        ("POST", ["api", "v1", "update-policies"]) => "update_policy.created".to_owned(),
+        ("DELETE", ["api", "v1", "update-policies", _]) => "update_policy.deleted".to_owned(),
+        ("POST", ["api", "v1", "enrollments"]) => "enrollment.created".to_owned(),
+        ("POST", ["api", "v1", "containers", _, "scans"]) => "scan.started".to_owned(),
+        ("POST", ["api", "v1", "scans", _, "run"]) => "scan.executed".to_owned(),
+        ("POST", ["api", "v1", "containers", _, "plans"]) => "plan.created".to_owned(),
+        ("POST", ["api", "v1", "plans", _, "confirm"]) => "plan.confirmed".to_owned(),
+        ("POST", ["api", "v1", "executions", _, "abort"]) => "execution.aborted".to_owned(),
+        ("POST", ["api", "v1", "executions", _, "run"]) => "execution.started".to_owned(),
+        ("POST", ["api", "v1", "executions", _, "reconcile"]) => "execution.reconciled".to_owned(),
+        ("POST", ["api", "v1", "users"]) => "user.created".to_owned(),
+        ("PATCH", ["api", "v1", "users", _]) => "user.updated".to_owned(),
+        ("DELETE", ["api", "v1", "users", _]) => "user.deleted".to_owned(),
+        ("POST", ["api", "v1", "users", _, "password-reset"]) => "user.password_reset".to_owned(),
+        ("POST", ["api", "v1", "containers", _, "agent"]) => "agent.registered".to_owned(),
+        ("POST", ["api", "v1", "containers", _, "agent", "revoke"]) => "agent.revoked".to_owned(),
+        ("POST", ["api", "v1", "containers", _, "docker", "discover"]) => {
+            "docker.discovery_requested".to_owned()
+        }
+        (
+            "POST",
+            [
+                "api",
+                "v1",
+                "containers",
+                _,
+                "docker",
+                "containers",
+                _,
+                "adopt",
+            ],
+        ) => "docker.container_adopted".to_owned(),
+        ("DELETE", ["api", "v1", "containers", _, "docker", "containers", _]) => {
+            "docker.container_removed".to_owned()
+        }
+        _ => format!("http.{}", method.as_str().to_ascii_lowercase()),
+    }
+}
+
+fn is_action_segment(segment: &str) -> bool {
+    matches!(
+        segment,
+        "password"
+            | "password-reset"
+            | "revoke"
+            | "rotate"
+            | "disable"
+            | "abort"
+            | "retry"
+            | "reconcile"
+            | "action"
+            | "image-update-check"
+            | "image-update-apply"
+            | "discovery"
+            | "discover"
+            | "events"
+            | "audit"
+            | "confirm"
+            | "run"
     )
 }
 
-pub(crate) async fn metrics(State(state): State<ApiState>) -> impl IntoResponse {
-    let mut rendered = state.metrics.render();
-    let (queue, last_seen) = if let Some(repositories) = state.repositories.as_ref() {
-        let (queue, heartbeat) = tokio::join!(
-            repositories.ansible_jobs.queue_metrics(),
-            repositories.worker_heartbeats.latest()
-        );
-        (queue.unwrap_or_default(), heartbeat.ok().flatten())
-    } else {
-        (Default::default(), None)
-    };
-    let queue_age = queue
-        .oldest_queued_at
-        .map(|created| (chrono::Utc::now() - created).num_seconds().max(0))
-        .unwrap_or(0);
-    let heartbeat_age = last_seen
-        .map(|seen| (chrono::Utc::now() - seen).num_seconds().max(0))
-        .unwrap_or(-1);
-    let worker_available = i32::from((0..=10).contains(&heartbeat_age));
-    rendered.push_str(&format!(
-        "# TYPE lxcup_ansible_jobs_queued gauge\nlxcup_ansible_jobs_queued {}\n# TYPE lxcup_ansible_jobs_failed gauge\nlxcup_ansible_jobs_failed {}\n# TYPE lxcup_ansible_queue_age_seconds gauge\nlxcup_ansible_queue_age_seconds {}\n# TYPE lxcup_worker_heartbeat_age_seconds gauge\nlxcup_worker_heartbeat_age_seconds {}\n# TYPE lxcup_worker_available gauge\nlxcup_worker_available {}\n",
-        queue.queued_jobs, queue.failed_jobs, queue_age, heartbeat_age, worker_available
-    ));
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; version=0.0.4",
-        )],
-        rendered,
-    )
+fn session_credential(headers: &HeaderMap) -> Option<(&str, bool)> {
+    if let Some(value) = headers.get(header::AUTHORIZATION) {
+        return value
+            .to_str()
+            .ok()?
+            .strip_prefix("Bearer ")
+            .map(|token| (token, false));
+    }
+    cookie_value(headers, crate::user_auth::SESSION_COOKIE_NAME).map(|token| (token, true))
 }
+
+fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let mut result = None;
+    for header_value in headers.get_all(header::COOKIE).iter() {
+        let cookies = header_value.to_str().ok()?;
+        for cookie in cookies.split(';') {
+            let Some((cookie_name, value)) = cookie.trim().split_once('=') else {
+                continue;
+            };
+            if cookie_name == name {
+                if result.is_some() {
+                    return None;
+                }
+                result = Some(value.trim());
+            }
+        }
+    }
+    result
+}
+
+fn is_unsafe_method(method: &Method) -> bool {
+    !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+fn valid_csrf_request(headers: &HeaderMap) -> bool {
+    let (Some(cookie_token), Some(header_token)) = (
+        cookie_value(headers, crate::user_auth::CSRF_COOKIE_NAME),
+        headers
+            .get("x-csrf-token")
+            .and_then(|value| value.to_str().ok()),
+    ) else {
+        return false;
+    };
+    cookie_token.len() == header_token.len()
+        && bool::from(cookie_token.as_bytes().ct_eq(header_token.as_bytes()))
+}
+
+fn is_admin_only_route(path: &str) -> bool {
+    path.starts_with("/api/v1/users")
+        || path.starts_with("/api/v1/secrets")
+        || path == "/api/v1/auth/audit"
+}
+
+#[path = "health.rs"]
+mod health;
+pub(crate) use health::{live_health, metrics, ready_health};
+
+#[cfg(test)]
+#[path = "auth_tests.rs"]
+mod user_route_tests;

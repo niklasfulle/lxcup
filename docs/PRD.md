@@ -14,12 +14,10 @@ project plan.
 
 ## Users and needs
 
-- **Administrator** — configure the control plane and secrets, manage access,
-  and investigate system-wide health and failures.
-- **Operator** — register and maintain resources, run approved workflows, and
+- **User** — register and maintain resources, run approved workflows, and
   understand their results without handling raw infrastructure credentials.
-- **Viewer** — inspect resource health, inventory, telemetry, notifications,
-  and workflow history without making changes.
+- **Admin** — perform User actions, administer secrets and accounts, inspect
+  user activity, and investigate system-wide health and failures.
 
 All user-facing permissions are enforced by the controller; hiding an action
 in the UI is not an authorization mechanism.

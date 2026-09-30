@@ -188,8 +188,14 @@ export type ApiErrorBody = {
   error?: { code: string; message: string };
   request_id?: string;
 };
-export type AuthRole = "viewer" | "operator" | "admin";
-export type AuthSession = { role: AuthRole; expires_in_seconds: number | null };
+export type AuthRole = "viewer" | "operator" | "admin" | "user";
+export type AuthSession = { role: AuthRole; username?: string | null; must_change_password?: boolean; expires_in_seconds: number | null };
+export type AuthLoginResponse = { user: { id: string; username: string; role: "user" | "admin"; must_change_password: boolean }; expires_in_seconds: number };
+export type AuthStatus = { enabled: boolean };
+export type ManagedUserDto = { id: string; username: string; role: "admin" | "user"; must_change_password: boolean; disabled: boolean; created_at: string; updated_at: string };
+export type UserAuditDto = { id: string; actor_user_id: string | null; actor_username: string; actor_role: "admin" | "user"; action: string; resource_type: string; resource_id: string | null; request_id: string | null; status_code: number; details: Record<string, unknown>; created_at: string };
+export type UserAuditPageDto = { events: UserAuditDto[]; total: number; limit: number; offset: number };
+export type UserAuditFilters = { limit: number; offset: number; actor_username?: string; action?: string; resource?: string; since?: string; until?: string };
 
 export type ApiEvent =
   | { type: "Task"; payload: { task_id: string; state: string } }
@@ -219,7 +225,7 @@ export class ApiClient {
 
   setCredentials(token: string | null, role: AuthRole | null = null) {
     this.token = token;
-    this.role = token === null ? null : role;
+    this.role = role;
   }
 
   setUnauthorizedHandler(handler: (() => void) | null) {
@@ -228,6 +234,18 @@ export class ApiClient {
 
   async getSession(signal?: AbortSignal) {
     return this.get<AuthSession>("/api/v1/auth/session", signal);
+  }
+
+  async getAuthStatus(signal?: AbortSignal) {
+    return this.get<AuthStatus>("/api/v1/auth/status", signal);
+  }
+
+  async login(username: string, password: string, signal?: AbortSignal) {
+    return this.post<AuthLoginResponse>("/api/v1/auth/login", { username, password }, signal);
+  }
+
+  async changePassword(newPassword: string, currentPassword?: string, signal?: AbortSignal) {
+    return this.post<void>("/api/v1/auth/password", { new_password: newPassword, current_password: currentPassword }, signal);
   }
 
   async logout(signal?: AbortSignal) {
@@ -265,7 +283,7 @@ export class ApiClient {
       try {
         const headers = new Headers({ accept: "text/event-stream" });
         if (this.token) headers.set("authorization", `Bearer ${this.token}`);
-        const response = await fetch(`${this.baseUrl}/api/v1/events`, { headers, cache: "no-store", signal: controller.signal });
+        const response = await fetch(`${this.baseUrl}/api/v1/events`, { headers, cache: "no-store", credentials: "same-origin", signal: controller.signal });
         if (response.status === 401) {
           this.unauthorizedHandler?.();
           stopped = true;
@@ -323,6 +341,7 @@ export class ApiClient {
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
       cache: "no-store",
+      credentials: "same-origin",
       headers,
     });
     const text = await response.text();
@@ -350,7 +369,7 @@ export class ApiClient {
     if (this.role === "viewer" && method !== "GET" && method !== "HEAD" && !readOnlyPost) {
       throw new ApiError("Deine Rolle darf keine Änderungen ausführen.", 403, "permission_denied");
     }
-    if (this.role === "operator" && isAdminOnlyRequest(path, method)) {
+    if ((this.role === "operator" || this.role === "user") && isAdminOnlyRequest(path, method)) {
       throw new ApiError("Für diese Aktion ist die Admin-Rolle erforderlich.", 403, "permission_denied");
     }
   }
@@ -358,9 +377,23 @@ export class ApiClient {
   private requestHeaders(init: RequestInit | undefined) {
     const headers = new Headers(init?.headers);
     if (this.token) headers.set("authorization", `Bearer ${this.token}`);
+    if (isUnsafeMethod((init?.method ?? "GET").toUpperCase())) {
+      const csrfToken = readCsrfCookie();
+      if (csrfToken) headers.set("x-csrf-token", csrfToken);
+    }
     headers.set("accept", "application/json");
     return headers;
   }
+}
+
+function isUnsafeMethod(method: string) {
+  return !["GET", "HEAD", "OPTIONS"].includes(method);
+}
+
+function readCsrfCookie() {
+  if (typeof document === "undefined") return undefined;
+  const prefix = "lxcup_csrf=";
+  return document.cookie.split(";").map((cookie) => cookie.trim()).find((cookie) => cookie.startsWith(prefix))?.slice(prefix.length);
 }
 
 function readWorkflowOperation(path: string, method: string, body: BodyInit | null | undefined) {
@@ -377,7 +410,8 @@ function isReadOnlyPost(path: string, operation: string | undefined) {
 
 function isAdminOnlyRequest(path: string, method: string) {
   const destructive = method === "DELETE" || /\/(revoke|disable|abort)$/.test(path);
-  return destructive || (path.startsWith("/api/v1/secrets") && method !== "GET");
+  return destructive || path.startsWith("/api/v1/users") || path.startsWith("/api/v1/audit")
+    || path.startsWith("/api/v1/auth/audit") || path.startsWith("/api/v1/secrets");
 }
 
 function consumeEventFrames(
@@ -423,9 +457,24 @@ export const apiClient = new ApiClient();
 
 export function listTargets(signal?: AbortSignal) { return apiClient.get<TargetDto[]>("/api/v1/targets", signal); }
 export function createTarget(request: CreateTargetRequest, signal?: AbortSignal) { return apiClient.post<TargetDto>("/api/v1/targets", request, signal); }
+export function deleteTarget(targetId: string, confirmed = true, signal?: AbortSignal) { return apiClient.delete<void>(`/api/v1/targets/${encodeURIComponent(targetId)}`, { confirmed }, signal); }
 export function getPackageInventory(targetId: string, signal?: AbortSignal) { return apiClient.get<PackageInventoryDto>(`/api/v1/targets/${targetId}/package-inventory`, signal); }
 export function getTargetTelemetry(targetId: string, signal?: AbortSignal) { return apiClient.get<TelemetryDto>(`/api/v1/targets/${targetId}/telemetry`, signal); }
 export function getTelemetryAlerts(signal?: AbortSignal) { return apiClient.get<TelemetryAlertDto[]>("/api/v1/telemetry-alerts", signal); }
+export function listUsers(signal?: AbortSignal) { return apiClient.get<ManagedUserDto[]>("/api/v1/users", signal); }
+export function createUser(request: { username: string; role: "user" | "admin"; password: string }, signal?: AbortSignal) { return apiClient.post<ManagedUserDto>("/api/v1/users", request, signal); }
+export function updateUser(id: string, request: { role: "user" | "admin"; disabled: boolean }, signal?: AbortSignal) { return apiClient.patch<ManagedUserDto>(`/api/v1/users/${encodeURIComponent(id)}`, request, signal); }
+export function deleteUser(id: string, confirmed = true, signal?: AbortSignal) { return apiClient.delete<void>(`/api/v1/users/${encodeURIComponent(id)}`, { confirmed }, signal); }
+export function resetUserPassword(id: string, password: string, signal?: AbortSignal) { return apiClient.post<void>(`/api/v1/users/${encodeURIComponent(id)}/password-reset`, { password }, signal); }
+export function listUserAudit(filters: UserAuditFilters, signal?: AbortSignal) {
+  const params = new URLSearchParams({ limit: String(filters.limit), offset: String(filters.offset) });
+  for (const key of ["actor_username", "action", "resource", "since", "until"] as const) {
+    const value = filters[key];
+    if (value) params.set(key, value);
+  }
+  return apiClient.get<UserAuditPageDto>(`/api/v1/auth/audit?${params.toString()}`, signal);
+}
+export function changePassword(newPassword: string, currentPassword?: string, signal?: AbortSignal) { return apiClient.changePassword(newPassword, currentPassword, signal); }
 export function listSchedules(signal?: AbortSignal) { return apiClient.get<ScheduleDto[]>("/api/v1/schedules", signal); }
 export function createSchedule(request: Omit<ScheduleDto, "last_run_at" | "next_run_at" | "last_error">, signal?: AbortSignal) { return apiClient.post<ScheduleDto>("/api/v1/schedules", request, signal); }
 export function setScheduleEnabled(id: string, enabled: boolean, signal?: AbortSignal) { return apiClient.patch<ScheduleDto>(`/api/v1/schedules/${encodeURIComponent(id)}`, { enabled }, signal); }

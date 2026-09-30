@@ -1,5 +1,5 @@
 import { useQueries, useQuery, type QueryFunctionContext } from "@tanstack/react-query";
-import { apiClient, getAnsibleJob, getAnsibleJobEvents, getDockerDiscovery, getEnrollment, getPackageInventory, getTargetDockerInventory, getTargetDockerTelemetry, getTargetTelemetry, getTelemetryAlerts, getWorkerAvailability, listAnsibleJobs, listDockerWorkloads, listSchedules, listTargets, listUpdatePolicies, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerDiscoveryRunDto, type DockerTelemetryDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type PackageInventoryDto, type ScheduleDto, type TargetDockerDiscoveryDto, type TargetDto, type TelemetryAlertDto, type TelemetryDto, type UpdatePolicyDto, type WorkerAvailabilityDto } from "./api";
+import { apiClient, getAnsibleJob, getAnsibleJobEvents, getDockerDiscovery, getEnrollment, getPackageInventory, getTargetDockerInventory, getTargetDockerTelemetry, getTargetTelemetry, getTelemetryAlerts, getWorkerAvailability, listAnsibleJobs, listDockerWorkloads, listSchedules, listTargets, listUpdatePolicies, listUserAudit, listUsers, type AnsibleJobDto, type AnsibleJobEvent, type ContainerDto, type DockerDiscoveryRunDto, type DockerTelemetryDto, type DockerWorkloadDto, type EnrollmentDto, type ExecutionSafetyDto, type PackageInventoryDto, type ScheduleDto, type TargetDockerDiscoveryDto, type TargetDto, type TelemetryAlertDto, type TelemetryDto, type UpdatePolicyDto, type WorkerAvailabilityDto } from "./api";
 
 export const queryKeys = {
   targets: ["targets"] as const,
@@ -18,7 +18,17 @@ export const queryKeys = {
   telemetryAlerts: ["telemetry-alerts"] as const,
   schedules: ["schedules"] as const,
   updatePolicies: ["update-policies"] as const,
+  users: ["users"] as const,
+  userAudit: ["user-audit"] as const,
 };
+
+export function useUsers() {
+  return useQuery({ queryKey: queryKeys.users, queryFn: ({ signal }) => listUsers(signal) });
+}
+
+export function useUserAudit() {
+  return useQuery({ queryKey: queryKeys.userAudit, queryFn: ({ signal }) => listUserAudit({ limit: 50, offset: 0 }, signal) });
+}
 
 export function useTargets() {
   return useQuery<TargetDto[]>({

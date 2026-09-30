@@ -34,7 +34,7 @@ export function TargetLifecycle({ target }: Readonly<{ target: TargetDto }>) {
         </div>
         <span className={cn("inline-flex items-center px-2 py-0.5 text-xs font-bold", statusBadgeClass(statusClass))}>{statusLabel}</span>
       </div>
-      {target.agent_version && target.latest_agent_version && target.agent_version !== target.latest_agent_version ? <p className="mt-2 border-l-2 border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-sm" role="status">Agent-Version veraltet: installiert v{target.agent_version}, verfügbar v{target.latest_agent_version}.</p> : null}
+      {target.agent_version && target.latest_agent_version && target.agent_version !== target.latest_agent_version ? <output className="mt-2 block border-l-2 border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-sm">Agent-Version veraltet: installiert v{target.agent_version}, verfügbar v{target.latest_agent_version}.</output> : null}
 
       <ol className="my-4 grid list-none grid-cols-1 gap-3 p-0 md:grid-cols-3">
         {steps.map((step, index) => {

@@ -103,3 +103,7 @@ pub(crate) async fn disable_schedules_for_targets(
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "target_credentials_tests.rs"]
+mod tests;

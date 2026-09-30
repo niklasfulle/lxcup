@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   listSecretAudit: vi.fn(async () => []),
   createSecret: vi.fn(async (request: any) => ({ metadata: { metadata: { id: "secret-new", name: request.name, kind: request.kind, scope: request.scope, created_at: "2026-01-01", updated_at: "2026-01-01" }, status: "active" } })),
   createTarget: vi.fn(async () => ({ ...target, state: "pending" as const })),
+  deleteTarget: vi.fn(async () => undefined),
   createAnsibleJob: vi.fn(async (request: any) => ({ id: request.operation === "health_check" ? "job-health" : "job-deploy", operation: request.operation, playbook: "agent/deploy.yml", playbook_version: "v1", target: { target: "target-1" }, mode: request.mode, status: "queued", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" })),
   retryAnsibleJob: vi.fn(async (id: string) => ({ id, operation: "health_check", playbook: "health.yml", playbook_version: "1", target: { target: "target-1" }, mode: "check", status: "queued", parameter_hash: "hash", created_at: "2026-01-01", updated_at: "2026-01-01" })),
   createEnrollment: vi.fn(async () => ({ id: "enrollment-1" })),
@@ -47,7 +48,10 @@ const mocks = vi.hoisted(() => ({
   subscribe: vi.fn(() => () => undefined),
   setCredentials: vi.fn(),
   setUnauthorizedHandler: vi.fn(),
-  getSession: vi.fn(async () => ({ role: "admin" as const, expires_in_seconds: null })),
+  getSession: vi.fn(async () => ({ role: "admin" as "admin" | "user", expires_in_seconds: null as number | null, username: null as string | null, must_change_password: false })),
+  getAuthStatus: vi.fn(async () => ({ enabled: false })),
+  login: vi.fn(async () => ({ user: { id: "user-1", username: "admin", role: "admin" as const, must_change_password: false }, expires_in_seconds: 28800 })),
+  changePassword: vi.fn(async () => undefined),
   logout: vi.fn(async () => undefined),
 }));
 
@@ -84,7 +88,7 @@ vi.mock("./queries", () => ({
 
 vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
-  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, createUpdatePolicy: mocks.createUpdatePolicy, deleteUpdatePolicy: mocks.deleteUpdatePolicy, getPackageInventory: mocks.getPackageInventory, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, discoverTargetDocker: mocks.discoverTargetDocker, operateTargetDockerContainer: mocks.operateTargetDockerContainer, checkTargetDockerImageUpdate: mocks.checkTargetDockerImageUpdate, applyTargetDockerImageUpdate: mocks.applyTargetDockerImageUpdate, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe, setCredentials: mocks.setCredentials, setUnauthorizedHandler: mocks.setUnauthorizedHandler, getSession: mocks.getSession, logout: mocks.logout } };
+  return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, deleteTarget: mocks.deleteTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, createUpdatePolicy: mocks.createUpdatePolicy, deleteUpdatePolicy: mocks.deleteUpdatePolicy, getPackageInventory: mocks.getPackageInventory, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, discoverTargetDocker: mocks.discoverTargetDocker, operateTargetDockerContainer: mocks.operateTargetDockerContainer, checkTargetDockerImageUpdate: mocks.checkTargetDockerImageUpdate, applyTargetDockerImageUpdate: mocks.applyTargetDockerImageUpdate, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe, setCredentials: mocks.setCredentials, setUnauthorizedHandler: mocks.setUnauthorizedHandler, getSession: mocks.getSession, getAuthStatus: mocks.getAuthStatus, login: mocks.login, changePassword: mocks.changePassword, logout: mocks.logout } };
 });
 
 import { Dashboard } from "./pages/Dashboard";
@@ -936,6 +940,20 @@ describe("onboarding and secret pages", () => {
     expect(screen.getByText("v0.3.1")).toBeInTheDocument();
   });
 
+  it("requires confirmation before removing a resource and explains what is retained", async () => {
+    mocks.targets.data = [target];
+    renderPage(<TargetsPage area="lxc" />);
+    const confirm = vi.mocked(window.confirm);
+    confirm.mockReturnValueOnce(false);
+    await userEvent.click(screen.getByRole("button", { name: "Ressource entfernen" }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Agent wird NICHT auf dem Host deinstalliert"));
+    expect(mocks.deleteTarget).not.toHaveBeenCalled();
+
+    confirm.mockReturnValueOnce(true);
+    await userEvent.click(screen.getByRole("button", { name: "Ressource entfernen" }));
+    await waitFor(() => expect(mocks.deleteTarget).toHaveBeenCalledWith("target-1", true));
+  });
+
   it("uses the same resource-card inventory design for LXC, Linux, and Windows", () => {
     const resources = [
       { area: "lxc" as const, kind: "lxc" as const, badge: "LXC" },
@@ -1148,6 +1166,79 @@ describe("workflow pages", () => {
 });
 
 describe("application shell", () => {
+  it("uses the account login and keeps credential errors generic", async () => {
+    globalThis.localStorage.setItem("lxcup-theme-v2", "light");
+    mocks.getSession.mockRejectedValueOnce(new ApiError("authentication required", 401, "unauthorized"));
+    mocks.getAuthStatus.mockResolvedValueOnce({ enabled: true });
+    mocks.login.mockRejectedValueOnce(new ApiError("authentication required", 401, "unauthorized"));
+    renderPage(<App />);
+    const submit = await screen.findByRole("button", { name: "Anmelden" });
+    const themeToggle = screen.getByRole("button", { name: "Dunkelmodus aktivieren" });
+    expect(screen.getByRole("main").getAttribute("style")).toContain("lxcup-login-background.png");
+    await userEvent.click(themeToggle);
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    expect(screen.getByRole("button", { name: "Hellmodus aktivieren" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Hellmodus aktivieren" }));
+    expect(document.documentElement).toHaveAttribute("data-theme", "light");
+    expect(submit).toBeEnabled();
+    await userEvent.click(submit);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Bitte Benutzername und Passwort eingeben");
+    await userEvent.type(await screen.findByLabelText("Benutzername"), "unknown-user");
+    const password = screen.getByLabelText("Passwort");
+    await userEvent.click(screen.getByRole("button", { name: "Passwort anzeigen" }));
+    expect(password).toHaveAttribute("type", "text");
+    await userEvent.type(password, "incorrect-password");
+    await userEvent.click(screen.getByRole("button", { name: "Anmelden" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Benutzername oder Passwort ungültig.");
+    expect(screen.queryByText("unknown-user existiert nicht")).not.toBeInTheDocument();
+    globalThis.localStorage.removeItem("lxcup-theme-v2");
+  });
+
+  it("shows the custom not-found page to unauthenticated visitors on unknown frontend paths", async () => {
+    mocks.getSession.mockRejectedValueOnce(new ApiError("authentication required", 401, "unauthorized"));
+    mocks.getAuthStatus.mockResolvedValueOnce({ enabled: true });
+    renderPage(<App />, "/missing-frontend-page");
+    expect(await screen.findByRole("heading", { name: "Diese Seite gibt es nicht" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Anmelden" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Zur Übersicht" })).toHaveAttribute("href", "/");
+  });
+
+  it("shows the custom not-found page to authenticated users on unknown frontend paths", async () => {
+    mocks.getSession.mockResolvedValueOnce({ role: "user", username: "operator", must_change_password: false, expires_in_seconds: 28_800 });
+    renderPage(<App />, "/unknown-resource");
+    expect(await screen.findByRole("heading", { name: "Diese Seite gibt es nicht" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Hauptnavigation" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Zur Übersicht" })).toHaveAttribute("href", "/");
+  });
+
+  it("keeps the mandatory first-login password change isolated until it succeeds", async () => {
+    mocks.getSession.mockResolvedValueOnce({ role: "admin", username: "admin", must_change_password: true, expires_in_seconds: 28_800 });
+    renderPage(<App />);
+    expect(await screen.findByText("Erste Anmeldung")).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Hauptnavigation" })).not.toBeInTheDocument();
+    const save = screen.getByRole("button", { name: "Passwort speichern" });
+    expect(save).toBeEnabled();
+    await userEvent.click(save);
+    expect(await screen.findByRole("alert")).toHaveTextContent("mindestens 12 Zeichen");
+    const password = screen.getByLabelText("Neues Passwort");
+    await userEvent.click(screen.getAllByRole("button", { name: "Passwort anzeigen" })[0]!);
+    expect(password).toHaveAttribute("type", "text");
+    await userEvent.type(password, "secure-first-password");
+    await userEvent.type(screen.getByLabelText("Passwort wiederholen"), "secure-first-password");
+    await userEvent.click(save);
+    await waitFor(() => expect(mocks.changePassword).toHaveBeenCalledWith("secure-first-password"));
+    expect(await screen.findByRole("navigation", { name: "Hauptnavigation" })).toBeInTheDocument();
+  });
+
+  it("hides admin navigation and rejects direct admin routes for a user", async () => {
+    mocks.getSession.mockResolvedValueOnce({ role: "user", username: "operator", must_change_password: false, expires_in_seconds: 28_800 });
+    renderPage(<App />, "/admin/users");
+    expect(await screen.findByRole("heading", { name: "Diese Seite gibt es nicht" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Benutzer" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Aktivitätsprotokoll" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Secrets" })).not.toBeInTheDocument();
+  });
+
   it("keeps the activity sidebar preference after reloading the app", async () => {
     window.localStorage.removeItem("lxcup-activity-sidebar-open");
     renderPage(<App />);
@@ -1200,7 +1291,8 @@ describe("application shell", () => {
     expect(screen.queryByRole("link", { name: /LXC einbinden/ })).not.toBeInTheDocument();
     await waitFor(() => expect(mocks.subscribe).toHaveBeenCalled());
     expect(await screen.findByText(/Echtzeitverbindung unterbrochen/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Benachrichtigungen" }));
+    const notificationButton = screen.getByRole("button", { name: "Benachrichtigungen" });
+    await userEvent.click(notificationButton);
     expect(document.querySelector("header")).toHaveClass("z-[60]");
     expect(document.querySelector('aside[aria-label="Aktivitäten"]')).toHaveClass("z-40");
     expect(screen.getAllByText("Fehlgeschlagen").length).toBeGreaterThan(0);
@@ -1212,13 +1304,17 @@ describe("application shell", () => {
     expect(agentNotification).toHaveTextContent("Job · job-ale");
     await userEvent.click(screen.getByRole("button", { name: "Alle als gelesen markieren" }));
     expect(screen.queryByText("2")).not.toBeInTheDocument();
+    expect(notificationButton).toHaveAttribute("aria-expanded", "true");
     await userEvent.click(agentNotification);
+    await userEvent.click(document.body);
+    expect(notificationButton).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Alle als gelesen markieren")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Theme wechseln" }));
     cleanup();
     renderPage(<App />, "/unknown");
     const breadcrumbs = await screen.findByRole("navigation", { name: "Brotkrumennavigation" });
     expect(within(breadcrumbs).getByText("Seite nicht gefunden")).toBeInTheDocument();
-    expect(await screen.findByRole("heading", { name: "Seite nicht gefunden" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Diese Seite gibt es nicht" })).toBeInTheDocument();
   });
 
   it("shows telemetry alerts with resource context and marks recovered alerts resolved", async () => {

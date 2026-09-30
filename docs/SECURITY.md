@@ -19,18 +19,56 @@ to the target, and builds a temporary Ansible inventory and variables file.
 
 ## Authentication and authorization
 
-- Production must run with `LXCUP_ENV=production` and required authentication
-  enabled. Configure separate, strong Admin, Operator, and Viewer bearer tokens
-  through deployment secrets; never use development placeholders.
+- Production must run with `LXCUP_ENV=production`, PostgreSQL, and the
+  account-authentication flow enabled. The first database start creates the
+  `admin` account with temporary password `admin` and requires changing it
+  before any other application endpoint can be used. Change it immediately;
+  subsequent starts never reset an existing account. There is no public
+  registration or email-based account recovery.
+- With PostgreSQL/account authentication enabled, legacy role bearer tokens
+  are not accepted for human API routes. They do not create or map a user and
+  cannot silently gain Admin privileges. Agent heartbeat credentials remain a
+  separate per-target mechanism.
+- Human account sessions are random, expire after eight hours, and are stored
+  only as hashes. The raw session secret is issued only in an `HttpOnly`,
+  `SameSite=Strict` cookie scoped to `/api/v1`; production also sets `Secure`.
+  It is never returned in JSON or exposed to frontend JavaScript, so a page
+  reload can restore the session without putting the credential in web storage.
+  A separate `SameSite=Strict` CSRF cookie is echoed in `X-CSRF-Token` for
+  state-changing cookie-authenticated requests; the controller compares both
+  values before invoking a handler. Legacy explicit bearer-token auth remains
+  supported where account auth is disabled. Passwords use salted
+  PBKDF2-HMAC-SHA256. Usernames and passwords are never returned by management
+  endpoints; password values are omitted from audit metadata.
+- The supported account roles are Admin and User. Admin-only user management,
+  secrets, and user audit APIs are checked server-side, not only hidden in the
+  frontend. User accounts retain ordinary resource/workflow permissions but
+  cannot access those administrative endpoints. The last active Admin cannot
+  be demoted, disabled, or deleted.
+- User activity records include the actor, role, action, resource, status, and
+  request identifier. Login success/failure, logout, password changes, user
+  management, and resource mutations receive stable action identifiers. Audit
+  metadata omits request bodies, passwords, bearer values, secret values, and
+  other credential material. Authenticated write requests first persist a
+  pending audit record before their handler runs, then update its result code;
+  a process interruption therefore leaves a visible pending record instead of
+  silently losing the attempted action. If the reservation cannot be stored,
+  the write handler is not run. Only Admins can read the user audit API.
 - The server authorizes every protected request. Frontend visibility is not an
   authorization boundary. Administrative secret lifecycle operations and
   destructive actions require the corresponding server-side role. Update
   policy deletion requires destructive permission and explicit confirmation;
   the system-wide standard policy cannot be deleted.
-- Use TLS for browser access in production. Do not expose bearer tokens over
-  plaintext HTTP or place them in URLs.
-- The frontend keeps the authenticated token in in-memory application state;
-  do not persist it to Local Storage, session storage, or cookies.
+- Use TLS for browser access in production. Do not expose session or bearer
+  tokens over plaintext HTTP or place them in URLs.
+- Removing a registered target is an Admin-only destructive action that
+  requires explicit confirmation and is rejected while target workflows are
+  active. It removes controller-side target data but does not uninstall the
+  agent or alter the host. Secret records are retained because credentials
+  may be shared; only their reference from the deleted target is removed.
+- Never persist account-session credentials in Local Storage or session
+  storage. The account session is held by the HttpOnly cookie; only the
+  non-authenticating CSRF value is readable by the frontend.
 - Agent heartbeats use the target's agent token, independently of user-session
   tokens. Rotate or revoke credentials using the supported secret lifecycle.
 

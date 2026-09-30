@@ -2,32 +2,15 @@ use super::*;
 
 #[tokio::test]
 async fn postgres_round_trip_uses_only_the_explicit_test_database() {
-    let Ok(database_url) = std::env::var("DATABASE_TEST_URL") else {
-        eprintln!("skipped: DATABASE_TEST_URL is not configured");
+    let Some(test_database) = scoped_test_database("round_trip").await else {
         return;
     };
-
-    let config = DatabaseConfig::from_values(
-        database_url,
-        3,
-        0,
-        Duration::from_secs(10),
-        Duration::from_secs(10),
-        Some(Duration::from_secs(60)),
-    )
-    .expect("test database configuration is valid");
-    let database = Database::connect(&config)
-        .await
-        .expect("test database must be reachable");
-    database
-        .migrate()
-        .await
-        .expect("test migrations must succeed");
+    let database = test_database.database();
 
     let seed = seed_development(database.pool())
         .await
         .expect("development seed must succeed");
-    let repositories = Repositories::new(&database);
+    let repositories = Repositories::new(database);
 
     let loaded_node = repositories
         .nodes
@@ -114,6 +97,23 @@ async fn postgres_round_trip_uses_only_the_explicit_test_database() {
         .expect("plan read must succeed")
         .expect("saved plan must exist");
     assert!(plan.has_same_content_as(&loaded_plan));
+    assert!(
+        repositories
+            .plans
+            .find_by_id(lxcup_core::UpdatePlanId::new())
+            .await
+            .expect("missing plan lookup must succeed")
+            .is_none()
+    );
+    assert!(
+        repositories
+            .plans
+            .list_by_container(seed.container.id)
+            .await
+            .expect("container plan history lookup must succeed")
+            .iter()
+            .any(|saved| saved.id == plan.id)
+    );
 
     let mut execution = Execution::new(plan.id);
     let now = postgres_now();
@@ -128,6 +128,44 @@ async fn postgres_round_trip_uses_only_the_explicit_test_database() {
         .save(&execution)
         .await
         .expect("execution write must succeed");
+    let idempotency_key = format!("round-trip-{}", Uuid::new_v4());
+    assert!(
+        repositories
+            .executions
+            .claim_idempotency_key(&idempotency_key, execution.id)
+            .await
+            .expect("first execution request claim must succeed")
+    );
+    assert!(
+        !repositories
+            .executions
+            .claim_idempotency_key(&idempotency_key, execution.id)
+            .await
+            .expect("duplicate execution request claim must be ignored")
+    );
+    assert_eq!(
+        repositories
+            .executions
+            .find_by_idempotency_key(&idempotency_key)
+            .await
+            .expect("idempotency key read must succeed"),
+        Some(execution.id)
+    );
+    repositories
+        .executions
+        .update(&execution)
+        .await
+        .expect("execution update must succeed");
+    assert_eq!(
+        repositories
+            .executions
+            .find_by_id(execution.id)
+            .await
+            .expect("execution read must succeed")
+            .expect("saved execution must exist")
+            .status,
+        ExecutionStatus::Succeeded
+    );
     let event = ExecutionEvent {
         id: Uuid::new_v4(),
         execution_id: execution.id,
@@ -142,6 +180,37 @@ async fn postgres_round_trip_uses_only_the_explicit_test_database() {
         .append_event(&event)
         .await
         .expect("execution event write must succeed");
+    let result = lxcup_persistence::ExecutionResultRecord {
+        execution_id: execution.id,
+        exit_code: 0,
+        stdout: "first result".to_owned(),
+        stderr: String::new(),
+        created_at: now,
+    };
+    repositories
+        .executions
+        .save_result(&result)
+        .await
+        .expect("execution result write must succeed");
+    let replacement_result = lxcup_persistence::ExecutionResultRecord {
+        stdout: "updated result".to_owned(),
+        ..result
+    };
+    repositories
+        .executions
+        .save_result(&replacement_result)
+        .await
+        .expect("execution result replacement must succeed");
+    assert_eq!(
+        repositories
+            .executions
+            .find_result(execution.id)
+            .await
+            .expect("execution result read must succeed")
+            .expect("saved execution result must exist")
+            .stdout,
+        "updated result"
+    );
     let audit = AuditEvent {
         id: Uuid::new_v4(),
         node_id: Some(seed.node.id),
@@ -157,15 +226,52 @@ async fn postgres_round_trip_uses_only_the_explicit_test_database() {
         .append(&audit)
         .await
         .expect("audit event write must succeed");
+    let secret_event = AuditEvent {
+        id: Uuid::new_v4(),
+        node_id: None,
+        container_id: None,
+        plan_id: None,
+        execution_id: None,
+        event_type: "secret.created".to_owned(),
+        details: json!({ "name": "test-secret", "value": "must-not-be-returned" }),
+        created_at: now + chrono::Duration::seconds(1),
+    };
+    repositories
+        .audit_events
+        .append(&secret_event)
+        .await
+        .expect("secret audit event write must succeed");
+    let secret_events = repositories
+        .audit_events
+        .list_secret_events()
+        .await
+        .expect("secret audit events must be queryable");
+    assert!(secret_events.iter().any(|event| {
+        event.id == secret_event.id
+            && event.node_id.is_none()
+            && event.container_id.is_none()
+            && event.plan_id.is_none()
+            && event.execution_id.is_none()
+            && event.details["name"] == "test-secret"
+    }));
+    sqlx::query("DELETE FROM audit_events WHERE id = $1")
+        .bind(secret_event.id)
+        .execute(database.pool())
+        .await
+        .expect("secret audit test event cleanup must succeed");
+    sqlx::query("DELETE FROM execution_requests WHERE idempotency_key = $1")
+        .bind(&idempotency_key)
+        .execute(database.pool())
+        .await
+        .expect("execution request test row cleanup must succeed");
+    sqlx::query("DELETE FROM execution_results WHERE execution_id = $1")
+        .bind(execution.id.as_uuid())
+        .execute(database.pool())
+        .await
+        .expect("execution result test row cleanup must succeed");
 
-    cleanup(
-        &database,
-        audit.id,
-        event.id,
-        execution.id,
-        plan.id,
-        scan.id,
-    )
-    .await
-    .expect("test cleanup must succeed");
+    cleanup(database, audit.id, event.id, execution.id, plan.id, scan.id)
+        .await
+        .expect("test cleanup must succeed");
+    test_database.finish().await;
 }

@@ -19,10 +19,26 @@ Browser
                                                                      └─ Docker discovery on managed hosts
 ```
 
-In Compose, the frontend, controller, worker, PostgreSQL, and artifact service
-run as separate services. Production may add a TLS reverse proxy. Deployment
+In development Compose, the Vite frontend, controller, worker, PostgreSQL, and
+artifact service run as separate services. Production builds the frontend into
+an Nginx image; Caddy terminates TLS and routes browser traffic to that
+frontend, which forwards `/api/*` to the controller over the private Compose
+network. Deployment
 configuration and service wiring are documented in `compose.yaml` and
 [`../deploy/README.md`](../deploy/README.md).
+
+Human access uses PostgreSQL-backed local accounts and revocable eight-hour
+sessions issued as HttpOnly cookies, with a separate CSRF token for
+state-changing browser requests. Agent heartbeats remain separately
+authenticated with per-target agent tokens. First startup seeds a
+forced-rotation Admin account; public user registration and email recovery are
+not part of the system.
+
+The production frontend serves known client routes from the SPA shell and
+returns that shell with HTTP 404 for unknown browser routes so the application
+can render its custom not-found page. `/api` routes bypass the SPA fallback and
+retain controller responses. The authenticated `/api/v1/events` stream is
+proxied without response buffering.
 
 ## Rust workspace
 
@@ -99,6 +115,16 @@ RAM, and storage thresholds ignore short spikes and break across sample gaps;
 a separate freshness alert appears when managed-target telemetry is older than
 two minutes. The frontend polls the alert endpoint and retains observed
 recovery notices and read state in browser storage.
+
+### Target removal
+
+An Admin can explicitly remove a registered target after all its active
+workflows finish. The controller transactionally deletes target-scoped
+inventory, telemetry, Docker snapshots, workflow history, and associated
+events; recurring schedules and policy scopes are pruned, with empty records
+removed. A minimal deletion audit tombstone remains. This removes the resource
+from lxcup only: it does not connect to the host to uninstall its agent, and
+secret-store records are retained because they may be shared.
 
 ## State and trust boundaries
 

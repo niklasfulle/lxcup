@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { Link, matchPath, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiClient, type AnsibleJobDto, type ApiEvent, type AuthRole, type AuthSession, type ContainerDto, type TargetDto, type TelemetryAlertDto } from "./api";
 import { queryKeys, useAnsibleJobs, useContainers, useTargets, useTelemetryAlerts, useWorkerAvailability } from "./queries";
@@ -15,7 +15,11 @@ import { TargetDetailPage } from "./pages/TargetDetailPage";
 import { DockerPage } from "./pages/DockerPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
 import { UpdatePoliciesPage } from "./pages/UpdatePoliciesPage";
+import UsersPage from "./pages/UsersPage";
+import AuditLogPage from "./pages/AuditLogPage";
+import AccountPasswordPage from "./pages/AccountPasswordPage";
 import { TaskMonitor, type GlobalEvent } from "./components/TaskMonitor";
+import { PasswordInput } from "./components/PasswordInput";
 import { cn } from "./classnames";
 import { loadActivityEvents, saveActivityEvents, syncJobActivity } from "./activityPersistence";
 import { jobStatusBadgeClass, jobStatusLabel } from "./jobStatus";
@@ -27,18 +31,22 @@ const NOTIFICATION_READ_STORAGE_KEY = "lxcup-read-notifications";
 type TelemetryAlertNotification = TelemetryAlertDto & { status: "active" | "resolved"; resolved_at?: string };
 
 export default function App() {
+  const queryClient = useQueryClient();
+  const location = useLocation();
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [accountAuth, setAccountAuth] = useState(false);
 
   useEffect(() => {
     apiClient.setUnauthorizedHandler(() => {
       apiClient.setCredentials(null);
+      queryClient.clear();
       setAuthSession(null);
       setAuthError(null);
     });
     return () => apiClient.setUnauthorizedHandler(null);
-  }, []);
+  }, [queryClient]);
 
   useEffect(() => {
     let active = true;
@@ -46,13 +54,24 @@ export default function App() {
       if (active) { apiClient.setCredentials(null, session.role); setAuthSession(session); setAuthReady(true); }
     }).catch((error: unknown) => {
       if (!active) return;
-      setAuthError(error instanceof ApiError && error.status === 401 ? null : "Die API-Sitzung konnte nicht geprüft werden.");
-      setAuthReady(true);
+      if (error instanceof ApiError && error.status === 401) {
+        void apiClient.getAuthStatus().then((status) => {
+          if (!active) return;
+          setAccountAuth(status.enabled);
+          setAuthReady(true);
+        }).catch(() => {
+          if (active) setAuthReady(true);
+        });
+      } else {
+        setAuthError("Die API-Sitzung konnte nicht geprüft werden.");
+        setAuthReady(true);
+      }
     });
     return () => { active = false; };
   }, []);
 
   const login = async (token: string) => {
+    queryClient.clear();
     apiClient.setCredentials(token);
     try {
       const session = await apiClient.getSession();
@@ -66,17 +85,71 @@ export default function App() {
     }
   };
 
+  const loginAccount = async (username: string, password: string) => {
+    queryClient.clear();
+    try {
+      await apiClient.login(username, password);
+      const session = await apiClient.getSession();
+      apiClient.setCredentials(null, session.role);
+      setAuthSession(session);
+      setAuthError(null);
+      return true;
+    } catch {
+      apiClient.setCredentials(null);
+      return false;
+    }
+  };
+
+  const refreshSession = async () => {
+    const session = await apiClient.getSession();
+    setAuthSession(session);
+  };
+
   const logout = async () => {
     try { await apiClient.logout(); } catch { /* Local logout still clears the credential. */ }
     apiClient.setCredentials(null);
+    queryClient.clear();
     setAuthSession(null);
     setAuthError(null);
   };
 
   if (!authReady) return <AuthMessage message="Sitzung wird geprüft …" />;
   if (authError) return <AuthMessage message={authError} />;
-  if (!authSession) return <LoginScreen onLogin={login} />;
+  if (!authSession) {
+    if (!isKnownApplicationPath(location.pathname)) return <NotFound />;
+    return accountAuth
+      ? <AccountLoginScreen onLogin={loginAccount} />
+      : <LoginScreen onLogin={login} />;
+  }
+  if (authSession.must_change_password) {
+    return <PasswordOnboardingScreen onComplete={() => void refreshSession()} />;
+  }
   return <AuthenticatedApp session={authSession} onLogout={logout} />;
+}
+
+const APPLICATION_ROUTES = [
+  "/",
+  "/servers",
+  "/windows",
+  "/containers",
+  "/docker",
+  "/workflows",
+  "/workflows/:jobId",
+  "/schedules",
+  "/update-policies",
+  "/targets",
+  "/targets/:targetId",
+  "/targets/:targetId/packages",
+  "/containers/:containerId",
+  "/enrollments/new",
+  "/secrets",
+  "/account/security",
+  "/admin/users",
+  "/admin/audit",
+];
+
+function isKnownApplicationPath(pathname: string) {
+  return APPLICATION_ROUTES.some((path) => matchPath({ path, end: true }, pathname) !== null);
 }
 
 function AuthenticatedApp({ session, onLogout }: Readonly<{ session: AuthSession; onLogout: () => void }>) {
@@ -89,15 +162,7 @@ function AuthenticatedApp({ session, onLogout }: Readonly<{ session: AuthSession
   const [streamError, setStreamError] = useState<string | null>(null);
   const [events, setEvents] = useState<GlobalEvent[]>(loadActivityEvents);
   const [activityOpen, setActivityOpen] = useState(() => globalThis.localStorage?.getItem(ACTIVITY_SIDEBAR_STORAGE_KEY) !== "false");
-  const [theme, setTheme] = useState<"dark" | "light">(() => {
-    const stored = globalThis.localStorage?.getItem("lxcup-theme-v2");
-    return stored === "dark" ? "dark" : "light";
-  });
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    globalThis.localStorage?.setItem("lxcup-theme-v2", theme);
-  }, [theme]);
+  const { theme, toggle } = useTheme();
 
   useEffect(() => saveActivityEvents(events), [events]);
 
@@ -154,7 +219,10 @@ function AuthenticatedApp({ session, onLogout }: Readonly<{ session: AuthSession
             <NavigationLink to="/update-policies" label="Update-Policies" icon="policies" />
           </NavigationSection>
           <NavigationSection title="System">
-            <NavigationLink to="/secrets" label="Secrets" icon="secrets" />
+            {session.role === "admin" ? <NavigationLink to="/secrets" label="Secrets" icon="secrets" /> : null}
+            <NavigationLink to="/account/security" label="Passwort" icon="secrets" />
+            {session.role === "admin" ? <NavigationLink to="/admin/users" label="Benutzer" icon="users" /> : null}
+            {session.role === "admin" ? <NavigationLink to="/admin/audit" label="Aktivitätsprotokoll" icon="audit" /> : null}
           </NavigationSection>
         </nav>
         <div className="mt-auto flex items-center gap-3 border border-slate-700 bg-[var(--nav-surface)] px-3 py-3 text-xs" aria-live="polite">
@@ -175,7 +243,7 @@ function AuthenticatedApp({ session, onLogout }: Readonly<{ session: AuthSession
             <NotificationCenter targets={targets.data ?? []} containers={containers.data ?? []} />
             <span className="inline-flex min-h-9 items-center border border-[var(--line)] bg-[var(--paper-muted)] px-2.5 text-[11px] font-semibold text-[var(--muted)] max-[720px]:hidden" title={session.expires_in_seconds === null ? "Authentifizierung in dieser Umgebung deaktiviert" : `Token läuft in ${formatDuration(session.expires_in_seconds)} ab`}>{roleLabel(session.role)}</span>
             <button className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary max-[720px]:px-2" type="button" onClick={onLogout}>Abmelden</button>
-            <button className="inline-flex h-9 w-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] text-sm text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" type="button" onClick={() => setTheme(toggleTheme)} aria-label="Theme wechseln" title="Theme wechseln">{theme === "dark" ? "☼" : "☾"}</button>
+            <button className="inline-flex h-9 w-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] text-sm text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" type="button" onClick={toggle} aria-label="Theme wechseln" title="Theme wechseln">{theme === "dark" ? "☼" : "☾"}</button>
           </div>
         </header>
         <div className={activityOpen ? "grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(0,1fr)_24rem] items-stretch gap-3 overflow-hidden px-4 py-3 transition-[grid-template-columns] duration-300 ease-in-out motion-reduce:transition-none sm:px-6 max-[1000px]:grid-cols-[minmax(0,1fr)]" : "grid min-h-0 min-w-0 flex-1 grid-cols-1 items-stretch overflow-hidden px-4 py-3 transition-[grid-template-columns] duration-300 ease-in-out motion-reduce:transition-none sm:px-6"}>
@@ -199,7 +267,10 @@ function AuthenticatedApp({ session, onLogout }: Readonly<{ session: AuthSession
               <Route path="/schedules" element={<SchedulesPage />} />
               <Route path="/update-policies" element={<UpdatePoliciesPage />} />
               <Route path="/workflows/:jobId" element={<WorkflowDetailPage />} />
-              <Route path="/secrets" element={<SecretsPage />} />
+              <Route path="/secrets" element={session.role === "admin" ? <SecretsPage /> : <NotFound />} />
+              <Route path="/account/security" element={<AccountPasswordPage />} />
+              <Route path="/admin/users" element={session.role === "admin" ? <UsersPage /> : <NotFound />} />
+              <Route path="/admin/audit" element={session.role === "admin" ? <AuditLogPage /> : <NotFound />} />
               <Route path="*" element={<NotFound />} />
             </Routes>
           </div>
@@ -227,18 +298,83 @@ function isMatchingJobEvent(item: GlobalEvent, event: ApiEvent): boolean {
 }
 
 function LoginScreen({ onLogin }: Readonly<{ onLogin: (token: string) => Promise<boolean> }>) {
+  const { theme, toggle } = useTheme();
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const submit = async (event: React.SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (token.trim().length === 0) {
+      setError("Bitte ein API-Token eingeben.");
+      return;
+    }
     setPending(true);
     setError(null);
     const accepted = await onLogin(token.trim());
     setPending(false);
     if (!accepted) { setToken(""); setError("Token ungültig oder abgelaufen. Bitte erneut versuchen."); }
   };
-  return <main className="grid min-h-screen place-items-center bg-[var(--paper)] p-4 text-[var(--ink)]"><form className="grid w-full max-w-sm gap-3 border border-[var(--line)] bg-[var(--panel)] p-5 shadow-xl" onSubmit={(event) => void submit(event)}><div><h1 className="m-0 text-xl font-semibold">Bei lxcup anmelden</h1><p className="mt-1 text-sm text-[var(--muted)]">Gib das Viewer-, Operator- oder Admin-Token ein.</p></div><label className="grid gap-1 text-xs font-semibold">API-Token<input autoComplete="off" autoFocus className="border border-[var(--line)] bg-[var(--paper)] p-2 text-sm" type="password" value={token} onChange={(event) => setToken(event.target.value)} required /></label>{error ? <p className="m-0 text-sm text-[var(--error)]" role="alert">{error}</p> : null}<button className="inline-flex justify-self-start items-center justify-center border border-lxcup-primary bg-lxcup-primary px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={pending || token.trim().length === 0}>{pending ? "Prüfe Token …" : "Anmelden"}</button><small className="text-[var(--muted)]">Das Token bleibt nur bis zum Schließen oder Neuladen dieses Tabs im Arbeitsspeicher.</small></form></main>;
+  return <main className="relative grid min-h-screen place-items-center bg-cover bg-center p-4 text-[var(--ink)]" style={loginBackground(theme)}><LoginThemeToggle theme={theme} onToggle={toggle} /><form className="grid w-full max-w-sm gap-3 border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl backdrop-blur-md" noValidate onSubmit={(event) => void submit(event)}><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">lxcup Control Plane</p><h1 className="m-0 text-xl font-semibold">Bei lxcup anmelden</h1><p className="mt-1 text-sm text-[var(--muted)]">Gib das Viewer-, Operator- oder Admin-Token ein.</p></div><label className="grid gap-1 text-xs font-semibold">API-Token<input autoComplete="off" autoFocus className="border border-[var(--line)] bg-[var(--paper)] p-2 text-sm" type="password" value={token} onChange={(event) => { setToken(event.target.value); setError(null); }} required /></label>{error ? <p className="m-0 text-sm text-[var(--error)]" role="alert">{error}</p> : null}<button className="inline-flex min-h-10 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={pending}>{pending ? "Prüfe Token …" : "Anmelden"}</button><small className="text-[var(--muted)]">Das Token bleibt nur bis zum Schließen oder Neuladen dieses Tabs im Arbeitsspeicher.</small></form></main>;
+}
+
+function AccountLoginScreen({ onLogin }: Readonly<{ onLogin: (username: string, password: string) => Promise<boolean> }>) {
+  const { theme, toggle } = useTheme();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const submit = async (event: React.SubmitEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (username.trim().length === 0 || password.length === 0) {
+      setError("Bitte Benutzername und Passwort eingeben.");
+      return;
+    }
+    setPending(true);
+    setError(null);
+    const accepted = await onLogin(username.trim(), password);
+    setPending(false);
+    if (!accepted) { setPassword(""); setError("Benutzername oder Passwort ungültig."); }
+  };
+  return <main className="relative grid min-h-screen place-items-center bg-cover bg-center p-4 text-[var(--ink)]" style={loginBackground(theme)}><LoginThemeToggle theme={theme} onToggle={toggle} /><form className="grid w-full max-w-sm gap-4 border border-[var(--line)] bg-[var(--panel)] p-6 shadow-2xl backdrop-blur-md" noValidate onSubmit={(event) => void submit(event)}><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">lxcup Control Plane</p><h1 className="m-0 text-xl font-semibold">Anmelden</h1><p className="mt-1 text-sm text-[var(--muted)]">Melde dich mit deinem lokalen Benutzerkonto an.</p></div><label className="grid gap-1.5 text-xs font-semibold">Benutzername<input autoComplete="username" autoFocus className="border border-[var(--line)] bg-[var(--paper)] p-2 text-sm" value={username} onChange={(event) => { setUsername(event.target.value); setError(null); }} required /></label><label className="grid gap-1.5 text-xs font-semibold">Passwort<PasswordInput autoComplete="current-password" className="border border-[var(--line)] bg-[var(--paper)] p-2 text-sm" value={password} onChange={(event) => { setPassword(event.target.value); setError(null); }} required /></label>{error ? <p className="m-0 text-sm text-[var(--error)]" role="alert">{error}</p> : null}<button className="inline-flex min-h-10 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={pending}>{pending ? "Anmeldung läuft …" : "Anmelden"}</button></form></main>;
+}
+
+function LoginThemeToggle({ theme, onToggle }: Readonly<{ theme: "dark" | "light"; onToggle: () => void }>) {
+  return <button className="absolute right-5 top-5 inline-flex h-10 w-10 items-center justify-center border border-white/20 bg-slate-950/60 text-lg text-white shadow-lg backdrop-blur transition-colors hover:bg-slate-800" type="button" onClick={onToggle} aria-label={theme === "dark" ? "Hellmodus aktivieren" : "Dunkelmodus aktivieren"} title={theme === "dark" ? "Hellmodus aktivieren" : "Dunkelmodus aktivieren"}>{theme === "dark" ? "☼" : "☾"}</button>;
+}
+
+function loginBackground(theme: "dark" | "light"): React.CSSProperties {
+  const overlay = theme === "dark" ? "linear-gradient(90deg, rgb(7 15 30 / 78%), rgb(7 15 30 / 48%))" : "linear-gradient(90deg, rgb(244 246 250 / 90%), rgb(244 246 250 / 60%))";
+  return { backgroundImage: `${overlay}, url('/lxcup-login-background.png')` };
+}
+
+function useTheme() {
+  const [theme, setTheme] = useState<"dark" | "light">(() => globalThis.localStorage?.getItem("lxcup-theme-v2") === "dark" ? "dark" : "light");
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    globalThis.localStorage?.setItem("lxcup-theme-v2", theme);
+  }, [theme]);
+  return { theme, toggle: () => setTheme(toggleTheme) };
+}
+
+function PasswordOnboardingScreen({ onComplete }: Readonly<{ onComplete: () => void }>) {
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const submit = async (event: React.SubmitEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (password.length < 12) { setError("Das Passwort muss mindestens 12 Zeichen enthalten."); return; }
+    if (password !== confirmation) { setError("Die Passwörter stimmen nicht überein."); return; }
+    setPending(true);
+    setError(null);
+    try {
+      await apiClient.changePassword(password);
+      onComplete();
+    } catch (error_) {
+      setError(error_ instanceof ApiError ? error_.message : "Das Passwort konnte nicht geändert werden.");
+    } finally { setPending(false); }
+  };
+  return <main className="grid min-h-screen place-items-center bg-[var(--paper)] p-4 text-[var(--ink)]"><form className="grid w-full max-w-md gap-4 border border-[var(--line)] bg-[var(--panel)] p-6 shadow-xl" noValidate onSubmit={(event) => void submit(event)}><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Erste Anmeldung</p><h1 className="m-0 text-xl font-semibold">Passwort ändern</h1><p className="mt-1 text-sm text-[var(--muted)]">Lege ein persönliches Passwort fest, bevor du lxcup weiter verwendest. Mindestens 12 Zeichen.</p></div><label className="grid gap-1.5 text-xs font-semibold">Neues Passwort<PasswordInput autoComplete="new-password" autoFocus className="border border-[var(--line)] bg-[var(--paper)] p-2 text-sm" minLength={12} value={password} onChange={(event) => { setPassword(event.target.value); setError(null); }} required /></label><label className="grid gap-1.5 text-xs font-semibold">Passwort wiederholen<PasswordInput autoComplete="new-password" className="border border-[var(--line)] bg-[var(--paper)] p-2 text-sm" minLength={12} value={confirmation} onChange={(event) => { setConfirmation(event.target.value); setError(null); }} required /></label>{error ? <p className="m-0 text-sm text-[var(--error)]" role="alert">{error}</p> : null}<button className="inline-flex min-h-10 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={pending}>{pending ? "Wird gespeichert …" : "Passwort speichern"}</button></form></main>;
 }
 
 function AuthMessage({ message }: Readonly<{ message: string }>) {
@@ -247,6 +383,7 @@ function AuthMessage({ message }: Readonly<{ message: string }>) {
 
 function roleLabel(role: AuthRole) {
   if (role === "admin") return "Admin";
+  if (role === "user") return "User";
   if (role === "operator") return "Operator";
   return "Viewer";
 }
@@ -268,6 +405,15 @@ function NotificationCenter({ targets, containers }: Readonly<{ targets: TargetD
   const [read, setRead] = useState<string[]>(() => readNotificationIds());
   const [alertHistory, setAlertHistory] = useState<TelemetryAlertNotification[]>(() => readTelemetryAlertHistory());
   const alertStatuses = useRef(new Map(alertHistory.map((alert) => [alert.id, alert.status])));
+  const notificationCenterRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (event.target instanceof Node && !notificationCenterRef.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("click", closeOnOutsideClick);
+    return () => document.removeEventListener("click", closeOnOutsideClick);
+  }, [open]);
   useEffect(() => {
     if (telemetryAlerts.data === undefined) return;
     const reopenedIds = telemetryAlerts.data.filter((alert) => alertStatuses.current.get(alert.id) === "resolved").map((alert) => alert.id);
@@ -307,7 +453,7 @@ function NotificationCenter({ targets, containers }: Readonly<{ targets: TargetD
   const markRead = (id: string) => saveRead(read.includes(id) ? read : [...read, id]);
   const markAllRead = () => saveRead([...new Set([...read, ...failed.map((job) => job.id), ...alertHistory.map((alert) => alert.id)])]);
   const unreadCount = unread.length + telemetryUnread.length;
-  return <div className="relative"><button className="relative inline-flex h-9 w-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] text-sm text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" type="button" aria-label="Benachrichtigungen" aria-expanded={open} onClick={() => setOpen((value) => !value)} title="Benachrichtigungen">🔔{unreadCount ? <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] text-white">{unreadCount}</span> : null}</button>{open ? <div className="absolute right-0 top-10 z-20 w-[min(24rem,calc(100vw-1rem))] overflow-hidden border border-[var(--line)] bg-[var(--panel)] text-[var(--ink)] shadow-xl"><div className="flex items-center justify-between gap-3 border-b border-[var(--line)] px-3 py-2.5"><div><strong className="block">Benachrichtigungen</strong><span className="text-xs text-[var(--muted)]">{failed.length} fehlgeschlagene Workflows · {alertHistory.filter((alert) => alert.status === "active").length} Telemetrie-Warnungen</span></div><button className="text-xs font-semibold text-lxcup-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={unreadCount === 0} onClick={markAllRead}>Alle als gelesen markieren</button></div>{notificationBody(failed, alertHistory, markRead, targets, containers, telemetryAlerts.isLoading)}</div> : null}</div>;
+  return <div className="relative" ref={notificationCenterRef}><button className="relative inline-flex h-9 w-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] text-sm text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" type="button" aria-label="Benachrichtigungen" aria-expanded={open} onClick={() => setOpen((value) => !value)} title="Benachrichtigungen">🔔{unreadCount ? <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] text-white">{unreadCount}</span> : null}</button>{open ? <div className="absolute right-0 top-10 z-20 w-[min(24rem,calc(100vw-1rem))] overflow-hidden border border-[var(--line)] bg-[var(--panel)] text-[var(--ink)] shadow-xl"><div className="flex items-center justify-between gap-3 border-b border-[var(--line)] px-3 py-2.5"><div><strong className="block">Benachrichtigungen</strong><span className="text-xs text-[var(--muted)]">{failed.length} fehlgeschlagene Workflows · {alertHistory.filter((alert) => alert.status === "active").length} Telemetrie-Warnungen</span></div><button className="text-xs font-semibold text-lxcup-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={unreadCount === 0} onClick={markAllRead}>Alle als gelesen markieren</button></div>{notificationBody(failed, alertHistory, markRead, targets, containers, telemetryAlerts.isLoading)}</div> : null}</div>;
 }
 
 function readNotificationIds() {
@@ -342,23 +488,34 @@ function eventQueryKey(resource: string) {
   return queryKeys.containers;
 }
 
+const exactPageTitles: Readonly<Record<string, string>> = {
+  "/": "Übersicht",
+  "/servers": "Linux-Server",
+  "/containers": "LXC-Container",
+  "/docker": "Docker-Container",
+  "/windows": "Windows-Systeme",
+  "/targets": "Ziele",
+  "/enrollments/new": "Ziel einbinden",
+  "/workflows": "Tasks & Workflows",
+  "/schedules": "Zeitpläne",
+  "/update-policies": "Update-Policies",
+  "/secrets": "Secrets",
+  "/account/security": "Passwort ändern",
+  "/admin/users": "Benutzerverwaltung",
+  "/admin/audit": "Aktivitätsprotokoll",
+};
+
+const pageTitleMatchers: readonly { matches: (pathname: string) => boolean; title: string }[] = [
+  { matches: (pathname) => pathname.endsWith("/packages"), title: "Paketinventar" },
+  { matches: (pathname) => pathname.startsWith("/containers/"), title: "LXC-Details" },
+  { matches: (pathname) => pathname.startsWith("/targets/"), title: "Ziel-Details" },
+  { matches: (pathname) => pathname.startsWith("/workflows/"), title: "Workflow-Protokoll" },
+];
+
 function headerPageTitle(pathname: string) {
-  if (pathname === "/") return "Übersicht";
-  if (pathname === "/servers") return "Linux-Server";
-  if (pathname === "/containers") return "LXC-Container";
-  if (pathname.startsWith("/containers/")) return "LXC-Details";
-  if (pathname === "/docker") return "Docker-Container";
-  if (pathname === "/windows") return "Windows-Systeme";
-  if (pathname === "/targets") return "Ziele";
-  if (pathname.endsWith("/packages")) return "Paketinventar";
-  if (pathname.startsWith("/targets/")) return "Ziel-Details";
-  if (pathname === "/enrollments/new") return "Ziel einbinden";
-  if (pathname === "/workflows") return "Tasks & Workflows";
-  if (pathname.startsWith("/workflows/")) return "Workflow-Protokoll";
-  if (pathname === "/schedules") return "Zeitpläne";
-  if (pathname === "/update-policies") return "Update-Policies";
-  if (pathname === "/secrets") return "Secrets";
-  return "Seite nicht gefunden";
+  return exactPageTitles[pathname]
+    ?? pageTitleMatchers.find(({ matches }) => matches(pathname))?.title
+    ?? "Seite nicht gefunden";
 }
 
 function notificationBody(failed: AnsibleJobDto[] | undefined, alerts: TelemetryAlertNotification[], markRead: (id: string) => void, targets: TargetDto[], containers: ContainerDto[], loadingAlerts: boolean) {
@@ -459,7 +616,8 @@ function notificationModeLabel(mode: string) {
 }
 
 function NotFound() {
-  return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]"><h1 className="m-0 text-xl font-semibold tracking-tight">Seite nicht gefunden</h1><Link className="mt-3 inline-block text-xs font-semibold text-lxcup-primary hover:underline" to="/">Zur Übersicht</Link></section>;
+  const location = useLocation();
+  return <section className="grid min-h-[55vh] place-items-center border border-[var(--line)] bg-[var(--panel)] p-6 text-center text-[var(--ink)]"><div className="grid justify-items-center gap-3"><span className="text-6xl font-extrabold tracking-tight text-lxcup-primary" aria-hidden="true">404</span><div><h1 className="mb-1 text-xl font-semibold">Diese Seite gibt es nicht</h1><p className="mb-0 text-sm text-[var(--muted)]">Der aufgerufene Pfad <code>{location.pathname}</code> wurde nicht gefunden.</p></div><Link className="inline-flex min-h-9 items-center border border-lxcup-primary bg-lxcup-primary px-4 text-xs font-semibold text-white hover:bg-blue-700" to="/">Zur Übersicht</Link></div></section>;
 }
 
 function NavigationSection({ title, children }: Readonly<{ title: string; children: React.ReactNode }>) {
@@ -469,7 +627,7 @@ function NavigationSection({ title, children }: Readonly<{ title: string; childr
   </section>;
 }
 
-type NavigationIconName = "overview" | "server" | "lxc" | "docker" | "windows" | "workflows" | "schedules" | "policies" | "secrets";
+type NavigationIconName = "overview" | "server" | "lxc" | "docker" | "windows" | "workflows" | "schedules" | "policies" | "secrets" | "users" | "audit";
 
 function NavigationIcon({ name, active }: Readonly<{ name: NavigationIconName; active: boolean }>) {
   const shapes: Record<NavigationIconName, React.ReactNode> = {
@@ -482,6 +640,8 @@ function NavigationIcon({ name, active }: Readonly<{ name: NavigationIconName; a
     schedules: <><circle cx="10" cy="10" r="7" /><path d="M10 6v4l2.75 1.75M7 2v2M13 2v2" /></>,
     policies: <><path d="M10 2.5 16.5 5v4.6c0 4-2.7 6.7-6.5 8.9-3.8-2.2-6.5-4.9-6.5-8.9V5L10 2.5Z" /><path d="m7 10 2 2 4-4" /></>,
     secrets: <><circle cx="7" cy="11" r="3.5" /><path d="m10 8 6-6 2 2-1.5 1.5L18 7l-2 2-1.5-1.5-2 2M7 11h.01" /></>,
+    users: <><circle cx="8" cy="7" r="3" /><path d="M2.5 18v-1a5.5 5.5 0 0 1 11 0v1M15 5a3 3 0 0 1 0 5.8M16 13a5 5 0 0 1 3.5 4.8V18" /></>,
+    audit: <><path d="M4 3h12v15H4zM7 7h6M7 10h6M7 13h4" /><path d="M2 6v14h12" /></>,
   };
   return <svg className={cn("h-[17px] w-[17px] shrink-0 transition-colors", active ? "text-lxcup-primary" : "text-slate-400 group-hover:text-slate-200")} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{shapes[name]}</svg>;
 }

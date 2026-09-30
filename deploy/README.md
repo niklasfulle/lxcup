@@ -7,10 +7,16 @@ committed to the repository.
 
 ## Checklist
 
-1. Build the server image from `deploy/compose.prod.yaml`.
-2. Set `DATABASE_URL`, `LXCUP_AUTH_*_TOKEN` and `LXCUP_AUTH_REQUIRED=true` in
-   the management LXC secret store.
-3. Put Caddy or another reverse proxy in front of port 8080 and terminate TLS.
+1. Build the controller and production frontend images from
+   `deploy/compose.prod.yaml`. Caddy serves the frontend over HTTPS; the
+   frontend forwards `/api/*` to the controller over the private Compose
+   network.
+2. Set `DATABASE_URL` in the management LXC secret store. The first server
+   start creates the initial `admin` / `admin` account in PostgreSQL and
+   requires a password change at first login; change it immediately.
+3. Keep the controller bound to loopback/private networking and terminate TLS
+   at Caddy. Do not expose the frontend container or controller port directly
+   to the public network.
 4. Allow only the management LXC to reach the agent ports.
 5. Schedule `scripts/backup-postgres.ps1` on the PostgreSQL LXC and regularly
    test restore into a separate test database.

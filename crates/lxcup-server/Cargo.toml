@@ -24,4 +24,10 @@ lxcup-safety = { path = "../lxcup-safety" }
 lxcup-secrets = { path = "../lxcup-secrets" }
 serde.workspace = true
 serde_json.workspace = true
+ring.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true

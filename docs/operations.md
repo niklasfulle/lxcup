@@ -104,46 +104,84 @@ zuerst die Ursache behoben werden; die Ziel-Exklusivität verhindert doppelte
 aktive Jobs. Bei `reconcile_required` wird zuerst der reale Zielzustand
 geprüft, bevor erneut angewendet wird.
 
-## Produktionsauthentifizierung
+## Benutzerkonten und Produktionsauthentifizierung
 
-Für einen produktiven Start muss `LXCUP_ENV=production` gesetzt sein. Der
-Server verweigert den Start, wenn `DATABASE_URL`, `LXCUP_SECRET_MASTER_KEY`
-oder drei unterschiedliche Rollen-Token fehlen. Die Viewer-, Operator- und
-Admin-Tokens müssen jeweils mindestens 16 Zeichen lang sein. Der produktive
-Browserzugriff muss ausschließlich über TLS erfolgen, weil die Bearer-Tokens
-sonst im Klartext übertragen werden. Mit
-`LXCUP_AUTH_TOKEN_TTL_SECONDS` setzt die Token-Lebensdauer ab Serverstart
-(Standard: 8 Stunden). Bei Ablauf müssen Benutzer sich erneut anmelden; der
-Server verweigert dann alle Anfragen mit diesem Token bis zum Neustart mit
-neuen Tokens. Viewer dürfen lesen, Operatoren Ziele konfigurieren und
-freigegebene Workflows ausführen. Nur Administratoren dürfen Secrets anlegen,
-rotieren oder widerrufen sowie destruktive Aktionen ausführen. Sensible
-Workflow-Rechte werden zusätzlich anhand der registrierten Operation
-serverseitig geprüft.
+Für einen produktiven Start müssen `LXCUP_ENV=production`, `DATABASE_URL` und
+`LXCUP_SECRET_MASTER_KEY` konfiguriert sein. Beim ersten PostgreSQL-Start legt
+der Server ein Konto `admin` mit dem temporären Passwort `admin` an. Beim
+ersten Login ist ausschließlich der Passwortwechsel erlaubt; ein neues
+Passwort muss mindestens 12 Zeichen lang sein. Wechsle es sofort. Spätere
+Starts ändern bestehende Konten nicht. Öffentliche Registrierung und
+E-Mail-Wiederherstellung gibt es nicht.
+Beim Upgrade bleiben registrierte Ressourcen und Agent-Credentials erhalten;
+die früheren Viewer-/Operator-/Admin-Controller-Tokens werden für menschliche
+API-Aufrufe nicht in Konten umgewandelt und nicht mehr akzeptiert. Das neue
+Bootstrap-Konto ist der explizite, erzwungene Zugangspfad; Agenten melden sich
+weiterhin separat mit ihrem Ziel-Token an.
+Stelle den Dienst während des ersten Starts und des Passwortwechsels nicht
+öffentlich oder ohne TLS bereit. Der Bootstrap-Login ist absichtlich ein
+bekanntes temporäres Credential und muss unmittelbar rotiert werden.
 
-Das Frontend fragt `/api/v1/auth/session` ab und fordert bei aktivierter
-Authentifizierung ein Viewer-, Operator- oder Admin-Token an. Das Token wird
-nicht in Local Storage oder Cookies gespeichert, sondern nur im Speicher der
-aktuellen Browser-Registerkarte gehalten; Schließen oder Neuladen meldet den
-Benutzer lokal ab. Die Echtzeitverbindung verwendet denselben Bearer-Token über
-eine authentifizierte HTTP-Stream-Anfrage (das Token wird nicht in eine URL
-geschrieben). `/health/live`, `/health/ready` und `/metrics` bleiben öffentlich;
-der Agent-Heartbeat authentifiziert sich separat mit dem pro Ziel hinterlegten
-Agent-Token. API-Antworten enthalten für ungültige/abgelaufene Tokens `401`, für
-authentifizierte Rollen ohne Berechtigung `403`. Logout verwirft das Token im
-Browser, widerruft aber kein serverseitiges Rollen-Token. Für sofortige
-Invalidierung ein Token in der Serverkonfiguration ersetzen und den Server
-neu starten. Tokenwerte werden nie geloggt oder in API-Antworten ausgegeben.
+Admins können Benutzer anlegen, Rollen vergeben, Konten deaktivieren,
+Passwörter zurücksetzen und Benutzer löschen. Neu angelegte oder
+zurückgesetzte Konten müssen ihr Startpasswort beim nächsten Login wechseln.
+Der letzte aktive Admin kann nicht gelöscht, deaktiviert oder herabgestuft
+werden. Nur Admins können Benutzerverwaltung, Secrets und das
+Benutzer-Aktivitätsprotokoll verwenden.
+
+### Administratorzugang wiederherstellen
+
+Wenn noch ein anderer Admin erreichbar ist, setzt dieser das betroffene Konto
+über die Benutzerverwaltung zurück. Gibt es keinen nutzbaren Admin mehr, ist
+ein manueller Datenbank-Notfallzugriff erforderlich: Controller anhalten,
+zuerst ein vollständiges PostgreSQL-Backup erstellen und dann ausschließlich
+die Konten löschen:
+
+```sql
+DELETE FROM auth_users;
+```
+
+Beim nächsten Controllerstart wird dadurch das einmalige `admin`/`admin`
+Bootstrap-Konto neu angelegt und erzwingt den Passwortwechsel. Diese
+Notfallmaßnahme entfernt alle Benutzer und Sitzungen. Audit-Ereignisse bleiben
+erhalten; ihre Benutzer-Fremdschlüssel werden durch `ON DELETE SET NULL`
+entfernt, während der gespeicherte Benutzername/Rollensnapshot erhalten bleibt.
+Nur für eine kontrollierte Wiederherstellung mit Datenbankzugriff verwenden.
+
+Passwörter werden als gesalzene PBKDF2-HMAC-SHA256-Hashes gespeichert.
+`POST /api/v1/auth/login` setzt ein zufälliges HttpOnly-Session-Cookie;
+PostgreSQL speichert nur dessen SHA-256-Hash. Sitzungen laufen nach acht
+Stunden ab und werden beim Neuladen über das HttpOnly-Cookie wiederhergestellt.
+Schreibzugriffe über Cookies benötigen zusätzlich den CSRF-Header. Logout,
+Passwortwechsel/-reset, Rollenänderung, Deaktivierung und Löschen widerrufen
+die betroffenen Sitzung(en); Logout löscht beide Browser-Cookies.
+
+Der produktive Browserzugriff muss ausschließlich über TLS erfolgen. Die
+Echtzeitverbindung verwendet dieselbe HttpOnly-Session über eine authentifizierte
+Same-Origin-HTTP-Stream-Anfrage; Zugangsdaten werden nicht in die URL geschrieben.
+`/health/live`, `/health/ready`, `/metrics`, Account-Status/Login und der
+Agent-Heartbeat haben eigene Exposure-Regeln. Der Agent-Heartbeat
+authentifiziert sich separat mit dem pro Ziel hinterlegten Agent-Token.
+Ungültige/abgelaufene Sessions erhalten `401`, fehlende Berechtigungen `403`.
+Audit-Einträge enthalten keine Request-Bodies, Passwörter, Token oder Secrets.
+Das Audit-Protokoll ist nur für Admins verfügbar und kann nach Benutzer,
+Aktionskennung, Ressource sowie Zeitraum gefiltert und seitenweise gelesen
+werden. Fehlgeschlagene Loginversuche werden ohne Passwort oder Token und ohne
+verifizierte Benutzeridentität als anonyme Ereignisse erfasst.
 
 ## Compose-Onboarding-E2E-Test
 
-Der Test startet den Compose-Stack und ein eigenes Debian-/systemd-SSH-Ziel im
-Profil `onboarding-e2e`. Das Testziel ist nur im Compose-Netz erreichbar. Das
-Skript liest dessen SSH-Host-Key direkt aus dem Container, legt SSH-Passwort,
-Host-Key und Agent-Token als Secrets an und registriert ein separates
-Linux-Server-Ziel. Es wartet auf erfolgreiches Agent-Deployment, Heartbeat,
-Healthcheck und Paketinventar. Außerdem prüft es idempotente Einreihung und
-startet den Worker nach dem Deployment einmal neu.
+Der Test startet einen isolierten Compose-Stack, das Frontend und ein eigenes
+Debian-/systemd-SSH-Ziel im Profil `onboarding-e2e`. Vor dem Ressourcen-Onboarding
+prüft er das einmalige `admin`/`admin`-Bootstrap samt Pflichtwechsel, legt einen
+User an und verifiziert Passwortwechsel, Admin/User-API-Rechte, Audit-Redaction,
+Frontend-Proxy sowie HTTP 404 für unbekannte Frontend-Routen und API-404-Trennung.
+Das Testziel ist nur im Compose-Netz erreichbar. Das Skript liest dessen
+SSH-Host-Key direkt aus dem Container, legt SSH-Passwort, Host-Key und Agent-Token
+als Secrets an und registriert ein separates Linux-Server-Ziel. Es wartet auf
+erfolgreiches Agent-Deployment, Heartbeat, Healthcheck und Paketinventar. Außerdem
+prüft es idempotente Einreihung und startet den Worker nach dem Deployment einmal
+neu.
 
 ```powershell
 .\scripts\test-onboarding-e2e.ps1

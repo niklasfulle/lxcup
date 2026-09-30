@@ -2,7 +2,7 @@ import { cn } from "../classnames";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { adoptDockerWorkload, applyTargetDockerImageUpdate, checkTargetDockerImageUpdate, discoverDockerWorkloads, discoverTargetDocker, operateTargetDockerContainer, removeDockerWorkload, type ContainerDto, type DockerImageUpdateResult, type DockerLifecycleAction, type DockerTelemetryDto, type TargetDockerDiscoveryDto, type TargetDto } from "../api";
+import { adoptDockerWorkload, applyTargetDockerImageUpdate, checkTargetDockerImageUpdate, discoverDockerWorkloads, discoverTargetDocker, operateTargetDockerContainer, removeDockerWorkload, type ContainerDto, type DockerImageUpdateResult, type DockerLifecycleAction, type DockerTelemetryDto, type DockerWorkloadDto, type TargetDockerDiscoveryDto, type TargetDto } from "../api";
 import { queryKeys, useContainers, useDockerDiscovery, useDockerWorkloads, useTargetDockerInventories, useTargetDockerInventory, useTargetDockerTelemetry, useTargets } from "../queries";
 import { dockerDiscoveryFailureLabel } from "../dockerDiscoveryStatus";
 
@@ -12,12 +12,9 @@ export function DockerPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedHost = Number(searchParams.get("host"));
   const [hostId, setHostId] = useState<number | undefined>(() => Number.isSafeInteger(requestedHost) && requestedHost > 0 ? requestedHost : undefined);
-  const [targetId, setTargetId] = useState<string | undefined>(() => searchParams.get("target") ?? undefined);
+  const [targetId, setTargetId] = useState<string | undefined>(() => searchParams.get("target") || undefined);
   const [targetDiscoveryResult, setTargetDiscoveryResult] = useState<TargetDockerDiscoveryDto>();
   const [hostSelectorOpen, setHostSelectorOpen] = useState(false);
-  const [selectedDockerIds, setSelectedDockerIds] = useState<string[]>([]);
-  const [bulkResults, setBulkResults] = useState<Array<{ id: string; success: boolean }>>([]);
-  const [imageChecks, setImageChecks] = useState<Record<string, DockerImageUpdateResult>>({});
   const workloads = useDockerWorkloads(hostId);
   const discovery = useDockerDiscovery(hostId);
   const targetInventory = useTargetDockerInventory(targetId);
@@ -25,12 +22,7 @@ export function DockerPage() {
   const lxcTargets = (targets.data ?? []).filter((target) => target.kind === "lxc");
   const targetInventories = useTargetDockerInventories(lxcTargets.map((target) => target.id));
   const queryClient = useQueryClient();
-  const refresh = () => {
-    if (hostId) {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.dockerWorkloads(hostId) });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.dockerDiscovery(hostId) });
-    }
-  };
+  const refresh = () => refreshDockerHost(queryClient, hostId);
   const discover = useMutation({ mutationFn: () => discoverDockerWorkloads(hostId!), onSuccess: refresh });
   const targetDiscover = useMutation({
     mutationFn: () => discoverTargetDocker(targetId!),
@@ -43,77 +35,222 @@ export function DockerPage() {
       }
     },
   });
-  const lifecycle = useMutation({
-    mutationFn: ({ containerId, action }: { containerId: string; action: DockerLifecycleAction }) => operateTargetDockerContainer(targetId!, containerId, action),
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.targetDockerInventory(targetId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.targetDockerTelemetry(targetId!) }),
-      ]);
-    },
-  });
-  const imageUpdateCheck = useMutation({
-    mutationFn: (containerId: string) => checkTargetDockerImageUpdate(targetId!, containerId),
-    onSuccess: ({ result }) => setImageChecks((current) => ({ ...current, [result.container_id]: result })),
-  });
-  const imageUpdateApply = useMutation({
-    mutationFn: ({ containerId, expectedRemoteImageId }: { containerId: string; expectedRemoteImageId: string }) => applyTargetDockerImageUpdate(targetId!, containerId, expectedRemoteImageId),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.targetDockerInventory(targetId!) });
-    },
-  });
   const adopt = useMutation({ mutationFn: (dockerId: string) => adoptDockerWorkload(hostId!, dockerId), onSuccess: refresh });
   const remove = useMutation({ mutationFn: (dockerId: string) => removeDockerWorkload(hostId!, dockerId), onSuccess: refresh });
   const [removeCandidate, setRemoveCandidate] = useState<{ id: string; name: string } | null>(null);
   const host = (containers.data ?? []).find((container) => container.id === hostId);
   const targetHost = (targets.data ?? []).find((target) => target.id === targetId);
   const availableLxcTargets = lxcTargets.filter((target) => target.state === "managed");
-  const targetSelected = Boolean(targetId);
-  const containerSelected = Boolean(hostId);
-  const inventoryCount = targetSelected
-    ? (targetDiscoveryResult ?? targetInventory.data)?.containers.length ?? 0
-    : containerSelected
-      ? workloads.data?.length ?? 0
-      : targetInventories.reduce((count, inventory) => count + (inventory.data?.available ? inventory.data.containers.length : 0), 0);
+  const inventoryCount = countVisibleDockerInventory(targetId, hostId, targetDiscoveryResult ?? targetInventory.data, workloads.data, targetInventories);
 
   return <>
-    <header className="mb-3 flex items-end justify-between gap-4 border-b border-[var(--line)] pb-3 max-[720px]:flex-col max-[720px]:items-start"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Agent-Inventar</p><h1>Docker-Container</h1><p className="text-[var(--muted)]">Erkannte Docker-Container auf eingebundenen LXC-Agenten aufnehmen und verwalten.</p></div><button className={hostSelectorOpen ? "inline-flex min-h-9 items-center justify-center gap-2 border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" : "inline-flex min-h-9 items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700"} type="button" aria-expanded={hostSelectorOpen} aria-controls="docker-host-selector" onClick={() => setHostSelectorOpen((open) => !open)}>{hostSelectorOpen ? "Schließen" : "Hinzufügen"}</button></header>
+    <DockerPageHeader hostSelectorOpen={hostSelectorOpen} onToggle={() => setHostSelectorOpen((open) => !open)} />
     {hostSelectorOpen ? <DockerHostSelector targets={availableLxcTargets} containers={containers.data ?? []} value={targetId ? `target:${targetId}` : hostId ?? ""} onSelectTarget={(nextTargetId) => { setTargetId(nextTargetId); setHostId(undefined); setTargetDiscoveryResult(undefined); setSearchParams({ target: nextTargetId }); setHostSelectorOpen(false); }} onSelectContainer={(nextHostId) => { setTargetId(undefined); setTargetDiscoveryResult(undefined); setHostId(nextHostId); setSearchParams(nextHostId ? { host: String(nextHostId) } : {}); if (nextHostId !== undefined) setHostSelectorOpen(false); }} /> : null}
-    {targetSelected || containerSelected ? <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]">
-      <SelectedDockerHost targetHost={targetHost} host={host} targetDiscoveryPending={targetDiscover.isPending} discoveryPending={discover.isPending} onDiscoverTarget={() => targetDiscover.mutate()} onDiscoverContainer={() => discover.mutate()} />
-      {targetSelected ? <TargetDockerResult discovery={targetDiscoveryResult ?? targetInventory.data} error={targetDiscover.error ?? targetInventory.error} /> : null}
-      {containerSelected && discover.error ? <p className="font-semibold text-[var(--error)]" role="alert">{discover.error.message}</p> : null}
-      {containerSelected ? <DockerDiscoverySummary hostId={hostId} hostName={host?.name} discovery={discovery} /> : null}
-    </section> : null}
-    <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]">
-      <div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start"><div><h2>Docker-Inventar</h2><p className="text-[var(--muted)]">„Aufnehmen“ verwaltet den Inventareintrag in lxcup; der Docker-Container bleibt unverändert.</p></div><span className="text-[var(--muted)]">{inventoryCount} Container</span></div>
-      {targetSelected && lifecycle.error ? <p className="font-semibold text-[var(--error)]" role="alert">Docker-Aktion fehlgeschlagen: {lifecycle.error.message}</p> : null}
-      {targetSelected ? <>{bulkResults.length > 0 ? <div className="mb-3 border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-sm" role="status"><strong>Bulk-Ergebnis:</strong> {bulkResults.filter((result) => result.success).length} erfolgreich · {bulkResults.filter((result) => !result.success).length} fehlgeschlagen</div> : null}<DockerBulkActionBar selectedCount={selectedDockerIds.length} pending={lifecycle.isPending} onClear={() => setSelectedDockerIds([])} onSelectAll={() => setSelectedDockerIds((targetDiscoveryResult ?? targetInventory.data)?.containers.map((item) => item.id) ?? [])} onAction={async (action) => {
-        const actionLabels: Record<DockerLifecycleAction, string> = { start: "starten", stop: "stoppen", restart: "neu starten" };
-        if (!window.confirm(`${selectedDockerIds.length} Docker-Container wirklich ${actionLabels[action]}?`)) return;
-        setBulkResults([]);
-        const results: Array<{ id: string; success: boolean }> = [];
-        for (const containerId of selectedDockerIds) {
-          try { await lifecycle.mutateAsync({ containerId, action }); results.push({ id: containerId, success: true }); }
-          catch { results.push({ id: containerId, success: false }); }
-        }
-        setBulkResults(results);
-        if (results.every((result) => result.success)) setSelectedDockerIds([]);
-      }} /><div className="mb-3">{targetInventoryContent(targetDiscoveryResult ?? targetInventory.data, (containerId, action) => {
-        const actionLabels: Record<DockerLifecycleAction, string> = { start: "starten", stop: "stoppen", restart: "neu starten" };
-        const containerName = targetInventory.data?.containers.find((container) => container.id === containerId)?.name ?? containerId;
-        if (window.confirm(`Docker-Container „${containerName}“ wirklich ${actionLabels[action]}?`)) lifecycle.mutate({ containerId, action });
-      }, lifecycle.isPending ? lifecycle.variables?.containerId : undefined, selectedDockerIds, (containerId, selected) => setSelectedDockerIds((current) => selected ? [...new Set([...current, containerId])] : current.filter((id) => id !== containerId)), (containerId) => imageUpdateCheck.mutate(containerId), imageChecks, imageUpdateCheck.isPending ? imageUpdateCheck.variables : undefined, (containerId, expectedRemoteImageId, service) => {
-        const container = (targetDiscoveryResult ?? targetInventory.data)?.containers.find((item) => item.id === containerId);
-        const project = composeProjectName(container?.labels ?? []) ?? "Compose-Projekt";
-        const checked = imageChecks[containerId];
-        const currentImage = checked?.current_image_id ?? "aktuellem Image";
-        const configHash = container?.labels.find((label) => label.startsWith("com.docker.compose.config-hash="))?.slice("com.docker.compose.config-hash=".length) ?? "Compose-Konfiguration";
-        if (window.confirm(`${project} · Änderungsplan für Compose-Service „${service}“\n\nVorher: ${container?.image ?? "Image unbekannt"} (${currentImage})\nNachher: ${container?.image ?? "Image unbekannt"} (${expectedRemoteImageId})\nKonfiguration: ${configHash} wird vor dem Apply erneut geprüft; Compose-Mounts/Volumes, Netzwerke, Secrets und Restart-Policy bleiben aus derselben Compose-Datei erhalten.\n\nAuswirkung: Nur dieser Service wird neu erstellt, andere Services bleiben unberührt. Kurze Unterbrechung möglich. Daten im beschreibbaren Container-Layer gehen beim Ersetzen verloren; persistente Daten gehören in Compose-Mounts.`)) imageUpdateApply.mutate({ containerId, expectedRemoteImageId });
-      }, imageUpdateApply.isPending ? imageUpdateApply.variables?.containerId : undefined)} </div>{imageUpdateCheck.error ? <p className="mb-2 text-sm text-[var(--error)]" role="alert">Registry-Updatecheck fehlgeschlagen: {imageUpdateCheck.error.message}</p> : null}{imageUpdateApply.error ? <p className="mb-2 text-sm text-[var(--error)]" role="alert">Compose-Update fehlgeschlagen: {imageUpdateApply.error.message}</p> : null}{imageUpdateApply.isSuccess ? <p className="mb-2 text-sm text-[var(--success)]" role="status">Compose-Service „{imageUpdateApply.data.result.compose_service}“ wurde aktualisiert.</p> : null}<DockerTelemetryPanel discovery={targetDiscoveryResult ?? targetInventory.data} telemetry={targetTelemetry.data} error={targetTelemetry.error} loading={targetTelemetry.isLoading} /></> : containerSelected ? workloadContent(hostId, host?.name, workloads, adopt.isPending, (dockerId) => adopt.mutate(dockerId), (item) => setRemoveCandidate({ id: item.id, name: item.name })) : <SavedTargetDockerInventoryContent targets={lxcTargets} inventories={targetInventories} targetsLoading={targets.isLoading} targetsError={targets.error} />}
-    </section>
+    <SelectedDockerHostPanel targetId={targetId} hostId={hostId} targetHost={targetHost} host={host} targetDiscovery={targetDiscoveryResult ?? targetInventory.data} targetDiscoveryError={targetDiscover.error ?? targetInventory.error} targetDiscoveryPending={targetDiscover.isPending} discoveryPending={discover.isPending} discovery={discovery} discoveryError={discover.error} onDiscoverTarget={() => targetDiscover.mutate()} onDiscoverContainer={() => discover.mutate()} />
+    <DockerInventoryPanel
+      targetId={targetId} hostId={hostId} inventoryCount={inventoryCount} discovery={targetDiscoveryResult ?? targetInventory.data}
+      telemetry={targetTelemetry.data} telemetryError={targetTelemetry.error} telemetryLoading={targetTelemetry.isLoading}
+      targets={lxcTargets} inventories={targetInventories} targetsLoading={targets.isLoading} targetsError={targets.error}
+      hostName={host?.name} workloads={workloads} adoptPending={adopt.isPending} onAdopt={(dockerId) => adopt.mutate(dockerId)} onRemove={(item) => setRemoveCandidate(item)}
+    />
     <RemoveWorkloadDialog candidate={removeCandidate} pending={remove.isPending} error={remove.error} onCancel={() => setRemoveCandidate(null)} onConfirm={() => removeCandidate && remove.mutate(removeCandidate.id, { onSuccess: () => setRemoveCandidate(null) })} />
   </>;
+}
+
+function refreshDockerHost(queryClient: ReturnType<typeof useQueryClient>, hostId: number | undefined) {
+  if (hostId === undefined) return;
+  void queryClient.invalidateQueries({ queryKey: queryKeys.dockerWorkloads(hostId) });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.dockerDiscovery(hostId) });
+}
+
+function countVisibleDockerInventory(
+  targetId: string | undefined,
+  hostId: number | undefined,
+  targetInventory: TargetDockerDiscoveryDto | undefined,
+  workloads: DockerWorkloadDto[] | undefined,
+  inventories: ReturnType<typeof useTargetDockerInventories>,
+) {
+  if (targetId !== undefined) return targetInventory?.containers.length ?? 0;
+  if (hostId !== undefined) return workloads?.length ?? 0;
+  return inventories.reduce((count, inventory) => count + (inventory.data?.available ? inventory.data.containers.length : 0), 0);
+}
+
+function DockerPageHeader({ hostSelectorOpen, onToggle }: Readonly<{ hostSelectorOpen: boolean; onToggle: () => void }>) {
+  const buttonClass = hostSelectorOpen
+    ? "inline-flex min-h-9 items-center justify-center gap-2 border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary"
+    : "inline-flex min-h-9 items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700";
+  return <header className="mb-3 flex items-end justify-between gap-4 border-b border-[var(--line)] pb-3 max-[720px]:flex-col max-[720px]:items-start"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Agent-Inventar</p><h1>Docker-Container</h1><p className="text-[var(--muted)]">Erkannte Docker-Container auf eingebundenen LXC-Agenten aufnehmen und verwalten.</p></div><button className={buttonClass} type="button" aria-expanded={hostSelectorOpen} aria-controls="docker-host-selector" onClick={onToggle}>{hostSelectorOpen ? "Schließen" : "Hinzufügen"}</button></header>;
+}
+
+function SelectedDockerHostPanel({ targetId, hostId, targetHost, host, targetDiscovery, targetDiscoveryError, targetDiscoveryPending, discoveryPending, discovery, discoveryError, onDiscoverTarget, onDiscoverContainer }: Readonly<{
+  targetId: string | undefined;
+  hostId: number | undefined;
+  targetHost: TargetDto | undefined;
+  host: ContainerDto | undefined;
+  targetDiscovery: TargetDockerDiscoveryDto | undefined;
+  targetDiscoveryError: Error | null;
+  targetDiscoveryPending: boolean;
+  discoveryPending: boolean;
+  discovery: ReturnType<typeof useDockerDiscovery>;
+  discoveryError: Error | null;
+  onDiscoverTarget: () => void;
+  onDiscoverContainer: () => void;
+}>) {
+  if (targetId === undefined && hostId === undefined) return null;
+  return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]">
+    <SelectedDockerHost targetHost={targetHost} host={host} targetDiscoveryPending={targetDiscoveryPending} discoveryPending={discoveryPending} onDiscoverTarget={onDiscoverTarget} onDiscoverContainer={onDiscoverContainer} />
+    {targetId === undefined ? null : <TargetDockerResult discovery={targetDiscovery} error={targetDiscoveryError} />}
+    {hostId !== undefined && discoveryError ? <p className="font-semibold text-[var(--error)]" role="alert">{discoveryError.message}</p> : null}
+    {hostId === undefined ? null : <DockerDiscoverySummary hostId={hostId} hostName={host?.name} discovery={discovery} />}
+  </section>;
+}
+
+function DockerInventoryPanel({ targetId, hostId, inventoryCount, discovery, telemetry, telemetryError, telemetryLoading, targets, inventories, targetsLoading, targetsError, hostName, workloads, adoptPending, onAdopt, onRemove }: Readonly<{
+  targetId: string | undefined;
+  hostId: number | undefined;
+  inventoryCount: number;
+  discovery: TargetDockerDiscoveryDto | undefined;
+  telemetry: DockerTelemetryDto | undefined;
+  telemetryError: Error | null;
+  telemetryLoading: boolean;
+  targets: TargetDto[];
+  inventories: ReturnType<typeof useTargetDockerInventories>;
+  targetsLoading: boolean;
+  targetsError: Error | null;
+  hostName: string | undefined;
+  workloads: ReturnType<typeof useDockerWorkloads>;
+  adoptPending: boolean;
+  onAdopt: (dockerId: string) => void;
+  onRemove: (item: { id: string; name: string }) => void;
+}>) {
+  return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]">
+    <div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start"><div><h2>Docker-Inventar</h2><p className="text-[var(--muted)]">„Aufnehmen“ verwaltet den Inventareintrag in lxcup; der Docker-Container bleibt unverändert.</p></div><span className="text-[var(--muted)]">{inventoryCount} Container</span></div>
+    {targetId === undefined ? null : <TargetDockerInventoryWorkspace targetId={targetId} discovery={discovery} telemetry={telemetry} telemetryError={telemetryError} telemetryLoading={telemetryLoading} />}
+    {targetId === undefined && hostId !== undefined ? <WorkloadInventory hostId={hostId} hostName={hostName} workloads={workloads} adoptPending={adoptPending} onAdopt={onAdopt} onRemove={onRemove} /> : null}
+    {targetId === undefined && hostId === undefined ? <SavedTargetDockerInventoryContent targets={targets} inventories={inventories} targetsLoading={targetsLoading} targetsError={targetsError} /> : null}
+  </section>;
+}
+
+function TargetDockerInventoryWorkspace({ targetId, discovery, telemetry, telemetryError, telemetryLoading }: Readonly<{
+  targetId: string;
+  discovery: TargetDockerDiscoveryDto | undefined;
+  telemetry: DockerTelemetryDto | undefined;
+  telemetryError: Error | null;
+  telemetryLoading: boolean;
+}>) {
+  const queryClient = useQueryClient();
+  const [selectedDockerIds, setSelectedDockerIds] = useState<string[]>([]);
+  const [bulkResults, setBulkResults] = useState<Array<{ id: string; success: boolean }>>([]);
+  const [imageChecks, setImageChecks] = useState<Record<string, DockerImageUpdateResult>>({});
+  const lifecycle = useMutation({
+    mutationFn: ({ containerId, action }: { containerId: string; action: DockerLifecycleAction }) => operateTargetDockerContainer(targetId, containerId, action),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.targetDockerInventory(targetId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.targetDockerTelemetry(targetId) }),
+      ]);
+    },
+  });
+  const imageUpdateCheck = useMutation({
+    mutationFn: (containerId: string) => checkTargetDockerImageUpdate(targetId, containerId),
+    onSuccess: ({ result }) => setImageChecks((current) => ({ ...current, [result.container_id]: result })),
+  });
+  const imageUpdateApply = useMutation({
+    mutationFn: ({ containerId, expectedRemoteImageId }: { containerId: string; expectedRemoteImageId: string }) => applyTargetDockerImageUpdate(targetId, containerId, expectedRemoteImageId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.targetDockerInventory(targetId) });
+    },
+  });
+  const pendingContainerId = lifecycle.isPending ? lifecycle.variables?.containerId : undefined;
+  const pendingImageCheckId = imageUpdateCheck.isPending ? imageUpdateCheck.variables : undefined;
+  const pendingImageApplyId = imageUpdateApply.isPending ? imageUpdateApply.variables?.containerId : undefined;
+
+  async function handleBulkAction(action: DockerLifecycleAction) {
+    const results = await runBulkDockerAction(selectedDockerIds, action, lifecycle.mutateAsync);
+    if (results === null) return;
+    setBulkResults(results);
+    if (results.every((result) => result.success)) setSelectedDockerIds([]);
+  }
+
+  function handleSingleAction(containerId: string, action: DockerLifecycleAction) {
+    const containerName = discovery?.containers.find((container) => container.id === containerId)?.name ?? containerId;
+    if (globalThis.confirm(`Docker-Container „${containerName}“ wirklich ${dockerActionLabel(action)}?`)) {
+      lifecycle.mutate({ containerId, action });
+    }
+  }
+
+  function handleImageUpdate(containerId: string, expectedRemoteImageId: string, service: string) {
+    const container = discovery?.containers.find((item) => item.id === containerId);
+    if (globalThis.confirm(composeUpdateConfirmation(container, imageChecks[containerId], service, expectedRemoteImageId))) {
+      imageUpdateApply.mutate({ containerId, expectedRemoteImageId });
+    }
+  }
+
+  return <>
+    {lifecycle.error ? <p className="font-semibold text-[var(--error)]" role="alert">Docker-Aktion fehlgeschlagen: {lifecycle.error.message}</p> : null}
+    {bulkResults.length > 0 ? <output className="mb-3 block border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-sm"><strong>Bulk-Ergebnis:</strong> {bulkResults.filter((result) => result.success).length} erfolgreich · {bulkResults.filter((result) => !result.success).length} fehlgeschlagen</output> : null}
+    <DockerBulkActionBar selectedCount={selectedDockerIds.length} pending={lifecycle.isPending} onClear={() => setSelectedDockerIds([])} onSelectAll={() => setSelectedDockerIds(discovery?.containers.map((item) => item.id) ?? [])} onAction={handleBulkAction} />
+    <div className="mb-3">
+      <TargetDockerInventoryContent discovery={discovery} actions={{
+        onAction: handleSingleAction,
+        pendingContainerId,
+        selectedIds: selectedDockerIds,
+        onSelectionChange: (containerId, selected) => setSelectedDockerIds((current) => selected ? [...new Set([...current, containerId])] : current.filter((id) => id !== containerId)),
+        onCheckUpdate: (containerId) => imageUpdateCheck.mutate(containerId),
+        imageChecks,
+        pendingImageCheckId,
+        onApplyImageUpdate: handleImageUpdate,
+        pendingImageApplyId,
+      }} />
+    </div>
+    {imageUpdateCheck.error ? <p className="mb-2 text-sm text-[var(--error)]" role="alert">Registry-Updatecheck fehlgeschlagen: {imageUpdateCheck.error.message}</p> : null}
+    {imageUpdateApply.error ? <p className="mb-2 text-sm text-[var(--error)]" role="alert">Compose-Update fehlgeschlagen: {imageUpdateApply.error.message}</p> : null}
+    {imageUpdateApply.isSuccess ? <output className="mb-2 block text-sm text-[var(--success)]">Compose-Service „{imageUpdateApply.data.result.compose_service}“ wurde aktualisiert.</output> : null}
+    <DockerTelemetryPanel discovery={discovery} telemetry={telemetry} error={telemetryError} loading={telemetryLoading} />
+  </>;
+}
+
+async function runBulkDockerAction(
+  selectedDockerIds: string[],
+  action: DockerLifecycleAction,
+  runAction: (input: { containerId: string; action: DockerLifecycleAction }) => Promise<unknown>,
+) {
+  const confirmed = globalThis.confirm(`${selectedDockerIds.length} Docker-Container wirklich ${dockerActionLabel(action)}?`);
+  if (!confirmed) return null;
+  const results: Array<{ id: string; success: boolean }> = [];
+  for (const containerId of selectedDockerIds) {
+    try {
+      await runAction({ containerId, action });
+      results.push({ id: containerId, success: true });
+    } catch {
+      results.push({ id: containerId, success: false });
+    }
+  }
+  return results;
+}
+
+function dockerActionLabel(action: DockerLifecycleAction) {
+  const labels: Record<DockerLifecycleAction, string> = { start: "starten", stop: "stoppen", restart: "neu starten" };
+  return labels[action];
+}
+
+function composeUpdateConfirmation(container: TargetDockerDiscoveryDto["containers"][number] | undefined, checked: DockerImageUpdateResult | undefined, service: string, expectedRemoteImageId: string) {
+  const project = composeProjectName(container?.labels ?? []) ?? "Compose-Projekt";
+  const currentImage = checked?.current_image_id ?? "aktuellem Image";
+  const configHash = container?.labels.find((label) => label.startsWith("com.docker.compose.config-hash="))?.slice("com.docker.compose.config-hash=".length) ?? "Compose-Konfiguration";
+  const image = container?.image ?? "Image unbekannt";
+  return `${project} · Änderungsplan für Compose-Service „${service}“\n\nVorher: ${image} (${currentImage})\nNachher: ${image} (${expectedRemoteImageId})\nKonfiguration: ${configHash} wird vor dem Apply erneut geprüft; Compose-Mounts/Volumes, Netzwerke, Secrets und Restart-Policy bleiben aus derselben Compose-Datei erhalten.\n\nAuswirkung: Nur dieser Service wird neu erstellt, andere Services bleiben unberührt. Kurze Unterbrechung möglich. Daten im beschreibbaren Container-Layer gehen beim Ersetzen verloren; persistente Daten gehören in Compose-Mounts.`;
+}
+
+function WorkloadInventory({ hostId, hostName, workloads, adoptPending, onAdopt, onRemove }: Readonly<{
+  hostId: number;
+  hostName: string | undefined;
+  workloads: ReturnType<typeof useDockerWorkloads>;
+  adoptPending: boolean;
+  onAdopt: (dockerId: string) => void;
+  onRemove: (item: { id: string; name: string }) => void;
+}>) {
+  return workloadContent(hostId, hostName, workloads, adoptPending, onAdopt, onRemove);
 }
 
 function DockerHostSelector({ targets, containers, value, onSelectTarget, onSelectContainer }: Readonly<{ targets: TargetDto[]; containers: ContainerDto[]; value: string | number; onSelectTarget: (targetId: string) => void; onSelectContainer: (hostId: number | undefined) => void }>) {
@@ -171,7 +308,7 @@ function DockerTelemetryPanel({ discovery, telemetry, error, loading }: Readonly
 
 function DockerMetric({ label, value, samples }: Readonly<{ label: string; value: number | null; samples: Array<number | null> }>) {
   const points = samples.flatMap((sample, index) => sample === null ? [] : [`${samples.length <= 1 ? 160 : (index / (samples.length - 1)) * 320},${48 - Math.min(sample / 100, 100) * 0.44}`]).join(" ");
-  return <div><div className="flex justify-between text-xs"><strong>{label}</strong><span>{value === null ? "—" : `${(value / 100).toFixed(1)}%`}</span></div><svg className="mt-1 h-12 w-full" viewBox="0 0 320 52" role="img" aria-label={`${label} Verlauf`}><line x1="0" y1="48" x2="320" y2="48" stroke="currentColor" opacity=".2" /><polyline points={points} fill="none" stroke="var(--primary)" strokeWidth="2" /></svg></div>;
+  return <figure className="m-0"><div className="flex justify-between text-xs"><strong>{label}</strong><span>{value === null ? "—" : `${(value / 100).toFixed(1)}%`}</span></div><svg className="mt-1 h-12 w-full" viewBox="0 0 320 52" aria-hidden="true"><line x1="0" y1="48" x2="320" y2="48" stroke="currentColor" opacity=".2" /><polyline points={points} fill="none" stroke="var(--primary)" strokeWidth="2" /></svg><figcaption className="sr-only">{label}-Verlauf als Zeitreihe.</figcaption></figure>;
 }
 
 function formatBytes(bytes: number) {
@@ -189,60 +326,36 @@ function TargetDockerResult({ discovery, error }: Readonly<{ discovery: TargetDo
 }
 
 function DockerBulkActionBar({ selectedCount, pending, onClear, onSelectAll, onAction }: Readonly<{ selectedCount: number; pending: boolean; onClear: () => void; onSelectAll: () => void; onAction: (action: DockerLifecycleAction) => void }>) {
-  return <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border border-[var(--line)] bg-[var(--paper-muted)] p-3"><div className="flex items-center gap-2"><strong className="text-sm">{selectedCount} ausgewählt</strong><button className="border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)]" type="button" onClick={onSelectAll}>Alle auswählen</button><button className="border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)]" type="button" onClick={onClear}>Auswahl leeren</button></div><div className="flex flex-wrap gap-2">{(["start", "stop", "restart"] as const).map((action) => <button key={action} className="border border-[var(--line)] px-2 py-1 text-xs font-semibold hover:border-[var(--primary)] disabled:opacity-50" type="button" disabled={selectedCount === 0 || pending} onClick={() => onAction(action)}>{action === "start" ? "Auswahl starten" : action === "stop" ? "Auswahl stoppen" : "Auswahl neustarten"}</button>)}</div></div>;
+  return <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border border-[var(--line)] bg-[var(--paper-muted)] p-3"><div className="flex items-center gap-2"><strong className="text-sm">{selectedCount} ausgewählt</strong><button className="border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)]" type="button" onClick={onSelectAll}>Alle auswählen</button><button className="border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)]" type="button" onClick={onClear}>Auswahl leeren</button></div><div className="flex flex-wrap gap-2">{(["start", "stop", "restart"] as const).map((action) => <button key={action} className="border border-[var(--line)] px-2 py-1 text-xs font-semibold hover:border-[var(--primary)] disabled:opacity-50" type="button" disabled={selectedCount === 0 || pending} onClick={() => onAction(action)}>{dockerBulkActionLabel(action)}</button>)}</div></div>;
 }
 
-function targetInventoryContent(discovery: TargetDockerDiscoveryDto | undefined, onAction?: (containerId: string, action: DockerLifecycleAction) => void, pendingContainerId?: string, selectedIds: string[] = [], onSelectionChange?: (containerId: string, selected: boolean) => void, onCheckUpdate?: (containerId: string) => void, imageChecks: Record<string, DockerImageUpdateResult> = {}, pendingImageCheckId?: string, onApplyImageUpdate?: (containerId: string, remoteImageId: string, service: string) => void, pendingImageApplyId?: string) {
+function dockerBulkActionLabel(action: DockerLifecycleAction) {
+  const labels: Record<DockerLifecycleAction, string> = { start: "Auswahl starten", stop: "Auswahl stoppen", restart: "Auswahl neustarten" };
+  return labels[action];
+}
+
+type TargetDockerInventoryActions = Readonly<{
+  onAction?: (containerId: string, action: DockerLifecycleAction) => void;
+  pendingContainerId?: string;
+  selectedIds?: string[];
+  onSelectionChange?: (containerId: string, selected: boolean) => void;
+  onCheckUpdate?: (containerId: string) => void;
+  imageChecks?: Record<string, DockerImageUpdateResult>;
+  pendingImageCheckId?: string;
+  onApplyImageUpdate?: (containerId: string, remoteImageId: string, service: string) => void;
+  pendingImageApplyId?: string;
+}>;
+
+function TargetDockerInventoryContent({ discovery, actions = {} }: Readonly<{ discovery: TargetDockerDiscoveryDto | undefined; actions?: TargetDockerInventoryActions }>) {
   if (!discovery) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Wähle ein verbundenes LXC und starte eine Erkennung.</p>;
   if (discovery.containers.length === 0) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">{discovery.reason === "not_discovered" ? "Noch kein Docker-Inventar gespeichert." : "Keine Docker-Container vom Agenten gemeldet."}</p>;
   const events = [...(discovery.events ?? [])].reverse();
   return <>
     <div className="overflow-x-auto">
       <table>
-        <thead><tr>{onAction ? <th>Auswahl</th> : null}<th>Name</th><th>Compose-Projekt</th><th>Image</th><th>Image-Update</th><th>Ports</th><th>Status</th><th>Health</th><th>Neustarts</th><th>OOM</th><th>Image-ID</th>{onAction ? <th>Aktionen</th> : null}</tr></thead>
+        <thead><tr>{actions.onAction ? <th>Auswahl</th> : null}<th>Name</th><th>Compose-Projekt</th><th>Image</th><th>Image-Update</th><th>Ports</th><th>Status</th><th>Health</th><th>Neustarts</th><th>OOM</th><th>Image-ID</th>{actions.onAction ? <th>Aktionen</th> : null}</tr></thead>
         <tbody>
-          {discovery.containers.map((item) => (
-            <tr key={item.id}>
-              {onAction ? <td><input type="checkbox" aria-label={`${item.name} auswählen`} checked={selectedIds.includes(item.id)} onChange={(event) => onSelectionChange?.(item.id, event.target.checked)} /></td> : null}
-              <td>
-                <strong>{item.name}</strong>
-                {item.created_at ? <span className="block text-xs text-[var(--muted)]">Erstellt <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time></span> : null}
-              </td>
-              <td>{composeProjectName(item.labels) ?? "—"}</td>
-              <td>{item.image}</td>
-              <td>
-                {onCheckUpdate ? (() => {
-                  const result = imageChecks[item.id];
-                  return (
-                    <div className="grid gap-1">
-                      <button
-                        className="w-fit border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)] disabled:opacity-50"
-                        type="button"
-                        disabled={pendingImageCheckId !== undefined}
-                        onClick={() => onCheckUpdate(item.id)}
-                      >
-                        {pendingImageCheckId === item.id ? "Prüfe…" : "Update prüfen"}
-                      </button>
-                      {result ? (
-                        <span className={result.status === "update_available" ? "text-xs font-semibold text-[var(--warning)]" : "text-xs text-[var(--muted)]"}>
-                          {dockerImageUpdateLabel(result.status)}
-                          {result.remote_image_id ? ` · ${result.remote_image_id.slice(0, 19)}…` : ""}
-                        </span>
-                      ) : null}
-                      {result?.status === "update_available" && result.remote_image_id && composeUpdateSupported(item.labels) ? <button className="w-fit border border-[var(--warning)] px-2 py-1 text-xs font-semibold text-[var(--warning)] hover:bg-[var(--warning-soft)] disabled:opacity-50" type="button" disabled={pendingImageApplyId !== undefined} onClick={() => onApplyImageUpdate?.(item.id, result.remote_image_id ?? "", composeServiceName(item.labels) ?? "")}>{pendingImageApplyId === item.id ? "Aktualisiere…" : "Compose-Service aktualisieren"}</button> : null}
-                    </div>
-                  );
-                })() : "—"}
-              </td>
-              <td>{item.ports.length > 0 ? item.ports.join(", ") : "—"}</td>
-              <td>{item.state} · {item.status}</td>
-              <td>{item.health ?? "Nicht gemeldet"}</td>
-              <td>{item.restart_count ?? "—"}</td>
-              <td>{item.oom_killed === true ? "Ja" : item.oom_killed === false ? "Nein" : "—"}</td>
-              <td title={item.image_id ?? undefined}>{item.image_id ? `${item.image_id.slice(0, 19)}…` : "—"}</td>
-              {onAction ? <td><div className="flex flex-wrap gap-1">{item.state === "running" ? <><button className="border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)] disabled:opacity-50" type="button" disabled={pendingContainerId !== undefined} onClick={() => onAction(item.id, "restart")}>{pendingContainerId === item.id ? "Wird ausgeführt…" : "Neustarten"}</button><button className="border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)] disabled:opacity-50" type="button" disabled={pendingContainerId !== undefined} onClick={() => onAction(item.id, "stop")}>Stoppen</button></> : <button className="border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)] disabled:opacity-50" type="button" disabled={pendingContainerId !== undefined} onClick={() => onAction(item.id, "start")}>{pendingContainerId === item.id ? "Wird ausgeführt…" : "Starten"}</button>}</div></td> : null}
-            </tr>
-          ))}
+          {discovery.containers.map((item) => <TargetDockerInventoryRow key={item.id} item={item} actions={actions} />)}
         </tbody>
       </table>
     </div>
@@ -258,6 +371,51 @@ function targetInventoryContent(discovery: TargetDockerDiscoveryDto | undefined,
       </ul>
     </section> : null}
   </>;
+}
+
+function TargetDockerInventoryRow({ item, actions }: Readonly<{ item: TargetDockerDiscoveryDto["containers"][number]; actions: TargetDockerInventoryActions }>) {
+  const update = actions.imageChecks?.[item.id];
+  return <tr>
+    {actions.onAction ? <td><input type="checkbox" aria-label={`${item.name} auswählen`} checked={actions.selectedIds?.includes(item.id) ?? false} onChange={(event) => actions.onSelectionChange?.(item.id, event.target.checked)} /></td> : null}
+    <td><strong>{item.name}</strong>{item.created_at ? <span className="block text-xs text-[var(--muted)]">Erstellt <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time></span> : null}</td>
+    <td>{composeProjectName(item.labels) ?? "—"}</td>
+    <td>{item.image}</td>
+    <td><DockerImageUpdateControls item={item} actions={actions} result={update} /></td>
+    <td>{item.ports.length > 0 ? item.ports.join(", ") : "—"}</td>
+    <td>{item.state} · {item.status}</td>
+    <td>{item.health ?? "Nicht gemeldet"}</td>
+    <td>{item.restart_count ?? "—"}</td>
+    <td>{oomStatusLabel(item.oom_killed)}</td>
+    <td title={item.image_id ?? undefined}>{item.image_id ? `${item.image_id.slice(0, 19)}…` : "—"}</td>
+    {actions.onAction ? <DockerLifecycleActions item={item} actions={actions} /> : null}
+  </tr>;
+}
+
+function DockerImageUpdateControls({ item, actions, result }: Readonly<{ item: TargetDockerDiscoveryDto["containers"][number]; actions: TargetDockerInventoryActions; result: DockerImageUpdateResult | undefined }>) {
+  if (!actions.onCheckUpdate) return "—";
+  const canApply = result?.status === "update_available" && result.remote_image_id !== undefined && composeUpdateSupported(item.labels);
+  const serviceName = composeServiceName(item.labels) ?? "";
+  return <div className="grid gap-1">
+    <button className="w-fit border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)] disabled:opacity-50" type="button" disabled={actions.pendingImageCheckId !== undefined} onClick={() => actions.onCheckUpdate?.(item.id)}>{actions.pendingImageCheckId === item.id ? "Prüfe…" : "Update prüfen"}</button>
+    {result ? <span className={result.status === "update_available" ? "text-xs font-semibold text-[var(--warning)]" : "text-xs text-[var(--muted)]"}>{dockerImageUpdateLabel(result.status)}{result.remote_image_id ? ` · ${result.remote_image_id.slice(0, 19)}…` : ""}</span> : null}
+    {canApply ? <button className="w-fit border border-[var(--warning)] px-2 py-1 text-xs font-semibold text-[var(--warning)] hover:bg-[var(--warning-soft)] disabled:opacity-50" type="button" disabled={actions.pendingImageApplyId !== undefined} onClick={() => actions.onApplyImageUpdate?.(item.id, result.remote_image_id!, serviceName)}>{actions.pendingImageApplyId === item.id ? "Aktualisiere…" : "Compose-Service aktualisieren"}</button> : null}
+  </div>;
+}
+
+function DockerLifecycleActions({ item, actions }: Readonly<{ item: TargetDockerDiscoveryDto["containers"][number]; actions: TargetDockerInventoryActions }>) {
+  const busy = actions.pendingContainerId !== undefined;
+  const action: DockerLifecycleAction = item.state === "running" ? "restart" : "start";
+  const label = item.state === "running" ? "Neustarten" : "Starten";
+  return <td><div className="flex flex-wrap gap-1">
+    <button className="border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)] disabled:opacity-50" type="button" disabled={busy} onClick={() => actions.onAction?.(item.id, action)}>{actions.pendingContainerId === item.id ? "Wird ausgeführt…" : label}</button>
+    {item.state === "running" ? <button className="border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)] disabled:opacity-50" type="button" disabled={busy} onClick={() => actions.onAction?.(item.id, "stop")}>Stoppen</button> : null}
+  </div></td>;
+}
+
+function oomStatusLabel(value: boolean | null | undefined) {
+  if (value === true) return "Ja";
+  if (value === false) return "Nein";
+  return "—";
 }
 
 function dockerInventoryEventLabel(kind: NonNullable<TargetDockerDiscoveryDto["events"]>[number]["kind"]) {
@@ -328,7 +486,7 @@ function SavedTargetDockerInventoryContent({ targets, inventories, targetsLoadin
           <div className="grid gap-3">{Array.from(groups.entries()).map(([project, containers]) => {
             const ids = new Set(containers.map((item) => item.id));
             const groupedInventory = { ...inventory, containers, events: (inventory.events ?? []).filter((event) => ids.has(event.container_id)) };
-            return <section className="border border-[var(--line)] p-3" key={project}><h4 className="mb-2 text-xs font-bold uppercase tracking-wide text-[var(--muted)]">Compose · {project} <span className="font-normal">· {containers.length} Container</span></h4>{targetInventoryContent(groupedInventory)}</section>;
+            return <section className="border border-[var(--line)] p-3" key={project}><h4 className="mb-2 text-xs font-bold uppercase tracking-wide text-[var(--muted)]">Compose · {project} <span className="font-normal">· {containers.length} Container</span></h4><TargetDockerInventoryContent discovery={groupedInventory} /></section>;
           })}</div>
         </article>
       ))}

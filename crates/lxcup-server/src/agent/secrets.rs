@@ -291,3 +291,7 @@ pub(crate) async fn record_secret_audit(
 pub(crate) fn parse_secret_id(value: &str) -> Result<SecretId, ApiError> {
     Ok(SecretId::from_uuid(parse_uuid(value, "secret id")?))
 }
+
+#[cfg(test)]
+#[path = "secrets_tests.rs"]
+mod tests;

@@ -189,3 +189,145 @@ async fn ensure_enrollment_followups(
     .await
     .map(|_| ())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ApiStore;
+    use lxcup_core::{
+        Container, ContainerStatus, NodeId, OperatingSystem, Target, TargetId, TargetKind,
+        TargetTransport,
+    };
+
+    fn container(id: u64) -> lxcup_core::Container {
+        Container::new(
+            ContainerId::new(id),
+            NodeId::new(),
+            format!("container-{id}"),
+            OperatingSystem::Debian,
+            ContainerStatus::Running,
+        )
+        .unwrap()
+    }
+
+    fn request(container_id: u64, idempotency_key: &str) -> CreateEnrollmentRequest {
+        CreateEnrollmentRequest {
+            container_id,
+            target_id: None,
+            idempotency_key: idempotency_key.to_owned(),
+            start_onboarding: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn enrollment_rejects_invalid_container_target_and_idempotency_combinations() {
+        let state = ApiState::new();
+        assert_eq!(
+            create_enrollment(State(state.clone()), Json(request(0, "valid-key")))
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_container_id"
+        );
+        assert_eq!(
+            create_enrollment(State(state.clone()), Json(request(100, "valid-key")))
+                .await
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+        let containers = vec![container(101), container(102)];
+        let linux_target = Target::new(
+            "not-an-lxc",
+            TargetKind::LinuxServer,
+            "192.0.2.252",
+            TargetTransport::Ssh,
+            lxcup_core::SecretId::new(),
+            lxcup_core::SecretId::new(),
+        )
+        .unwrap();
+        let wrong_kind_id = linux_target.id;
+        let lxc_target = Target::new(
+            "linked-lxc",
+            TargetKind::Lxc,
+            "192.0.2.253",
+            TargetTransport::Ssh,
+            lxcup_core::SecretId::new(),
+            lxcup_core::SecretId::new(),
+        )
+        .unwrap();
+        let lxc_target_id = lxc_target.id;
+        let mut linked =
+            Enrollment::new(ContainerId::new(102), "existing-link".to_owned()).unwrap();
+        linked.target_id = Some(lxc_target_id);
+        let store = ApiStore {
+            containers,
+            targets: vec![linux_target, lxc_target],
+            enrollments: vec![linked],
+            ..ApiStore::default()
+        };
+        let state = ApiState::new();
+        *state.store.write().await = store;
+
+        let mut wrong_kind = request(101, "wrong-kind");
+        wrong_kind.target_id = Some(wrong_kind_id);
+        assert_eq!(
+            create_enrollment(State(state.clone()), Json(wrong_kind))
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_enrollment_target"
+        );
+        let mut missing_target = request(101, "missing-target");
+        missing_target.target_id = Some(TargetId::new());
+        assert_eq!(
+            create_enrollment(State(state.clone()), Json(missing_target))
+                .await
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+        let mut target_in_use = request(101, "target-in-use");
+        target_in_use.target_id = Some(lxc_target_id);
+        assert_eq!(
+            create_enrollment(State(state.clone()), Json(target_in_use))
+                .await
+                .unwrap_err()
+                .code,
+            "target_already_enrolled"
+        );
+        assert_eq!(
+            create_enrollment(State(state.clone()), Json(request(101, "")))
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_idempotency_key"
+        );
+
+        let mut active =
+            Enrollment::new(ContainerId::new(101), "already-active".to_owned()).unwrap();
+        active.target_id = None;
+        state.store.write().await.enrollments.push(active);
+        assert_eq!(
+            create_enrollment(State(state.clone()), Json(request(101, "second-key")))
+                .await
+                .unwrap_err()
+                .code,
+            "enrollment_in_progress"
+        );
+        assert_eq!(
+            get_enrollment(State(state.clone()), Path("invalid".to_owned()))
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_id"
+        );
+        assert_eq!(
+            get_enrollment(State(state), Path(uuid::Uuid::new_v4().to_string()))
+                .await
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+    }
+}

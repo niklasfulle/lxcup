@@ -26,6 +26,11 @@ pub struct CreateTargetRequest {
     pub agent_secret_ref: SecretId,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct DeleteTargetRequest {
+    pub confirmed: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct TargetDto {
     pub id: TargetId,
@@ -141,6 +146,111 @@ pub(super) async fn get_target(
         target,
         store.agent_reports.get(&target.id),
     ))))
+}
+
+pub(super) async fn delete_target(
+    State(state): State<ApiState>,
+    Extension(actor_role): Extension<ActorRole>,
+    Path(target_id): Path<String>,
+    JsonBody(request): JsonBody<DeleteTargetRequest>,
+) -> Result<StatusCode, ApiError> {
+    require_permission(actor_role, Permission::Destructive)?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "confirmation_required",
+            "removing a target requires explicit confirmation",
+        ));
+    }
+    let target_id = TargetId::from_uuid(parse_uuid(&target_id, "target id")?);
+    let _scheduler_guard = state.scheduler_lock.lock().await;
+    let mut coordinator = state.ansible.write().await;
+    if coordinator.target_has_active_jobs(target_id) {
+        return Err(ApiError::conflict(
+            "target_busy",
+            "wait for active workflows to finish before removing this target",
+        ));
+    }
+    let target = state
+        .store
+        .read()
+        .await
+        .targets
+        .iter()
+        .find(|target| target.id == target_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("target not found"))?;
+
+    if let Some(repositories) = state.repositories.as_ref() {
+        match repositories
+            .targets
+            .delete_with_related_data(target_id, &format!("{actor_role:?}").to_lowercase())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Err(ApiError::not_found("target not found")),
+            Err(lxcup_persistence::RepositoryError::TargetBusy) => {
+                return Err(ApiError::conflict(
+                    "target_busy",
+                    "wait for active workflows to finish before removing this target",
+                ));
+            }
+            Err(_) => return Err(ApiError::storage()),
+        }
+    }
+
+    coordinator
+        .remove_target_jobs(target_id)
+        .map_err(|_| ApiError::conflict("target_busy", "the target has active workflows"))?;
+    {
+        let mut store = state.store.write().await;
+        store.targets.retain(|item| item.id != target_id);
+        store.agent_reports.remove(&target_id);
+        store.target_docker_inventories.remove(&target_id);
+        store.schedules.iter_mut().for_each(|schedule| {
+            schedule.target_ids.retain(|id| *id != target_id);
+        });
+        store
+            .schedules
+            .retain(|schedule| !schedule.target_ids.is_empty());
+        let removed_policy_ids = store
+            .update_policies
+            .iter()
+            .filter(|policy| {
+                policy.allowed_targets.len() == 1 && policy.allowed_targets[0] == target_id
+            })
+            .map(|policy| policy.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        store.update_policies.iter_mut().for_each(|policy| {
+            policy.allowed_targets.retain(|id| *id != target_id);
+        });
+        store
+            .update_policies
+            .retain(|policy| !removed_policy_ids.contains(&policy.id));
+        store.schedules.retain(|schedule| {
+            !schedule
+                .policy_id
+                .as_ref()
+                .is_some_and(|id| removed_policy_ids.contains(id))
+        });
+        store
+            .enrollments
+            .retain(|enrollment| enrollment.target_id != Some(target_id));
+        let retained_enrollments = store
+            .enrollments
+            .iter()
+            .map(|item| item.id)
+            .collect::<std::collections::HashSet<_>>();
+        store
+            .enrollment_keys
+            .retain(|_, id| retained_enrollments.contains(id));
+    }
+    drop(coordinator);
+    state.publish(ApiEvent::status(
+        "target",
+        target.id.as_uuid().to_string(),
+        "deleted",
+    ));
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(super) async fn receive_agent_heartbeat(
@@ -521,6 +631,123 @@ pub(super) fn require_permission(role: ActorRole, permission: Permission) -> Res
 mod tests {
     use super::*;
     use axum::Extension;
+
+    fn test_target() -> Target {
+        Target::new(
+            "removal-test",
+            TargetKind::Lxc,
+            "192.0.2.77",
+            TargetTransport::Ssh,
+            SecretId::new(),
+            SecretId::new(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn target_removal_requires_admin_confirmation_and_clears_scoped_state() {
+        let state = ApiState::new();
+        let target = test_target();
+        state.store.write().await.targets.push(target.clone());
+        state.store.write().await.agent_reports.insert(
+            target.id,
+            lxcup_agent::AgentHeartbeat {
+                target_id: target.id.as_uuid(),
+                info: lxcup_agent::AgentInfo {
+                    agent_id: "agent-removal-test".to_owned(),
+                    platform: lxcup_agent::AgentPlatform::Linux,
+                    hostname: "removal-test".to_owned(),
+                    version: "0.4.0".to_owned(),
+                    protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
+                },
+                metrics: lxcup_agent::AgentMetrics {
+                    collected_at: Utc::now(),
+                    commands_total: 0,
+                    commands_failed: 0,
+                    last_command_at: None,
+                },
+                sent_at: Utc::now(),
+                telemetry: Default::default(),
+                docker_telemetry: Default::default(),
+            },
+        );
+
+        let forbidden = delete_target(
+            State(state.clone()),
+            Extension(ActorRole::Operator),
+            Path(target.id.as_uuid().to_string()),
+            JsonBody(DeleteTargetRequest { confirmed: true }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(forbidden.status, StatusCode::FORBIDDEN);
+
+        let unconfirmed = delete_target(
+            State(state.clone()),
+            Extension(ActorRole::Admin),
+            Path(target.id.as_uuid().to_string()),
+            JsonBody(DeleteTargetRequest { confirmed: false }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unconfirmed.code, "confirmation_required");
+
+        let status = delete_target(
+            State(state.clone()),
+            Extension(ActorRole::Admin),
+            Path(target.id.as_uuid().to_string()),
+            JsonBody(DeleteTargetRequest { confirmed: true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let store = state.store.read().await;
+        assert!(store.targets.is_empty());
+        assert!(!store.agent_reports.contains_key(&target.id));
+        assert!(store.update_policies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn target_removal_is_rejected_while_a_workflow_is_active() {
+        let state = ApiState::new();
+        let mut target = test_target();
+        target.mark_managed();
+        let target_id = target.id;
+        state.store.write().await.targets.push(target);
+        let request = lxcup_ansible::AnsibleJobRequest {
+            operation: lxcup_ansible::AnsibleOperation::HealthCheck,
+            target: lxcup_core::ResourceTarget::Target(target_id),
+            lifecycle: lxcup_core::ResourceLifecycle::Managed,
+            mode: lxcup_ansible::ExecutionMode::Check,
+            parameters: lxcup_ansible::AnsibleParameters::HealthCheck,
+            secret_refs: Vec::new(),
+            idempotency_key: "remove-target-active-job".to_owned(),
+            confirmed: true,
+            actor_role: ActorRole::Admin,
+        };
+        let job = match state.ansible.write().await.submit(request).unwrap() {
+            lxcup_ansible::JobSubmission::Created(job) => job,
+            lxcup_ansible::JobSubmission::Duplicate(_) => unreachable!(),
+        };
+        state
+            .ansible
+            .write()
+            .await
+            .transition(job.id, lxcup_ansible::AnsibleJobStatus::Checking)
+            .unwrap();
+
+        let error = delete_target(
+            State(state.clone()),
+            Extension(ActorRole::Admin),
+            Path(target_id.as_uuid().to_string()),
+            JsonBody(DeleteTargetRequest { confirmed: true }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, "target_busy");
+        assert_eq!(state.store.read().await.targets.len(), 1);
+    }
 
     #[tokio::test]
     async fn creating_a_target_also_creates_its_standard_update_policy() {

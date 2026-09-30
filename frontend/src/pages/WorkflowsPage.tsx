@@ -25,16 +25,27 @@ const modes: Array<{ value: AnsibleExecutionMode; label: string; effect: string;
   { value: "apply", label: "Apply", effect: "Ausführung", description: "Führt die gewählte Operation auf dem Ziel aus. Bei ändernden Operationen ist deshalb die ausdrückliche Bestätigung erforderlich." },
 ];
 
-export function buildWorkflowRequest(
-  targetId: string,
-  operation: AnsibleOperation,
-  mode: AnsibleExecutionMode,
-  packages: readonly string[] | string,
-  confirmed: boolean,
-  policyId?: string,
-  approvedPlanJobId?: string,
-  latestAgentVersion?: string,
-): CreateAnsibleJobRequest {
+type BuildWorkflowRequestOptions = Readonly<{
+  targetId: string;
+  operation: AnsibleOperation;
+  mode: AnsibleExecutionMode;
+  packages: readonly string[] | string;
+  confirmed: boolean;
+  policyId?: string;
+  approvedPlanJobId?: string;
+  latestAgentVersion?: string;
+}>;
+
+export function buildWorkflowRequest({
+  targetId,
+  operation,
+  mode,
+  packages,
+  confirmed,
+  policyId,
+  approvedPlanJobId,
+  latestAgentVersion,
+}: BuildWorkflowRequestOptions): CreateAnsibleJobRequest {
   let parameters: Record<string, unknown> = { operation };
   if (operation === "update_packages") {
     const selectedPackages = typeof packages === "string"
@@ -86,7 +97,16 @@ export function WorkflowsPage() {
   })) });
   const mutation = useMutation({
     mutationFn: async ({ selectedTargets, planIds }: { selectedTargets: TargetDto[]; planIds: Record<string, string> }) => {
-      const outcomes = await Promise.allSettled(selectedTargets.map((target) => createAnsibleJob(buildWorkflowRequest(target.id, operation, mode, packagesByTarget[target.id] ?? [], confirmed, policyId || undefined, planIds[target.id] || undefined, target.latest_agent_version))));
+      const outcomes = await Promise.allSettled(selectedTargets.map((target) => createAnsibleJob(buildWorkflowRequest({
+        targetId: target.id,
+        operation,
+        mode,
+        packages: packagesByTarget[target.id] ?? [],
+        confirmed,
+        policyId: policyId || undefined,
+        approvedPlanJobId: planIds[target.id] || undefined,
+        latestAgentVersion: target.latest_agent_version,
+      }))));
       return outcomes.map((outcome, index): WorkflowSubmissionResult => outcome.status === "fulfilled"
         ? { target: selectedTargets[index], job: outcome.value, error: null }
         : { target: selectedTargets[index], job: null, error: outcome.reason instanceof Error ? outcome.reason.message : "Unbekannter Fehler" });

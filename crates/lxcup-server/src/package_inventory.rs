@@ -77,3 +77,7 @@ pub(super) async fn get_package_inventory(
     };
     Ok(Json(envelope(data)))
 }
+
+#[cfg(test)]
+#[path = "package_inventory_tests.rs"]
+mod tests;

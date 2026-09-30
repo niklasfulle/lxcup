@@ -1,5 +1,7 @@
 use super::{ApiEnvelope, ApiError, ApiState, State, envelope};
 use axum::Json;
+use chrono::{DateTime, Duration, Utc};
+use lxcup_persistence::WorkerHeartbeatStatus;
 use serde::Serialize;
 
 const WORKER_HEARTBEAT_WINDOW_SECONDS: i64 = 10;
@@ -17,28 +19,33 @@ pub(super) async fn get_worker_availability(
     State(state): State<ApiState>,
 ) -> Result<Json<ApiEnvelope<WorkerAvailabilityDto>>, ApiError> {
     let Some(repositories) = state.repositories else {
-        return Ok(Json(envelope(WorkerAvailabilityDto {
-            available: false,
-            last_seen_at: None,
-            artifact_store_available: None,
-            artifact_store_checked_at: None,
-        })));
+        return Ok(Json(envelope(availability_dto(None, Utc::now()))));
     };
     let latest = repositories
         .worker_heartbeats
         .latest_status()
         .await
         .map_err(|_| ApiError::storage())?;
+    Ok(Json(envelope(availability_dto(latest, Utc::now()))))
+}
+
+fn availability_dto(
+    latest: Option<WorkerHeartbeatStatus>,
+    now: DateTime<Utc>,
+) -> WorkerAvailabilityDto {
     let available = latest.as_ref().is_some_and(|status| {
-        status.last_seen_at
-            >= chrono::Utc::now() - chrono::Duration::seconds(WORKER_HEARTBEAT_WINDOW_SECONDS)
+        status.last_seen_at >= now - Duration::seconds(WORKER_HEARTBEAT_WINDOW_SECONDS)
     });
-    Ok(Json(envelope(WorkerAvailabilityDto {
+    WorkerAvailabilityDto {
         available,
         last_seen_at: latest.as_ref().map(|status| status.last_seen_at),
         artifact_store_available: latest
             .as_ref()
             .and_then(|status| status.artifact_store_available),
         artifact_store_checked_at: latest.and_then(|status| status.artifact_store_checked_at),
-    })))
+    }
 }
+
+#[cfg(test)]
+#[path = "worker_tests.rs"]
+mod tests;

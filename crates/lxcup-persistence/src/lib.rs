@@ -10,9 +10,10 @@ pub mod seeds;
 
 pub use repositories::{
     AgentRegistrationRepository, AnsibleJobRepository, AnsibleQueueMetrics, AuditEvent,
-    AuditEventRepository, ContainerRepository, DockerInventoryEvent, DockerInventoryEventKind,
-    DockerWorkloadRepository, EnvironmentRepository, ExecutionEvent, ExecutionRepository,
-    ExecutionResultRecord, NodeRepository, PackageInventoryRepository, PackageInventoryStatus,
+    AuditEventRepository, AuthAuditEvent, AuthAuditFilters, AuthAuditPage, AuthRepository,
+    AuthUser, AuthUserRole, ContainerRepository, DockerInventoryEvent, DockerInventoryEventKind,
+    DockerWorkloadRepository, ExecutionEvent, ExecutionRepository, ExecutionResultRecord,
+    NodeRepository, PackageInventoryRepository, PackageInventoryStatus, PersistedAuthSession,
     PersistedPackageInventory, PersistedTargetDockerInventory, Repositories, RepositoryError,
     ScanRepository, ScheduleRepository, TargetDockerInventoryRepository, TargetRepository,
     UpdatePlanRepository, UpdatePolicyRepository, WorkerHeartbeatRepository, WorkerHeartbeatStatus,

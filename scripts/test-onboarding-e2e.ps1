@@ -28,8 +28,13 @@ $composeProject = "lxcup-onboarding-e2e-$suffix"
 $envFile = Join-Path ([System.IO.Path]::GetTempPath()) "lxcup-onboarding-e2e-$suffix.env"
 $composePrefix = @("--project-name", $composeProject, "--env-file", $envFile)
 $controllerUrl = "http://127.0.0.1:$ControllerPort"
+$frontendUrl = "http://127.0.0.1:$FrontendPort"
 $composeAttempted = $false
 $password = [guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
+$bootstrapPassword = [guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
+$e2eUsername = "account-e2e-$suffix"
+$e2eTemporaryPassword = [guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
+$e2eRotatedPassword = [guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
 $env:LXCUP_E2E_SSH_PASSWORD = $password
 $masterKeyBytes = [byte[]]::new(32)
 [System.Security.Cryptography.RandomNumberGenerator]::Fill($masterKeyBytes)
@@ -79,6 +84,26 @@ function Invoke-Controller([string]$Method, [string]$Path, [object]$Body = $null
     Invoke-RestMethod @parameters
 }
 
+function Invoke-FrontendApi([string]$Method, [string]$Path, [object]$Body = $null) {
+    $parameters = @{
+        Method = $Method
+        Uri = "$($frontendUrl.TrimEnd('/'))$Path"
+        Headers = $headers
+        ErrorAction = "Stop"
+    }
+    if ($null -ne $Body) {
+        $parameters.ContentType = "application/json"
+        $parameters.Body = ConvertTo-Json -InputObject $Body -Depth 12 -Compress
+    }
+    Invoke-RestMethod @parameters
+}
+
+function Get-HttpStatusFromError($errorRecord) {
+    $statusCode = $errorRecord.Exception.Response.StatusCode
+    if ($null -eq $statusCode) { return $null }
+    return [int]$statusCode
+}
+
 function New-TestSecret([string]$Name, [string]$Kind, [string]$Value) {
     $response = Invoke-Controller "Post" "/api/v1/secrets" @{
         name = $Name
@@ -101,7 +126,7 @@ try {
 
     Write-Host "Starting a disposable, isolated Compose project and SSH test target..."
     $composeAttempted = $true
-    Invoke-Compose @("--profile", "onboarding-e2e", "up", "-d", "--build", "postgres", "lxcup-server", "artifacts", "lxcup-worker", "onboarding-ssh-test")
+    Invoke-Compose @("--profile", "onboarding-e2e", "up", "-d", "--build", "postgres", "lxcup-server", "frontend", "artifacts", "lxcup-worker", "onboarding-ssh-test")
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
@@ -113,6 +138,84 @@ try {
             Start-Sleep -Seconds 2
         }
     } while ((Get-Date) -lt $deadline)
+
+    do {
+        try {
+            $null = Invoke-WebRequest -Uri "$frontendUrl/" -SkipHttpErrorCheck
+            break
+        } catch {
+            if ((Get-Date) -ge $deadline) { throw "Frontend did not become ready within $TimeoutSeconds seconds." }
+            Start-Sleep -Seconds 2
+        }
+    } while ((Get-Date) -lt $deadline)
+
+    Write-Host "Verifying the one-time admin bootstrap, password rotation, user permissions, audit redaction, and frontend routes..."
+    $adminLogin = Invoke-Controller "Post" "/api/v1/auth/login" @{ username = "admin"; password = "admin" }
+    if (-not $adminLogin.data.user.must_change_password) { throw "The first admin login did not require a password change." }
+    $adminToken = $adminLogin.data.access_token
+    $headers.Authorization = "Bearer $adminToken"
+    $null = Invoke-Controller "Post" "/api/v1/auth/password" @{ new_password = $bootstrapPassword }
+
+    $defaultLoginStatus = $null
+    try {
+        $null = Invoke-Controller "Post" "/api/v1/auth/login" @{ username = "admin"; password = "admin" }
+    } catch {
+        $defaultLoginStatus = Get-HttpStatusFromError $_
+    }
+    if ($defaultLoginStatus -ne 401) { throw "The bootstrap password was not rejected with HTTP 401 after the required password change." }
+
+    $createdUser = Invoke-FrontendApi "Post" "/api/v1/users" @{
+        username = $e2eUsername
+        role = "user"
+        password = $e2eTemporaryPassword
+    }
+    if ($createdUser.data.must_change_password -ne $true) { throw "A newly created user was not required to change the temporary password." }
+    $userLogin = Invoke-FrontendApi "Post" "/api/v1/auth/login" @{ username = $e2eUsername; password = $e2eTemporaryPassword }
+    if ($userLogin.data.user.must_change_password -ne $true) { throw "The new user's first login did not require a password change." }
+    $userToken = $userLogin.data.access_token
+    $headers.Authorization = "Bearer $userToken"
+    $null = Invoke-FrontendApi "Post" "/api/v1/auth/password" @{ new_password = $e2eRotatedPassword }
+    $userSession = Invoke-FrontendApi "Get" "/api/v1/auth/session"
+    if ($userSession.data.must_change_password -ne $false) { throw "The user session did not leave the mandatory password-change state." }
+    $userTargets = Invoke-FrontendApi "Get" "/api/v1/targets"
+    if ($null -eq $userTargets.data) { throw "A regular user could not access managed resources through the frontend API proxy." }
+
+    foreach ($adminRoute in @("/api/v1/users", "/api/v1/auth/audit")) {
+        $forbiddenStatus = $null
+        try { $null = Invoke-FrontendApi "Get" $adminRoute } catch { $forbiddenStatus = Get-HttpStatusFromError $_ }
+        if ($forbiddenStatus -ne 403) { throw "A regular user received HTTP $forbiddenStatus instead of 403 for $adminRoute." }
+    }
+
+    $headers.Authorization = "Bearer $adminToken"
+    $users = Invoke-FrontendApi "Get" "/api/v1/users"
+    $listedUser = $users.data | Where-Object { $_.username -eq $e2eUsername } | Select-Object -First 1
+    if ($null -eq $listedUser -or $listedUser.role -ne "user") { throw "The Admin could not verify the created User account." }
+    $usersText = $users.data | ConvertTo-Json -Depth 20 -Compress
+    if ($usersText.Contains("password_hash") -or $usersText.Contains($e2eTemporaryPassword)) {
+        throw "The Admin user-list response exposed password material."
+    }
+    $audit = Invoke-FrontendApi "Get" "/api/v1/auth/audit?limit=100"
+    $auditText = $audit.data.events | ConvertTo-Json -Depth 20 -Compress
+    foreach ($sensitiveValue in @($bootstrapPassword, $e2eTemporaryPassword, $e2eRotatedPassword, $adminToken, $userToken)) {
+        if ($auditText.Contains($sensitiveValue)) { throw "The user audit log contains sensitive authentication material." }
+    }
+    if (-not ($audit.data.events | Where-Object { $_.actor_username -eq "admin" -and $_.action -eq "user.created" })) {
+        throw "The user-creation action was not present in the Admin audit log."
+    }
+
+    $headers.Remove("Content-Type")
+    $knownFrontendPage = Invoke-WebRequest -Uri "$frontendUrl/admin/users" -Headers @{ Accept = "text/html" } -SkipHttpErrorCheck
+    if ([int]$knownFrontendPage.StatusCode -ne 200) { throw "A known frontend route did not return HTTP 200." }
+    $notFoundPage = Invoke-WebRequest -Uri "$frontendUrl/not-a-client-route" -Headers @{ Accept = "text/html" } -SkipHttpErrorCheck
+    if ([int]$notFoundPage.StatusCode -ne 404 -or $notFoundPage.Content -notmatch 'id="root"') {
+        throw "An unknown browser route did not return the frontend shell with HTTP 404."
+    }
+    $headers.Authorization = "Bearer $adminToken"
+    $missingApiStatus = $null
+    try { $null = Invoke-FrontendApi "Get" "/api/v1/not-a-real-route" } catch { $missingApiStatus = Get-HttpStatusFromError $_ }
+    if ($missingApiStatus -ne 404) { throw "An unknown API route was not returned by the controller as HTTP 404." }
+    $headers = @{ "Content-Type" = "application/json"; Authorization = "Bearer $adminToken" }
+    Write-Host "Account and frontend E2E passed: bootstrap rotation, Admin/User API permissions, audit redaction, SPA 404, and API 404."
 
     $publicKey = ""
     do {

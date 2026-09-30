@@ -20,6 +20,7 @@ use lxcup_persistence::{
     AuditEvent, Database, DatabaseConfig, ExecutionEvent, Repositories, seeds::seed_development,
 };
 use serde_json::json;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 fn postgres_now() -> chrono::DateTime<Utc> {
@@ -28,12 +29,68 @@ fn postgres_now() -> chrono::DateTime<Utc> {
         .expect("valid microsecond timestamp")
 }
 
+struct ScopedTestDatabase {
+    database: Database,
+    admin_pool: PgPool,
+    schema: String,
+}
+
+impl ScopedTestDatabase {
+    fn database(&self) -> &Database {
+        &self.database
+    }
+
+    async fn finish(self) {
+        self.database.pool().close().await;
+        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
+            .execute(&self.admin_pool)
+            .await
+            .unwrap();
+        self.admin_pool.close().await;
+    }
+}
+
+async fn scoped_test_database(test_name: &str) -> Option<ScopedTestDatabase> {
+    let Ok(database_url) = std::env::var("DATABASE_TEST_URL") else {
+        eprintln!("skipped: DATABASE_TEST_URL is not configured");
+        return None;
+    };
+    let schema = format!("it_{}_{}", test_name, Uuid::new_v4().simple());
+    let admin_pool = PgPool::connect(&database_url).await.unwrap();
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    let scoped_url = format!("{database_url}{separator}options=-c%20search_path%3D{schema}");
+    let config = DatabaseConfig::from_values(
+        scoped_url,
+        3,
+        0,
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        Some(Duration::from_secs(60)),
+    )
+    .unwrap();
+    let database = Database::connect(&config).await.unwrap();
+    database.migrate().await.unwrap();
+    Some(ScopedTestDatabase {
+        database,
+        admin_pool,
+        schema,
+    })
+}
+
 #[path = "postgres_integration/ansible_jobs.rs"]
 mod ansible_jobs;
+#[path = "postgres_integration/auth_users.rs"]
+mod auth_users;
 #[path = "postgres_integration/round_trip.rs"]
 mod round_trip;
 #[path = "postgres_integration/target_inventory.rs"]
 mod target_inventory;
+#[path = "postgres_integration/target_removal.rs"]
+mod target_removal;
 
 async fn cleanup(
     database: &Database,

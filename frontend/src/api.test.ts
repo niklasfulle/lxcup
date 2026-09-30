@@ -20,6 +20,7 @@ import {
   listAnsibleJobs,
   listDockerWorkloads,
   listSecretAudit,
+  listUserAudit,
   listSecrets,
   listTargets,
   removeDockerWorkload,
@@ -57,7 +58,7 @@ describe("ApiClient", () => {
   });
 
   it("builds only allowlisted workflow fields without playbook or shell input", () => {
-    const request = buildWorkflowRequest("target-101", "update_packages", "plan", "nginx, curl", false);
+    const request = buildWorkflowRequest({ targetId: "target-101", operation: "update_packages", mode: "plan", packages: "nginx, curl", confirmed: false });
 
     expect(request).toMatchObject({
       operation: "update_packages",
@@ -70,7 +71,7 @@ describe("ApiClient", () => {
   });
 
   it("builds a read-only package inventory workflow request", () => {
-    const request = buildWorkflowRequest("target-inventory", "collect_package_inventory", "check", "", false);
+    const request = buildWorkflowRequest({ targetId: "target-inventory", operation: "collect_package_inventory", mode: "check", packages: "", confirmed: false });
 
     expect(request).toMatchObject({
       operation: "collect_package_inventory",
@@ -91,6 +92,20 @@ describe("ApiClient", () => {
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer opaque-test-token");
     await expect(client.post("/api/v1/targets", {})).rejects.toMatchObject({ status: 403, code: "permission_denied" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends same-origin cookies and mirrors the CSRF cookie on state-changing requests", async () => {
+    document.cookie = "lxcup_csrf=test-csrf-token; Path=/";
+    const client = new ApiClient();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await client.logout();
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.credentials).toBe("same-origin");
+    expect(new Headers(init.headers).get("x-csrf-token")).toBe("test-csrf-token");
+    document.cookie = "lxcup_csrf=; Max-Age=0; Path=/";
   });
 
   it("exposes typed resource helpers with the expected endpoints and payloads", async () => {
@@ -130,6 +145,19 @@ describe("ApiClient", () => {
     get.mockRestore();
     post.mockRestore();
     del.mockRestore();
+  });
+
+  it("builds encoded audit filter and pagination parameters", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { events: [], total: 0, limit: 50, offset: 0 }, request_id: "req-audit" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await listUserAudit({ limit: 50, offset: 0, actor_username: "admin user", action: "user.created", resource: "target-1", since: "2026-09-01T00:00:00.000Z" });
+    const requestUrl = new URL(String(fetchMock.mock.calls[0]?.[0]), "http://localhost");
+    expect(requestUrl.pathname).toBe("/api/v1/auth/audit");
+    expect(requestUrl.searchParams.get("actor_username")).toBe("admin user");
+    expect(requestUrl.searchParams.get("action")).toBe("user.created");
+    expect(requestUrl.searchParams.get("resource")).toBe("target-1");
+    expect(requestUrl.searchParams.get("since")).toBe("2026-09-01T00:00:00.000Z");
+    expect(requestUrl.searchParams.get("offset")).toBe("0");
   });
 
   it("authenticates SSE streams, parses frames and closes subscriptions", async () => {

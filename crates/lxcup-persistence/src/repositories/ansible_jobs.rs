@@ -2,6 +2,7 @@ use super::{
     AnsibleJob, AnsibleJobRepository, AnsibleJobStatus, Database, JobEvent, RepositoryError, Row,
     Utc, ansible_status_to_db, is_active_ansible_job_status,
 };
+use lxcup_core::ResourceTarget;
 
 /// Aggregated queue values used by the operational metrics endpoint.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -46,11 +47,16 @@ impl AnsibleJobRepository {
     pub async fn save(&self, job: &AnsibleJob) -> Result<(), RepositoryError> {
         let payload = serde_json::to_value(job).map_err(RepositoryError::Serialization)?;
         let target = serde_json::to_value(job.target).map_err(RepositoryError::Serialization)?;
+        let target_id = match job.target {
+            ResourceTarget::Target(target_id) => Some(target_id.as_uuid()),
+            ResourceTarget::Node(_) | ResourceTarget::Container(_) => None,
+        };
         sqlx::query(
-            "INSERT INTO ansible_jobs (id, target, idempotency_key, status, payload, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO ansible_jobs (id, target, target_id, idempotency_key, status, payload, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(job.id.as_uuid())
         .bind(target)
+        .bind(target_id)
         .bind(&job.idempotency_key)
         .bind(ansible_status_to_db(job.status))
         .bind(payload)

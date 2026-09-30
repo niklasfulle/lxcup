@@ -547,3 +547,7 @@ pub(crate) async fn remove_docker_container(
     ));
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+#[path = "docker_tests.rs"]
+mod tests;

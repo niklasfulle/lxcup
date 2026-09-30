@@ -5,13 +5,22 @@ import {
   useAnsibleJob,
   useAnsibleJobEvents,
   useAnsibleJobs,
+  useDockerDiscovery,
   useDockerWorkloads,
   useEnrollment,
   useExecutionSafety,
   useTargets,
+  usePackageInventory,
   useSchedules,
   useTargetDockerInventories,
+  useTargetDockerInventory,
+  useTargetDockerTelemetry,
+  useTargetTelemetry,
+  useTelemetryAlerts,
   useUpdatePolicies,
+  useUserAudit,
+  useUsers,
+  useWorkerAvailability,
 } from "./queries";
 import * as api from "./api";
 
@@ -45,6 +54,19 @@ function TargetHeartbeatProbe() {
 function TargetDockerInventoriesProbe() {
   const inventories = useTargetDockerInventories(["target-1", "target-2"]);
   return <output>{inventories.map((inventory) => inventory.data?.target_id).filter(Boolean).join(",")}</output>;
+}
+
+function RemainingQueriesProbe() {
+  const users = useUsers();
+  const audit = useUserAudit();
+  const worker = useWorkerAvailability();
+  const discovery = useDockerDiscovery(101);
+  const targetInventory = useTargetDockerInventory("target-1");
+  const dockerTelemetry = useTargetDockerTelemetry("target-1");
+  const packageInventory = usePackageInventory("target-1");
+  const telemetry = useTargetTelemetry("target-1");
+  const alerts = useTelemetryAlerts();
+  return <output>{[users, audit, worker, discovery, targetInventory, dockerTelemetry, packageInventory, telemetry, alerts].filter((query) => query.isSuccess).length}</output>;
 }
 
 describe("query hooks", () => {
@@ -109,6 +131,23 @@ describe("query hooks", () => {
     expect(await screen.findByText("target-1,target-2")).toBeInTheDocument();
     expect(getInventory).toHaveBeenCalledWith("target-1", expect.any(AbortSignal));
     expect(getInventory).toHaveBeenCalledWith("target-2", expect.any(AbortSignal));
+    client.clear();
+  });
+
+  it("loads account, worker, Docker and telemetry queries through their APIs", async () => {
+    vi.spyOn(api, "listUsers").mockResolvedValue([]);
+    vi.spyOn(api, "listUserAudit").mockResolvedValue({ entries: [], total: 0 } as never);
+    vi.spyOn(api, "getWorkerAvailability").mockResolvedValue({ available: true } as never);
+    vi.spyOn(api, "getDockerDiscovery").mockResolvedValue(null);
+    vi.spyOn(api, "getTargetDockerInventory").mockResolvedValue({ target_id: "target-1", containers: [] } as never);
+    vi.spyOn(api, "getTargetDockerTelemetry").mockResolvedValue({ target_id: "target-1", samples: [] } as never);
+    vi.spyOn(api, "getPackageInventory").mockResolvedValue({ target_id: "target-1", packages: [] } as never);
+    vi.spyOn(api, "getTargetTelemetry").mockResolvedValue({ target_id: "target-1", samples: [] } as never);
+    vi.spyOn(api, "getTelemetryAlerts").mockResolvedValue([]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><RemainingQueriesProbe /></QueryClientProvider>);
+
+    expect(await screen.findByText("9")).toBeInTheDocument();
     client.clear();
   });
 });

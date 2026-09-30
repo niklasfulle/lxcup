@@ -17,11 +17,31 @@ schemas and route availability.
 
 ## Authentication
 
-- Human-facing protected endpoints use `Authorization: Bearer <token>` when
-  authentication is enabled. Production requires authentication and distinct
-  Admin, Operator, and Viewer credentials.
-- The server enforces role checks. Do not infer a complete endpoint permission
-  matrix from navigation visibility; check handlers and middleware.
+- Production uses local username/password accounts (no registration or email).
+  The first PostgreSQL-backed startup creates `admin` / `admin` and sets a
+  forced-password-change flag. `POST /api/v1/auth/login` sets an eight-hour
+  `HttpOnly`, `SameSite=Strict` session cookie and does not return its secret in
+  JSON. Production also marks it `Secure`. The same-origin frontend can restore
+  the session after a reload; state-changing requests echo a separate CSRF
+  cookie in `X-CSRF-Token`. Logout revokes the current session and clears both
+  cookies. Password change/reset and account disable/role changes revoke
+  affected sessions. Legacy bearer authentication remains available when
+  account authentication is disabled.
+- Supported human roles are `admin` and `user`. The server enforces role checks
+  on every protected request. User administration, secret management, and the
+  user audit API are Admin-only; navigation visibility is not an authorization
+  boundary.
+- Successful and failed account login, logout, password changes, user
+  administration, and authenticated resource mutations are recorded with a
+  stable action identifier, outcome, actor, and request ID. Audit metadata
+  omits request bodies and credential values. Denied authenticated attempts
+  to use Admin-only or destructive APIs are recorded. User-management failures
+  are recorded as attempted actions; successful operations use action-specific
+  identifiers.
+- `GET /api/v1/auth/audit` returns `{ events, total, limit, offset }` and accepts
+  `limit` (1–100), `offset`, `actor_username`, `action`, `resource`, `since`,
+  and `until` (RFC 3339 timestamps; `until` is exclusive). Results are ordered
+  newest first; string filters use case-insensitive substring matching.
 - The agent heartbeat authenticates separately using the target's agent token.
 - Target responses include `agent_version` from the last authenticated heartbeat and `latest_agent_version` from the running controller build. The UI warns when they differ; onboarding and update workflows use the controller-reported version rather than a frontend constant.
 - Telemetry sample times are interpreted relative to the authenticated heartbeat's `sent_at` and normalized to controller time. This preserves the rolling window when an agent and controller have modest clock skew; samples outside that window remain rejected.
@@ -40,14 +60,28 @@ schemas and route availability.
 
 ## Endpoint groups
 
+### Human permission matrix
+
+| Capability | Unauthenticated | User | Admin |
+| --- | --- | --- | --- |
+| Login, public health, agent heartbeat (agent token) | Allowed | Allowed | Allowed |
+| Read managed resources, telemetry, inventory, workflows, schedules, and policies | Denied | Allowed | Allowed |
+| Start permitted non-destructive workflows and configure schedules/policies | Denied | Allowed | Allowed |
+| Delete targets, destructive Docker actions, or destructive workflow operations | Denied | Denied | Allowed |
+| Manage users, secrets, or read user audit events | Denied | Denied | Allowed |
+
+The forced-password-change session is limited to session status, logout, and
+password change. Every other application API is denied until rotation succeeds.
+
 This index is intentionally grouped rather than duplicating generated schemas.
 Consult OpenAPI for exact payloads and response codes.
 
 | Area | Routes |
 | --- | --- |
 | Health and metrics | `GET /health/live`, `GET /health/ready`, `GET /metrics` |
-| Authentication | `GET /api/v1/auth/session`, `POST /api/v1/auth/logout` |
-| Targets | `GET/POST /api/v1/targets`, `GET /api/v1/targets/{target_id}`, package inventory and host/Docker telemetry reads, active telemetry alerts at `GET /api/v1/telemetry-alerts`, Docker inventory read and confirmed discovery via a connected LXC agent at `/api/v1/targets/{target_id}/docker/discovery`, confirmed Docker lifecycle actions at `/api/v1/targets/{target_id}/docker/containers/{container_id}/action`, read-only registry checks at `/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-check` |
+| Authentication | `GET /api/v1/auth/status`, `POST /api/v1/auth/login`, `GET /api/v1/auth/session`, `POST /api/v1/auth/logout`, `POST /api/v1/auth/password` |
+| Admin | Admin-only user management under `/api/v1/users`, user activity under `GET /api/v1/auth/audit` |
+| Targets | `GET/POST /api/v1/targets`, `GET /api/v1/targets/{target_id}`, confirmed Admin-only `DELETE /api/v1/targets/{target_id}`, package inventory and host/Docker telemetry reads, active telemetry alerts at `GET /api/v1/telemetry-alerts`, Docker inventory read and confirmed discovery via a connected LXC agent at `/api/v1/targets/{target_id}/docker/discovery`, confirmed Docker lifecycle actions at `/api/v1/targets/{target_id}/docker/containers/{container_id}/action`, read-only registry checks at `/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-check` |
 | Enrollment and agents | `POST /api/v1/enrollments`, `GET /api/v1/enrollments/{enrollment_id}`, `POST /api/v1/agents/heartbeat` |
 | Secrets | list/create, audit, metadata read, rotate, and revoke under `/api/v1/secrets` |
 | Ansible workflows | enqueue, read, retry, and event reads under `/api/v1/ansible/jobs`; worker availability under `/api/v1/ansible/worker-availability` |
@@ -101,6 +135,9 @@ text is not treated as a change.
 
 ## Errors and observability
 
+- Unknown browser routes render the custom frontend 404 page and return HTTP
+  404 for document navigation. `/api` and `/api/*` remain on the API proxy and
+  are never rewritten to the frontend shell.
 - Use the existing server error mapping and JSON error shape; do not create
   endpoint-specific error formats without a deliberate compatibility reason.
 - Return client-safe messages. Keep stack traces, database internals, and

@@ -34,7 +34,7 @@ describe("TargetLifecycle", () => {
   });
 
   it("warns when an enrolled agent is behind the controller artifact version", () => {
-    render(<MemoryRouter><TargetLifecycle target={{ ...pendingTarget, state: "managed", agent_version: "0.3.0", latest_agent_version: "0.3.1" }} /></MemoryRouter>);
-    expect(screen.getByRole("status")).toHaveTextContent("Agent-Version veraltet: installiert v0.3.0, verfügbar v0.3.1.");
+    render(<MemoryRouter><TargetLifecycle target={{ ...pendingTarget, state: "managed", agent_version: "0.3.0", latest_agent_version: "0.4.0" }} /></MemoryRouter>);
+    expect(screen.getByRole("status")).toHaveTextContent("Agent-Version veraltet: installiert v0.3.0, verfügbar v0.4.0.");
   });
 });

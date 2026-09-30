@@ -2,6 +2,9 @@ use super::*;
 use crate::scheduled_jobs::threshold_value;
 use lxcup_agent::AgentInfo;
 use lxcup_core::{ThresholdMetric, ThresholdRule};
+use lxcup_secrets::{CreateSecret, SecretStore};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::test]
 async fn in_memory_state_restoration_and_safety_results_are_observable() {
@@ -159,6 +162,130 @@ fn schedule_thresholds_use_latest_samples_and_fail_closed_without_telemetry() {
 }
 
 #[tokio::test]
+async fn database_backed_state_restores_core_data_and_runs_retention_checks() {
+    let Ok(database_url) = std::env::var("DATABASE_TEST_URL") else {
+        eprintln!("skipped: DATABASE_TEST_URL is not configured");
+        return;
+    };
+    let schema = format!("server_state_{}", Uuid::new_v4().simple());
+    let admin_pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    let scoped_url = format!("{database_url}{separator}options=-c%20search_path%3D{schema}");
+    let config = lxcup_persistence::DatabaseConfig::from_values(
+        scoped_url,
+        2,
+        0,
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        Some(Duration::from_secs(60)),
+    )
+    .unwrap();
+    let database = lxcup_persistence::Database::connect(&config).await.unwrap();
+    database.migrate().await.unwrap();
+    let repositories = lxcup_persistence::Repositories::new(&database);
+    let bootstrap = ApiState::new().with_repositories(repositories.clone());
+    assert!(bootstrap.initialize_bootstrap_admin().await.unwrap());
+    assert!(!bootstrap.initialize_bootstrap_admin().await.unwrap());
+
+    let host_id = lxcup_core::ContainerId::new(72_003);
+    let node = lxcup_core::Node::new("restored-agent-node", "https://node.invalid").unwrap();
+    repositories.nodes.save(&node).await.unwrap();
+    let host = lxcup_core::Container::new(
+        host_id,
+        node.id,
+        "restored-agent-host",
+        lxcup_core::OperatingSystem::Debian,
+        lxcup_core::ContainerStatus::Running,
+    )
+    .unwrap();
+    repositories.containers.save(&host).await.unwrap();
+    let secret_store = lxcup_secrets::InMemorySecretStore::default();
+    let secret = secret_store
+        .create(CreateSecret {
+            name: "restored-agent".to_owned(),
+            kind: lxcup_core::SecretKind::AgentToken,
+            scope: lxcup_core::SecretScope::Container(host_id),
+            value: lxcup_core::SecretValue::new("test-token").unwrap(),
+        })
+        .unwrap();
+    let registration = lxcup_core::AgentRegistration::new(
+        host_id,
+        "restored-agent-id",
+        "http://127.0.0.1:8090",
+        secret.metadata.id,
+        None,
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    repositories
+        .agent_registrations
+        .save(&registration)
+        .await
+        .unwrap();
+    let mut target = Target::new(
+        "restored-target",
+        TargetKind::LinuxServer,
+        "192.0.2.251",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    target.mark_managed();
+    repositories.targets.save(&target).await.unwrap();
+    let schedule = JobSchedule {
+        id: "restored-schedule".to_owned(),
+        operation: "health_check".to_owned(),
+        timezone: "UTC".to_owned(),
+        target_ids: vec![target.id],
+        frequency: ScheduleFrequency::EveryMinutes(60),
+        enabled: true,
+        threshold: None,
+        policy_id: None,
+        last_run_at: None,
+        next_run_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        last_error: None,
+    };
+    repositories.schedules.save(&schedule).await.unwrap();
+    let state = ApiState::new()
+        .with_repositories(repositories)
+        .with_secret_store(Arc::new(secret_store));
+
+    assert_eq!(state.restore_targets().await, 1);
+    assert_eq!(state.restore_schedules().await, 1);
+    assert_eq!(state.restore_update_policies().await, 1);
+    assert_eq!(state.restore_update_policies().await, 1);
+    assert_eq!(state.restore_registered_agents().await, 1);
+    assert!(state.agents.read().await.contains_key(&host_id));
+    assert!(!state.scheduled_worker_available().await);
+    assert_eq!(state.prune_retained_data().await.unwrap(), (0, 0));
+    assert_eq!(state.reconcile_onboarding_jobs().await, 0);
+    assert!(
+        state
+            .store
+            .read()
+            .await
+            .update_policies
+            .iter()
+            .any(|policy| {
+                policy.id == crate::STANDARD_UPDATE_POLICY_ID
+                    && policy.allowed_targets.contains(&target.id)
+            })
+    );
+
+    database.pool().close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    admin_pool.close().await;
+}
+
+#[tokio::test]
 async fn openapi_route_serves_the_versioned_contract() {
     let response = router(ApiState::new())
         .oneshot(
@@ -176,6 +303,11 @@ async fn openapi_route_serves_the_versioned_contract() {
     let contract: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(contract["info"]["version"], "v1");
     assert!(contract["paths"]["/api/v1/ansible/jobs"].is_object());
+    assert!(
+        contract["paths"]["/api/v1/auth/audit"]["get"]["parameters"]
+            .as_array()
+            .is_some_and(|parameters| parameters.len() >= 7)
+    );
 }
 
 #[tokio::test]

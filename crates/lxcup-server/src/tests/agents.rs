@@ -70,6 +70,18 @@ async fn compose_image_update_requires_and_uses_a_fresh_successful_check() {
             }),
         )
         .route(
+            "/docker/containers/action",
+            post(
+                |axum::Json(request): axum::Json<lxcup_agent::DockerLifecycleRequest>| async move {
+                    axum::Json(lxcup_agent::DockerLifecycleResult {
+                        container_id: request.container_id,
+                        action: request.action,
+                        completed_at: chrono::Utc::now(),
+                    })
+                },
+            ),
+        )
+        .route(
             "/docker/containers/image-update-apply",
             post({
                 let count = apply_count.clone();
@@ -159,6 +171,55 @@ async fn compose_image_update_requires_and_uses_a_fresh_successful_check() {
         .cloned()
         .unwrap();
     assert_eq!(saved.containers[0].id, id);
+
+    let discovered = discover_target_docker(
+        axum::extract::State(state.clone()),
+        axum::Extension(ActorRole::Admin),
+        axum::extract::Path(target_id.as_uuid().to_string()),
+        axum::Json(crate::target_docker::DiscoverTargetDockerRequest { confirmed: true }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(discovered.data.available);
+    assert_eq!(discovered.data.containers[0].id, id);
+
+    let stored = get_target_docker_inventory(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(target_id.as_uuid().to_string()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(stored.data.available);
+    assert_eq!(stored.data.containers.len(), 1);
+
+    let lifecycle = operate_target_docker_container(
+        axum::extract::State(state.clone()),
+        axum::Extension(ActorRole::Admin),
+        axum::extract::Path((target_id.as_uuid().to_string(), id.clone())),
+        axum::Json(crate::target_docker::DockerLifecycleRequest {
+            action: lxcup_agent::DockerLifecycleAction::Restart,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(lifecycle.data.container_name, "web");
+
+    let checked = check_target_docker_image_update(
+        axum::extract::State(state.clone()),
+        axum::Extension(ActorRole::Admin),
+        axum::extract::Path((target_id.as_uuid().to_string(), id.clone())),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        checked.data.result.status,
+        lxcup_agent::DockerImageUpdateStatus::UpdateAvailable
+    );
     mock_agent_task.abort();
 }
 

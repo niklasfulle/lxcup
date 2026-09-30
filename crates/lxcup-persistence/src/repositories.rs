@@ -4,11 +4,10 @@ use chrono::{DateTime, Utc};
 use lxcup_ansible::{AnsibleJob, AnsibleJobStatus, JobEvent};
 use lxcup_core::{
     AgentRegistration, AvailableUpdate, Container, ContainerId, ContainerManagementState,
-    ContainerStatus, DockerWorkload, DockerWorkloadManagementState, EnvironmentStatus, Execution,
-    ExecutionId, ExecutionStatus, Node, NodeId, NodeStatus, OperatingSystem, PackageChangeKind,
-    PackageName, PackageVersion, PlanStatus, ProxmoxEnvironment, ResolvedPackageChange, Scan,
-    ScanId, ScanStatus, SecretId, Target, TargetId, UpdateClassification, UpdatePlan, UpdatePlanId,
-    UpdatePolicy,
+    ContainerStatus, DockerWorkload, DockerWorkloadManagementState, Execution, ExecutionId,
+    ExecutionStatus, Node, NodeId, NodeStatus, OperatingSystem, PackageChangeKind, PackageName,
+    PackageVersion, PlanStatus, ResolvedPackageChange, Scan, ScanId, ScanStatus, SecretId, Target,
+    TargetId, UpdateClassification, UpdatePlan, UpdatePlanId, UpdatePolicy,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
@@ -17,6 +16,7 @@ use uuid::Uuid;
 
 use crate::Database;
 
+mod auth;
 mod docker;
 mod package_inventory;
 pub use package_inventory::{PackageInventoryStatus, PersistedPackageInventory};
@@ -27,13 +27,15 @@ mod telemetry;
 mod update_policies;
 mod worker_heartbeats;
 pub use ansible_jobs::AnsibleQueueMetrics;
+pub use auth::{
+    AuthAuditEvent, AuthAuditFilters, AuthAuditPage, AuthRepository, AuthUser, AuthUserRole,
+    PersistedAuthSession,
+};
 pub use target_docker_inventory::{
     DockerInventoryEvent, DockerInventoryEventKind, PersistedTargetDockerInventory,
     update_docker_inventory_events,
 };
 pub use worker_heartbeats::WorkerHeartbeatStatus;
-
-mod environment;
 
 /// Fehler der Repository-Schicht ohne sensible SQL- oder Verbindungsdetails.
 #[derive(Debug, Error)]
@@ -46,6 +48,15 @@ pub enum RepositoryError {
 
     #[error("could not serialize persisted value")]
     Serialization(#[source] serde_json::Error),
+
+    #[error("target has an active ansible job")]
+    TargetBusy,
+
+    #[error("the last active administrator cannot be removed or demoted")]
+    LastAdmin,
+
+    #[error("username is already in use")]
+    UsernameExists,
 }
 
 impl From<sqlx::Error> for RepositoryError {
@@ -57,12 +68,6 @@ impl From<sqlx::Error> for RepositoryError {
 /// Repository für Proxmox-Nodes.
 #[derive(Clone)]
 pub struct NodeRepository {
-    pool: PgPool,
-}
-
-/// Repository für credential-freie Proxmox-Umgebungskonfigurationen.
-#[derive(Clone)]
-pub struct EnvironmentRepository {
     pool: PgPool,
 }
 
@@ -185,6 +190,7 @@ pub struct AuditEventRepository {
 
 #[derive(Clone)]
 pub struct Repositories {
+    pub auth: AuthRepository,
     pub docker_workloads: DockerWorkloadRepository,
     pub docker_discovery: DockerDiscoveryRepository,
     pub target_docker_inventory: TargetDockerInventoryRepository,
@@ -196,7 +202,6 @@ pub struct Repositories {
     pub ansible_jobs: AnsibleJobRepository,
     pub worker_heartbeats: WorkerHeartbeatRepository,
     pub telemetry: TelemetryRepository,
-    pub environments: EnvironmentRepository,
     pub nodes: NodeRepository,
     pub containers: ContainerRepository,
     pub scans: ScanRepository,
@@ -208,6 +213,7 @@ pub struct Repositories {
 impl Repositories {
     pub fn new(database: &Database) -> Self {
         Self {
+            auth: AuthRepository::new(database),
             docker_workloads: DockerWorkloadRepository::new(database),
             docker_discovery: DockerDiscoveryRepository::new(database),
             target_docker_inventory: TargetDockerInventoryRepository::new(database),
@@ -219,7 +225,6 @@ impl Repositories {
             ansible_jobs: AnsibleJobRepository::new(database),
             worker_heartbeats: WorkerHeartbeatRepository::new(database),
             telemetry: TelemetryRepository::new(database),
-            environments: EnvironmentRepository::new(database),
             nodes: NodeRepository::new(database),
             containers: ContainerRepository::new(database),
             scans: ScanRepository::new(database),
@@ -235,125 +240,6 @@ fn is_active_ansible_job_status(status: &str) -> bool {
         status,
         "checking" | "planned" | "applying" | "reconcile_required"
     )
-}
-
-#[cfg(test)]
-mod status_tests {
-    use super::*;
-
-    #[test]
-    fn queued_jobs_do_not_block_a_new_worker_run() {
-        assert!(!is_active_ansible_job_status("queued"));
-        assert!(!is_active_ansible_job_status("succeeded"));
-        assert!(is_active_ansible_job_status("applying"));
-    }
-
-    #[test]
-    fn database_enum_mappings_cover_every_supported_value_and_reject_unknown_values() {
-        assert_eq!(
-            agent_state_to_db(lxcup_core::AgentConnectionState::Connected),
-            "connected"
-        );
-        assert_eq!(
-            agent_state_to_db(lxcup_core::AgentConnectionState::Degraded),
-            "degraded"
-        );
-        assert_eq!(
-            agent_state_to_db(lxcup_core::AgentConnectionState::Unreachable),
-            "unreachable"
-        );
-
-        for status in [
-            AnsibleJobStatus::Queued,
-            AnsibleJobStatus::Checking,
-            AnsibleJobStatus::Planned,
-            AnsibleJobStatus::Applying,
-            AnsibleJobStatus::ReconcileRequired,
-            AnsibleJobStatus::Succeeded,
-            AnsibleJobStatus::Failed,
-            AnsibleJobStatus::Aborted,
-        ] {
-            assert!(!ansible_status_to_db(status).is_empty());
-        }
-
-        for value in ["configured", "connected", "failed", "disabled"] {
-            assert!(environment_status_from_db(value.to_owned()).is_ok());
-        }
-        assert!(environment_status_from_db("other".to_owned()).is_err());
-
-        for value in ["unknown", "connected", "disconnected"] {
-            assert!(node_status_from_db(value.to_owned()).is_ok());
-        }
-        assert!(node_status_from_db("other".to_owned()).is_err());
-
-        for value in ["debian", "ubuntu", "unknown:alpine", "fedora"] {
-            assert!(matches!(
-                os_from_db(value.to_owned()),
-                OperatingSystem::Unknown(_) | OperatingSystem::Debian | OperatingSystem::Ubuntu
-            ));
-        }
-
-        for value in ["running", "stopped", "unknown"] {
-            assert!(container_status_from_db(value.to_owned()).is_ok());
-        }
-        assert!(container_status_from_db("other".to_owned()).is_err());
-
-        for value in ["discovered", "managed", "ignored", "disabled"] {
-            assert!(container_management_from_db(value.to_owned()).is_ok());
-        }
-        assert!(container_management_from_db("other".to_owned()).is_err());
-
-        for value in ["pending", "running", "succeeded", "failed"] {
-            assert!(scan_status_from_db(value.to_owned()).is_ok());
-        }
-        assert!(scan_status_from_db("other".to_owned()).is_err());
-
-        for value in ["security", "normal", "unknown"] {
-            assert!(classification_from_db(value.to_owned()).is_ok());
-        }
-        assert!(classification_from_db("other".to_owned()).is_err());
-
-        for value in ["draft", "blocked", "ready", "confirmed", "invalidated"] {
-            assert!(plan_status_from_db(value.to_owned()).is_ok());
-        }
-        assert!(plan_status_from_db("other".to_owned()).is_err());
-
-        for value in ["install", "upgrade", "remove", "downgrade"] {
-            assert!(change_kind_from_db(value.to_owned()).is_ok());
-        }
-        assert!(change_kind_from_db("other".to_owned()).is_err());
-
-        for value in [
-            "queued",
-            "running",
-            "succeeded",
-            "failed",
-            "aborted",
-            "unknown",
-        ] {
-            assert!(execution_status_from_db(value.to_owned()).is_ok());
-        }
-        assert!(execution_status_from_db("other".to_owned()).is_err());
-    }
-
-    #[test]
-    fn scalar_mappings_preserve_canonical_values() {
-        assert_eq!(os_to_db(&OperatingSystem::Debian), "debian");
-        assert_eq!(os_to_db(&OperatingSystem::Ubuntu), "ubuntu");
-        assert_eq!(
-            os_to_db(&OperatingSystem::Unknown("alpine".to_owned())),
-            "unknown:alpine"
-        );
-        assert_eq!(container_id(42).unwrap().value(), 42);
-        assert!(container_id(-1).is_err());
-        assert_eq!(package_name("nginx".to_owned()).unwrap().as_str(), "nginx");
-        assert!(package_name("".to_owned()).is_err());
-        assert_eq!(
-            package_version("1.2.3".to_owned()).unwrap().as_str(),
-            "1.2.3"
-        );
-        assert!(package_version("".to_owned()).is_err());
-    }
 }
 
 fn docker_workload_from_row(row: PgRow) -> Result<DockerWorkload, RepositoryError> {
@@ -426,44 +312,6 @@ fn ansible_status_to_db(value: AnsibleJobStatus) -> &'static str {
         AnsibleJobStatus::Succeeded => "succeeded",
         AnsibleJobStatus::Failed => "failed",
         AnsibleJobStatus::Aborted => "aborted",
-    }
-}
-
-fn environment_from_row(row: PgRow) -> Result<ProxmoxEnvironment, RepositoryError> {
-    Ok(ProxmoxEnvironment {
-        id: lxcup_core::EnvironmentId::from_uuid(row.try_get("id")?),
-        name: row.try_get("name")?,
-        endpoint: row.try_get("endpoint")?,
-        api_secret_ref: SecretId::from_uuid(row.try_get("api_secret_ref")?),
-        ca_secret_ref: row
-            .try_get::<Option<Uuid>, _>("ca_secret_ref")?
-            .map(SecretId::from_uuid),
-        status: environment_status_from_db(row.try_get("status")?)?,
-        last_checked_at: row.try_get("last_checked_at")?,
-        last_check_error: row.try_get("last_check_error")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-    })
-}
-
-fn environment_status_to_db(value: EnvironmentStatus) -> &'static str {
-    match value {
-        EnvironmentStatus::Configured => "configured",
-        EnvironmentStatus::Connected => "connected",
-        EnvironmentStatus::Failed => "failed",
-        EnvironmentStatus::Disabled => "disabled",
-    }
-}
-
-fn environment_status_from_db(value: String) -> Result<EnvironmentStatus, RepositoryError> {
-    match value.as_str() {
-        "configured" => Ok(EnvironmentStatus::Configured),
-        "connected" => Ok(EnvironmentStatus::Connected),
-        "failed" => Ok(EnvironmentStatus::Failed),
-        "disabled" => Ok(EnvironmentStatus::Disabled),
-        _ => Err(RepositoryError::InvalidValue {
-            field: "environment status",
-        }),
     }
 }
 
@@ -778,6 +626,7 @@ fn execution_status_from_db(value: String) -> Result<ExecutionStatus, Repository
         }),
     }
 }
+
 mod agent_registration;
 mod ansible_jobs;
 mod audit;
@@ -786,3 +635,6 @@ mod executions;
 mod nodes;
 mod plans;
 mod scans;
+#[cfg(test)]
+#[path = "repositories_tests.rs"]
+mod status_tests;

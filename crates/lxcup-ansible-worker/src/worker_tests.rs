@@ -1,4 +1,5 @@
 use super::*;
+use crate::output::ReconciliationDecision;
 use lxcup_ansible::{AnsibleJobRequest, ExecutionMode};
 use lxcup_core::{ActorRole, ResourceLifecycle, SecretId, SecretScope};
 use lxcup_secrets::CreateSecret;
@@ -130,6 +131,79 @@ async fn artifact_server(
     (format!("http://{address}"), server)
 }
 
+async fn wait_for_worker_status(
+    repository: &lxcup_persistence::WorkerHeartbeatRepository,
+    available: bool,
+) -> lxcup_persistence::WorkerHeartbeatStatus {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(status) = repository.latest_status().await.unwrap() {
+                if status.artifact_store_available == Some(available) {
+                    break status;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("worker availability task should persist its first heartbeat")
+}
+
+#[tokio::test]
+async fn artifact_store_monitor_persists_unavailable_and_recovered_states() {
+    let Some((database, admin, schema)) = isolated_repositories().await else {
+        return;
+    };
+    let repository = Repositories::new(&database).worker_heartbeats;
+    assert!(repository.latest_status().await.unwrap().is_none());
+    assert!(repository.latest().await.unwrap().is_none());
+    assert!(
+        repository
+            .latest_since(chrono::Utc::now() - chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let client = artifact_store::client().unwrap();
+    let task = tokio::spawn(artifact_store::report_availability(
+        repository.clone(),
+        "artifact-store-unavailable-test".to_owned(),
+        client.clone(),
+        "http://127.0.0.1:1".to_owned(),
+    ));
+    let unavailable = wait_for_worker_status(&repository, false).await;
+    task.abort();
+    let _ = task.await;
+    assert_eq!(unavailable.artifact_store_available, Some(false));
+
+    let manifest = serde_json::json!({
+        "version": lxcup_core::VERSION,
+        "artifacts": [{ "platform": "linux-amd64", "file": "agent", "sha256": "digest" }]
+    });
+    let (base_url, server) = artifact_server(manifest, Vec::new(), 1).await;
+    let task = tokio::spawn(artifact_store::report_availability(
+        repository.clone(),
+        "artifact-store-recovered-test".to_owned(),
+        client,
+        base_url,
+    ));
+    let recovered = wait_for_worker_status(&repository, true).await;
+    assert!(repository.latest().await.unwrap().is_some());
+    assert!(
+        repository
+            .latest_since(chrono::Utc::now() - chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    task.abort();
+    let _ = task.await;
+    server.await.unwrap();
+    assert_eq!(recovered.artifact_store_available, Some(true));
+
+    drop_test_schema(database, admin, &schema).await;
+}
+
 fn runtime_with_secrets(
     path: &Path,
 ) -> (
@@ -217,6 +291,10 @@ fn playbook_registry_is_explicit_for_supported_operations() {
             TargetKind::WindowsServer
         ),
         Some("playbooks/package-inventory-windows.yml")
+    );
+    assert_eq!(
+        playbook(AnsibleOperation::HealthCheck, TargetKind::WindowsServer),
+        Some("playbooks/health-check-windows.yml")
     );
     assert_eq!(
         playbook(AnsibleOperation::ConfigureTarget, TargetKind::Lxc),
@@ -314,6 +392,20 @@ fn check_mode_uses_ansible_check_flag_and_never_falls_through_to_apply() {
     );
     assert_eq!(
         ansible_mode_args(AnsibleOperation::ConfigureTarget, ExecutionMode::Plan),
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    assert_eq!(
+        ansible_mode_args(
+            AnsibleOperation::CollectPackageInventory,
+            ExecutionMode::Plan
+        ),
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    assert_eq!(
+        ansible_mode_args(
+            AnsibleOperation::CollectPackageInventory,
+            ExecutionMode::Reconcile
+        ),
         Err(JobFailureCode::PlaybookFailed)
     );
     for operation in [
@@ -480,16 +572,21 @@ fn current_agent_manifest_matches_binary_checksum() {
 fn package_inventory_normalization_preserves_versions_and_metadata() {
     let packages = normalize_package_inventory(
         serde_json::json!({
-            "curl": [{"version": "8.5.0-2", "arch": "amd64", "source": "apt"}],
+            "curl": [
+                {"version": "8.5.0-2", "arch": "amd64", "source": "apt"},
+                {"version": "8.4.0-1", "architecture": "x86_64", "provider": "apt-old"}
+            ],
             "zlib1g": [{"version": "1:1.2.13", "architecture": "amd64"}]
         }),
         &["curl/stable 8.6.0-1 amd64 [upgradable from: 8.5.0-2]".to_owned()],
     )
     .unwrap();
 
-    assert_eq!(packages.len(), 2);
+    assert_eq!(packages.len(), 3);
     assert_eq!(packages[0].name.as_str(), "curl");
-    assert_eq!(packages[0].architecture.as_deref(), Some("amd64"));
+    assert_eq!(packages[0].version.as_str(), "8.4.0-1");
+    assert_eq!(packages[0].architecture.as_deref(), Some("x86_64"));
+    assert_eq!(packages[0].source.as_deref(), Some("apt-old"));
     assert_eq!(
         packages[0]
             .candidate_version
@@ -497,9 +594,12 @@ fn package_inventory_normalization_preserves_versions_and_metadata() {
             .map(|version| version.as_str()),
         Some("8.6.0-1")
     );
-    assert_eq!(packages[1].version.as_str(), "1:1.2.13");
+    assert_eq!(packages[1].version.as_str(), "8.5.0-2");
+    assert_eq!(packages[1].architecture.as_deref(), Some("amd64"));
+    assert_eq!(packages[1].source.as_deref(), Some("apt"));
+    assert_eq!(packages[2].version.as_str(), "1:1.2.13");
     assert_eq!(
-        packages[1]
+        packages[2]
             .candidate_version
             .as_ref()
             .map(|version| version.as_str()),
@@ -585,6 +685,11 @@ fn agent_variables_are_skipped_for_health_checks_and_require_a_secret_otherwise(
     );
     assert_eq!(vars["lxcup_agent_token"], "agent-token");
     assert_eq!(vars["lxcup_agent_id"], target.id.as_uuid().to_string());
+    target.agent_secret_ref = SecretId::new();
+    assert_eq!(
+        prepare_agent_vars(&runtime, &deploy_job, &target, &mut serde_json::json!({})),
+        Err(JobFailureCode::InvalidCredentials)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -635,6 +740,178 @@ fn invocation_prepares_private_inventory_and_known_hosts_files() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test]
+async fn invocation_builds_apply_and_inventory_vars_with_private_key_credentials() {
+    let root = std::env::temp_dir().join(format!("lxcup-worker-vars-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let (mut runtime, _password_ref, agent_ref, known_hosts_ref) = runtime_with_secrets(&root);
+    runtime.controller_url = Some("http://controller:8080".to_owned());
+    let key = runtime
+        .secrets
+        .create(CreateSecret {
+            name: "worker-private-key".to_owned(),
+            kind: SecretKind::SshPrivateKey,
+            scope: SecretScope::Global,
+            value: SecretValue::new("private-key-material").unwrap(),
+        })
+        .unwrap();
+    let mut target = Target::new(
+        "worker-private-key-target",
+        TargetKind::LinuxServer,
+        "192.0.2.44",
+        TargetTransport::Ssh,
+        key.metadata.id,
+        agent_ref,
+    )
+    .unwrap();
+    target.ssh_known_hosts_secret_ref = Some(known_hosts_ref);
+    let apply = AnsibleJob::from_request(AnsibleJobRequest {
+        operation: AnsibleOperation::UpdatePackages,
+        target: ResourceTarget::Target(target.id),
+        lifecycle: ResourceLifecycle::Managed,
+        mode: ExecutionMode::Apply,
+        parameters: AnsibleParameters::UpdatePackages {
+            packages: vec!["curl".to_owned()],
+        },
+        secret_refs: vec![agent_ref],
+        idempotency_key: "worker-private-key-apply".to_owned(),
+        confirmed: true,
+        actor_role: ActorRole::Operator,
+    })
+    .unwrap();
+    let context = prepare_invocation(&runtime, &apply, &target, &root)
+        .await
+        .unwrap();
+    let inventory: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&context.inventory).unwrap()).unwrap();
+    let vars: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&context.vars_file).unwrap()).unwrap();
+    assert!(
+        inventory["lxcup_targets"]["hosts"]["target"]["ansible_ssh_private_key_file"].is_string()
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("credential")).unwrap(),
+        "private-key-material"
+    );
+    assert_eq!(vars["lxcup_execution_mode"], "apply");
+    assert_eq!(vars["lxcup_update_packages"], serde_json::json!(["curl"]));
+    assert_eq!(vars["lxcup_plan_confirmed"], true);
+    assert_eq!(vars["lxcup_distribution_upgrade"], false);
+    assert_eq!(vars["lxcup_controller_url"], "http://controller:8080");
+    assert_eq!(vars["lxcup_agent_id"], target.id.as_uuid().to_string());
+
+    let inventory_job = AnsibleJob::from_request(AnsibleJobRequest {
+        operation: AnsibleOperation::CollectPackageInventory,
+        target: ResourceTarget::Target(target.id),
+        lifecycle: ResourceLifecycle::Managed,
+        mode: ExecutionMode::Check,
+        parameters: AnsibleParameters::CollectPackageInventory,
+        secret_refs: vec![agent_ref],
+        idempotency_key: "worker-private-key-inventory".to_owned(),
+        confirmed: true,
+        actor_role: ActorRole::Operator,
+    })
+    .unwrap();
+    let inventory_context = prepare_invocation(&runtime, &inventory_job, &target, &root)
+        .await
+        .unwrap();
+    let inventory_vars: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&inventory_context.vars_file).unwrap()).unwrap();
+    assert_eq!(inventory_vars["lxcup_execution_mode"], "check");
+    assert_eq!(
+        inventory_vars["lxcup_package_inventory_remote_file"],
+        "/tmp/lxcup-package-inventory.json"
+    );
+    assert!(inventory_vars["lxcup_package_inventory_output"].is_string());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn agent_update_invocation_uses_only_the_verified_artifact_for_its_requested_version() {
+    let root = std::env::temp_dir().join(format!("lxcup-worker-agent-update-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let binary = b"agent-update-artifact".to_vec();
+    let manifest = serde_json::json!({
+        "version": "0.3.1",
+        "artifacts": [{
+            "platform": "linux-amd64",
+            "file": "agent",
+            "sha256": format!("{:x}", Sha256::digest(&binary))
+        }]
+    });
+    let (base, artifact_task) = artifact_server(manifest, binary.clone(), 2).await;
+    let (mut runtime, credential_ref, agent_ref, known_hosts_ref) = runtime_with_secrets(&root);
+    runtime.artifacts = base;
+    let mut target = Target::new(
+        "worker-agent-update",
+        TargetKind::LinuxServer,
+        "192.0.2.46",
+        TargetTransport::Ssh,
+        credential_ref,
+        agent_ref,
+    )
+    .unwrap();
+    target.ssh_known_hosts_secret_ref = Some(known_hosts_ref);
+    let job = AnsibleJob::from_request(AnsibleJobRequest {
+        operation: AnsibleOperation::UpdateAgent,
+        target: ResourceTarget::Target(target.id),
+        lifecycle: ResourceLifecycle::Managed,
+        mode: ExecutionMode::Plan,
+        parameters: AnsibleParameters::UpdateAgent {
+            agent_version: "0.3.1".to_owned(),
+        },
+        secret_refs: vec![agent_ref],
+        idempotency_key: "verified-agent-artifact-plan".to_owned(),
+        confirmed: true,
+        actor_role: ActorRole::Operator,
+    })
+    .unwrap();
+    let context = prepare_invocation(&runtime, &job, &target, &root)
+        .await
+        .unwrap();
+    let vars: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&context.vars_file).unwrap()).unwrap();
+    let artifact_path = vars["lxcup_agent_binary_src"].as_str().unwrap();
+    assert_eq!(vars["lxcup_agent_version"], "0.3.1");
+    assert_eq!(fs::read(artifact_path).unwrap(), binary);
+    artifact_task.await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn known_hosts_validation_rejects_missing_and_wrong_type_secrets() {
+    let root = std::env::temp_dir().join(format!("lxcup-worker-hostkeys-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let (runtime, credential_ref, _agent_ref, known_hosts_ref) = runtime_with_secrets(&root);
+    let mut target = Target::new(
+        "worker-known-hosts-invalid",
+        TargetKind::LinuxServer,
+        "192.0.2.45",
+        TargetTransport::Ssh,
+        credential_ref,
+        SecretId::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        prepare_known_hosts(&runtime, &target, &root),
+        Err(JobFailureCode::InvalidCredentials)
+    );
+    target.ssh_known_hosts_secret_ref = Some(SecretId::new());
+    assert_eq!(
+        prepare_known_hosts(&runtime, &target, &root),
+        Err(JobFailureCode::InvalidCredentials)
+    );
+    target.ssh_known_hosts_secret_ref = Some(credential_ref);
+    assert_eq!(
+        prepare_known_hosts(&runtime, &target, &root),
+        Err(JobFailureCode::InvalidCredentials)
+    );
+    target.transport = TargetTransport::Winrm;
+    target.ssh_known_hosts_secret_ref = Some(known_hosts_ref);
+    assert_eq!(prepare_known_hosts(&runtime, &target, &root), Ok(None));
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn runtime_configuration_validates_required_values_and_normalizes_urls() {
     assert!(matches!(
@@ -668,6 +945,16 @@ fn runtime_configuration_validates_required_values_and_normalizes_urls() {
         ),
         Err("LXCUP_ARTIFACT_BASE_URL is missing")
     ));
+    let without_controller = Runtime::from_values(
+        Some(root.display().to_string()),
+        Some(SecretMasterKey::from_bytes([8; 32])),
+        Some("http://artifacts".to_owned()),
+        Some("deploy".to_owned()),
+        Some("///".to_owned()),
+    )
+    .unwrap();
+    assert_eq!(without_controller.user, "deploy");
+    assert!(without_controller.controller_url.is_none());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -701,6 +988,52 @@ fn package_inventory_file_reader_handles_missing_invalid_and_valid_files() {
         Some("8.6.0")
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn package_inventory_rejects_invalid_package_shapes_and_values() {
+    assert_eq!(
+        normalize_package_inventory(serde_json::json!({"curl": "8.5.0"}), &[]),
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    assert_eq!(
+        normalize_package_inventory(serde_json::json!({"curl": [{}]}), &[]),
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    assert_eq!(
+        normalize_package_inventory(serde_json::json!({"curl": [{"version": ""}]}), &[]),
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    let package = normalize_package_inventory(
+        serde_json::json!({"curl": [{"version": "1.0"}]}),
+        &["curl/stable !invalid amd64 [upgradable from: 0.9]".to_owned()],
+    )
+    .unwrap();
+    assert_eq!(
+        package[0].candidate_version.as_ref().unwrap().as_str(),
+        "!invalid"
+    );
+    assert_eq!(
+        normalize_package_inventory(
+            serde_json::json!({"bad package": [{"version": "1.0"}]}),
+            &[]
+        ),
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    assert_eq!(parse_apt_upgrade("curl/stable"), None);
+
+    let oversized = (0..50_001)
+        .map(|index| {
+            (
+                format!("package-{index:05}"),
+                serde_json::json!([{"version": "1.0"}]),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    assert_eq!(
+        normalize_package_inventory(serde_json::Value::Object(oversized), &[]),
+        Err(JobFailureCode::PlaybookFailed)
+    );
 }
 
 #[tokio::test]
@@ -1003,7 +1336,7 @@ async fn artifact_download_checks_version_platform_and_sha256() {
     );
     server.await.unwrap();
 
-    let mut wrong_hash = base_manifest;
+    let mut wrong_hash = base_manifest.clone();
     wrong_hash["artifacts"][0]["sha256"] = serde_json::json!("00");
     let (base, server) = artifact_server(wrong_hash, binary, 2).await;
     runtime.artifacts = base;
@@ -1011,6 +1344,59 @@ async fn artifact_download_checks_version_platform_and_sha256() {
         artifact(&runtime, "0.3.1", &root).await,
         Err(JobFailureCode::PlaybookFailed)
     );
+    server.await.unwrap();
+
+    let mut missing_platform = base_manifest.clone();
+    missing_platform["artifacts"][0]["platform"] = serde_json::json!("windows-amd64");
+    let (base, server) = artifact_server(missing_platform, Vec::new(), 1).await;
+    runtime.artifacts = base;
+    assert_eq!(
+        artifact(&runtime, "0.3.1", &root).await,
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    server.await.unwrap();
+
+    let (base, server) = artifact_server(serde_json::json!({"invalid": true}), Vec::new(), 1).await;
+    runtime.artifacts = base;
+    assert_eq!(
+        artifact(&runtime, "0.3.1", &root).await,
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    server.await.unwrap();
+
+    runtime.artifacts = "http://127.0.0.1:1".to_owned();
+    assert_eq!(
+        artifact(&runtime, "0.3.1", &root).await,
+        Err(JobFailureCode::WorkerUnavailable)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn artifact_download_treats_server_error_status_as_unavailable() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).await.unwrap();
+        stream
+            .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let root = std::env::temp_dir().join(format!("lxcup-worker-status-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let mut runtime = runtime_with_secrets(&root).0;
+    runtime.artifacts = format!("http://{address}");
+
+    assert_eq!(
+        artifact(&runtime, "0.3.1", &root).await,
+        Err(JobFailureCode::WorkerUnavailable)
+    );
+
     server.await.unwrap();
     fs::remove_dir_all(root).unwrap();
 }
@@ -1065,6 +1451,40 @@ async fn recovery_and_queue_processing_persist_all_worker_outcomes() {
     non_target_job.target = ResourceTarget::Container(lxcup_core::ContainerId::new(7));
     assert_eq!(
         run(&repos, &runtime, &mut non_target_job).await,
+        Err(JobFailureCode::PlaybookFailed)
+    );
+
+    let missing_target = Target::new(
+        "worker-missing-target",
+        TargetKind::LinuxServer,
+        "192.0.2.23",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    let mut missing_target_job = health_job(
+        &missing_target,
+        &format!("missing-target-{}", Uuid::new_v4()),
+    );
+    assert_eq!(
+        run(&repos, &runtime, &mut missing_target_job).await,
+        Err(JobFailureCode::Unreachable)
+    );
+
+    let mut unauthorized_secret_job =
+        package_update_job(&target, &format!("unauthorized-secret-{}", Uuid::new_v4()));
+    unauthorized_secret_job.secret_refs = vec![SecretId::new()];
+    assert_eq!(
+        run(&repos, &runtime, &mut unauthorized_secret_job).await,
+        Err(JobFailureCode::InvalidCredentials)
+    );
+
+    let mut invalid_transition =
+        health_job(&target, &format!("invalid-transition-{}", Uuid::new_v4()));
+    invalid_transition.status = AnsibleJobStatus::Succeeded;
+    assert_eq!(
+        run(&repos, &runtime, &mut invalid_transition).await,
         Err(JobFailureCode::PlaybookFailed)
     );
 

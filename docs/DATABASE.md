@@ -28,6 +28,10 @@ level it stores:
   execution log used by the UI and audit trail.
 - **Agent registrations and worker heartbeats** — managed-agent enrollment,
   worker availability, and the latest artifact-store health probe.
+- **Local authentication** — password hashes, the Admin/User role, forced
+  password-change state, revocable hashed sessions, and an Admin-only user
+  activity audit. Sessions cascade when their account is removed; audit rows
+  retain a username/role snapshot if the actor is later deleted.
 - **Package inventory and target telemetry** — latest package snapshot and
   resource samples associated with a target, including bounded per-container
   Docker CPU and memory samples retained for the recent chart window.
@@ -38,6 +42,13 @@ level it stores:
 - **Schedules and update policies** — recurring registered work and package
   update constraints. Non-system update policies can be deleted through the
   repository; job/event history remains independent of the policy row.
+- Removing a managed target is transactional: target-keyed inventory,
+  telemetry, Docker snapshots, workflows, and workflow events are deleted by
+  cascade; schedules lose that target (and are removed if empty); policies
+  lose that target (and policies/schedules are removed if their scope becomes
+  empty). A minimal `target.deleted` audit event remains without a target
+  foreign key. Global secrets are separate records and are deliberately not
+  deleted, since they can be shared.
 - **Planner/execution and audit records** — scan results, plans, confirmed
   executions, results, and lifecycle/audit events used by the existing planner
   domain.

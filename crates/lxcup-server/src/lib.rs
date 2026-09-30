@@ -9,7 +9,7 @@ use std::{
 #[cfg(test)]
 use axum::http::Method;
 use axum::{
-    Json, Router,
+    Json,
     extract::{Extension, Json as JsonBody, Path, State},
     http::StatusCode,
     middleware,
@@ -17,7 +17,6 @@ use axum::{
         IntoResponse,
         sse::{Event, Sse},
     },
-    routing::{delete, get, post},
 };
 use lxcup_agent::{
     AgentClient, AgentClientConfig, AgentHealth, AgentHeartbeat, AgentMetrics, DockerContainerInfo,
@@ -40,7 +39,8 @@ use uuid::Uuid;
 
 mod targets;
 pub(crate) use targets::{
-    create_target, get_target, list_targets, receive_agent_heartbeat, require_permission,
+    create_target, delete_target, get_target, list_targets, receive_agent_heartbeat,
+    require_permission,
 };
 mod workflows;
 pub(crate) use workflows::{
@@ -76,6 +76,14 @@ pub(crate) use inventory::{
     get_plan, list_container_plans, list_containers, list_scans, live_health, logout, metrics,
     ready_health, reconcile_execution, request_middleware, run_execution, run_scan, start_scan,
 };
+mod user_auth;
+pub(crate) use user_auth::{
+    AuthenticatedUser, auth_login, auth_status, change_password, hash_session_token,
+};
+mod user_admin;
+pub(crate) use user_admin::{
+    create_user, delete_user, list_user_audit, list_users, reset_user_password, update_user,
+};
 mod agent;
 pub(crate) use agent::{
     DockerWorkloadDto, SecretAuditEvent, adopt_docker_container, create_secret, delete_secret,
@@ -107,6 +115,8 @@ pub struct ApiState {
     agents: Arc<RwLock<HashMap<ContainerId, RegisteredAgent>>>,
     metrics: Arc<ApiMetrics>,
     auth: AuthConfig,
+    account_auth_enabled: bool,
+    secure_cookies: bool,
     repositories: Option<Repositories>,
     ansible: Arc<RwLock<AnsibleJobCoordinator>>,
     secrets: Arc<dyn SecretStore>,
@@ -124,6 +134,9 @@ impl ApiState {
             agents: Arc::new(RwLock::new(HashMap::new())),
             metrics: Arc::new(ApiMetrics::default()),
             auth: AuthConfig::from_env(),
+            account_auth_enabled: false,
+            secure_cookies: std::env::var("LXCUP_ENV")
+                .is_ok_and(|environment| environment.eq_ignore_ascii_case("production")),
             repositories: None,
             ansible: Arc::new(RwLock::new(AnsibleJobCoordinator::default())),
             secrets: Arc::new(InMemorySecretStore::default()),
@@ -135,6 +148,24 @@ impl ApiState {
     pub fn with_repositories(mut self, repositories: Repositories) -> Self {
         self.repositories = Some(repositories);
         self
+    }
+
+    pub fn with_account_auth(mut self) -> Self {
+        self.account_auth_enabled = true;
+        self
+    }
+
+    pub async fn initialize_bootstrap_admin(&self) -> Result<bool, ApiError> {
+        let repositories = self.repositories.as_ref().ok_or_else(ApiError::storage)?;
+        let password_hash = tokio::task::spawn_blocking(|| user_auth::hash_password("admin"))
+            .await
+            .map_err(|_| ApiError::storage())?
+            .map_err(|_| ApiError::storage())?;
+        repositories
+            .auth
+            .create_initial_admin(&password_hash)
+            .await
+            .map_err(|_| ApiError::storage())
     }
 
     pub fn with_auth_config(mut self, auth: AuthConfig) -> Self {
@@ -564,160 +595,8 @@ impl From<&Enrollment> for EnrollmentDto {
     }
 }
 
-pub fn router(state: ApiState) -> Router {
-    Router::new()
-        .route("/health/live", get(live_health))
-        .route("/health/ready", get(ready_health))
-        .route("/metrics", get(metrics))
-        .route("/api/v1/auth/session", get(auth_session))
-        .route("/api/v1/auth/logout", post(logout))
-        .route("/api/v1/targets", get(list_targets).post(create_target))
-        .route(
-            "/api/v1/targets/{target_id}/package-inventory",
-            get(get_package_inventory),
-        )
-        .route(
-            "/api/v1/targets/{target_id}/telemetry",
-            get(get_target_telemetry),
-        )
-        .route(
-            "/api/v1/targets/{target_id}/docker/telemetry",
-            get(get_target_docker_telemetry),
-        )
-        .route("/api/v1/telemetry-alerts", get(list_telemetry_alerts))
-        .route(
-            "/api/v1/targets/{target_id}/docker/discovery",
-            get(get_target_docker_inventory).post(discover_target_docker),
-        )
-        .route(
-            "/api/v1/targets/{target_id}/docker/containers/{container_id}/action",
-            post(operate_target_docker_container),
-        )
-        .route(
-            "/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-check",
-            post(check_target_docker_image_update),
-        )
-        .route(
-            "/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-apply",
-            post(apply_target_docker_image_update),
-        )
-        .route("/api/v1/targets/{target_id}", get(get_target))
-        .route(
-            "/api/v1/schedules",
-            get(list_schedules).post(create_schedule),
-        )
-        .route(
-            "/api/v1/schedules/{schedule_id}",
-            axum::routing::patch(set_schedule_enabled),
-        )
-        .route(
-            "/api/v1/update-policies",
-            get(list_update_policies).post(create_update_policy),
-        )
-        .route(
-            "/api/v1/update-policies/{policy_id}",
-            delete(delete_update_policy),
-        )
-        .route("/api/v1/agents/heartbeat", post(receive_agent_heartbeat))
-        .route("/api/v1/secrets", get(list_secrets).post(create_secret))
-        .route("/api/v1/secrets/audit", get(list_secret_audit))
-        .route(
-            "/api/v1/secrets/{secret_id}",
-            get(get_secret).delete(delete_secret),
-        )
-        .route("/api/v1/secrets/{secret_id}/rotate", post(rotate_secret))
-        .route("/api/v1/secrets/{secret_id}/revoke", post(revoke_secret))
-        .route("/api/v1/enrollments", post(create_enrollment))
-        .route("/api/v1/enrollments/{enrollment_id}", get(get_enrollment))
-        .route(
-            "/api/v1/ansible/jobs",
-            get(list_ansible_jobs).post(create_ansible_job),
-        )
-        .route("/api/v1/ansible/jobs/{job_id}", get(get_ansible_job))
-        .route(
-            "/api/v1/ansible/jobs/{job_id}/retry",
-            post(retry_ansible_job),
-        )
-        .route(
-            "/api/v1/ansible/jobs/{job_id}/reconcile",
-            post(reconcile_ansible_job),
-        )
-        .route(
-            "/api/v1/ansible/jobs/{job_id}/events",
-            get(get_ansible_job_events),
-        )
-        .route(
-            "/api/v1/ansible/worker-availability",
-            get(get_worker_availability),
-        )
-        .route("/api/v1/containers", get(list_containers))
-        .route(
-            "/api/v1/containers/{container_id}/scans",
-            get(list_scans).post(start_scan),
-        )
-        .route("/api/v1/scans/{scan_id}/run", post(run_scan))
-        .route(
-            "/api/v1/containers/{container_id}/plans",
-            get(list_container_plans).post(create_plan),
-        )
-        .route("/api/v1/plans/{plan_id}", get(get_plan))
-        .route("/api/v1/plans/{plan_id}/confirm", post(confirm_plan))
-        .route(
-            "/api/v1/executions/{execution_id}/abort",
-            post(abort_execution),
-        )
-        .route("/api/v1/executions/{execution_id}/run", post(run_execution))
-        .route(
-            "/api/v1/executions/{execution_id}/reconcile",
-            post(reconcile_execution),
-        )
-        .route("/api/v1/executions/{execution_id}", get(get_execution))
-        .route(
-            "/api/v1/executions/{execution_id}/result",
-            get(get_execution_result),
-        )
-        .route("/api/v1/executions/{execution_id}/safety", get(get_safety))
-        .route(
-            "/api/v1/containers/{container_id}/agent",
-            post(register_agent),
-        )
-        .route(
-            "/api/v1/containers/{container_id}/agent/health",
-            get(get_agent_health),
-        )
-        .route(
-            "/api/v1/containers/{container_id}/agent/metrics",
-            get(get_agent_metrics),
-        )
-        .route(
-            "/api/v1/containers/{container_id}/docker/containers",
-            get(list_docker_containers),
-        )
-        .route(
-            "/api/v1/containers/{container_id}/docker/discovery",
-            get(get_docker_discovery),
-        )
-        .route(
-            "/api/v1/containers/{container_id}/docker/discover",
-            post(discover_docker_containers),
-        )
-        .route(
-            "/api/v1/containers/{container_id}/docker/containers/{docker_id}/adopt",
-            post(adopt_docker_container),
-        )
-        .route(
-            "/api/v1/containers/{container_id}/docker/containers/{docker_id}",
-            axum::routing::delete(remove_docker_container),
-        )
-        .route(
-            "/api/v1/containers/{container_id}/agent/revoke",
-            post(revoke_agent),
-        )
-        .route("/api/v1/openapi.json", get(openapi_document))
-        .route("/api/v1/events", get(stream_events))
-        .with_state(state.clone())
-        .layer(middleware::from_fn_with_state(state, request_middleware))
-}
+mod http_router;
+pub use http_router::router;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ApiEnvelope<T> {
@@ -765,14 +644,24 @@ async fn get_safety(
 pub const OPENAPI_CONTRACT: &str = r#"{
   "openapi": "3.1.0",
   "info": {"title": "lxcup API", "version": "v1"},
-  "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
+  "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}, "sessionCookie": {"type": "apiKey", "in": "cookie", "name": "lxcup_session"}, "csrfToken": {"type": "apiKey", "in": "header", "name": "X-CSRF-Token"}}},
   "paths": {
     "/health/live": {"get": {}},
     "/health/ready": {"get": {}},
     "/metrics": {"get": {}},
+    "/api/v1/auth/status": {"get": {"description": "Reports whether local account authentication is enabled"}},
+    "/api/v1/auth/login": {"post": {"description": "Authenticates a local account and sets an eight-hour HttpOnly session cookie; the session secret is not returned in JSON"}},
+    "/api/v1/auth/session": {"get": {"description": "Returns the current account role and forced-password-change state"}},
+    "/api/v1/auth/logout": {"post": {"description": "Revokes the current account session and clears the session and CSRF cookies"}},
+    "/api/v1/auth/password": {"post": {"description": "Changes the current account password; cookie-authenticated requests require X-CSRF-Token"}},
+    "/api/v1/auth/audit": {"get": {"description": "Admin-only, filtered and paginated user activity audit history", "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}}, {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0}}, {"name": "actor_username", "in": "query", "schema": {"type": "string"}}, {"name": "action", "in": "query", "schema": {"type": "string"}}, {"name": "resource", "in": "query", "schema": {"type": "string"}}, {"name": "since", "in": "query", "schema": {"type": "string", "format": "date-time"}}, {"name": "until", "in": "query", "schema": {"type": "string", "format": "date-time"}}], "responses": {"200": {"description": "Filtered audit page with total result count, limit, and offset"}}}},
+    "/api/v1/users": {"get": {"description": "Admin-only user listing"}, "post": {"description": "Admin-only account creation without email"}},
+    "/api/v1/users/{user_id}": {"patch": {"description": "Admin-only role or account-state update"}, "delete": {"description": "Admin-only confirmed user deletion"}},
+    "/api/v1/users/{user_id}/password-reset": {"post": {"description": "Admin-only password reset that requires a change at next login"}},
     "/api/v1/enrollments": {"post": {"responses": {"202": {"description": "Enrollment accepted"}}}},
     "/api/v1/telemetry-alerts": {"get": {"responses": {"200": {"description": "Active telemetry threshold and freshness alerts"}}}},
     "/api/v1/targets/{target_id}/docker/telemetry": {"get": {"responses": {"200": {"description": "Recent per-container Docker CPU and memory telemetry"}}}},
+    "/api/v1/targets/{target_id}": {"get": {"responses": {"200": {"description": "Registered target"}}}, "delete": {"description": "Admin-only confirmed removal of a target and its target-scoped operational data; does not uninstall the host agent or delete shared secrets", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["confirmed"], "properties": {"confirmed": {"type": "boolean"}}}}}}, "responses": {"204": {"description": "Target removed"}, "409": {"description": "Target has active workflows"}}}},
     "/api/v1/targets/{target_id}/docker/containers/{container_id}/action": {"post": {"responses": {"200": {"description": "Confirmed allow-listed Docker lifecycle action"}}}},
     "/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-check": {"post": {"responses": {"200": {"description": "Read-only registry digest comparison for a Docker image"}}}},
     "/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-apply": {"post": {"responses": {"200": {"description": "Explicitly confirmed Compose image update for one Linux service"}}}},

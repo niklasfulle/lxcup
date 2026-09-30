@@ -13,6 +13,7 @@ use lxcup_core::{ActorRole, ScanId};
 mod auth;
 pub use auth::AuthConfig;
 pub(super) use auth::*;
+pub(crate) use auth::{live_health, metrics, ready_health};
 mod execution;
 pub(super) use execution::*;
 
@@ -38,26 +39,68 @@ pub(super) async fn list_containers(
     Json(envelope(containers))
 }
 
-/// Stateless bearer tokens are discarded by the client on logout. The
-/// endpoint gives clients a stable audit-safe contract without echoing the
-/// token; immediate server-side invalidation is provided by rotation/revoke.
-pub(super) async fn logout(axum::Extension(_actor_role): axum::Extension<ActorRole>) -> StatusCode {
+/// Account sessions are revoked server-side; legacy development tokens are
+/// stateless and are discarded by the client on logout.
+pub(super) async fn logout(
+    State(state): State<ApiState>,
+    actor: Option<axum::Extension<super::AuthenticatedUser>>,
+    axum::Extension(_actor_role): axum::Extension<ActorRole>,
+) -> StatusCode {
+    if let (Some(repositories), Some(axum::Extension(actor))) = (state.repositories.as_ref(), actor)
+    {
+        if repositories
+            .auth
+            .revoke_session(&actor.token_hash)
+            .await
+            .is_err()
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
     StatusCode::NO_CONTENT
 }
 
 #[derive(serde::Serialize)]
 pub(super) struct AuthSessionDto {
-    role: ActorRole,
+    role: String,
+    username: Option<String>,
+    must_change_password: bool,
     expires_in_seconds: Option<u64>,
 }
 
 pub(super) async fn auth_session(
     State(state): State<ApiState>,
     axum::Extension(role): axum::Extension<ActorRole>,
+    actor: Option<axum::Extension<super::AuthenticatedUser>>,
 ) -> Json<ApiEnvelope<AuthSessionDto>> {
+    let (role_name, username, must_change_password, expires_in_seconds) =
+        if let Some(axum::Extension(actor)) = actor {
+            (
+                match actor.role {
+                    lxcup_persistence::AuthUserRole::Admin => "admin".to_owned(),
+                    lxcup_persistence::AuthUserRole::User => "user".to_owned(),
+                },
+                Some(actor.username),
+                actor.must_change_password,
+                Some((actor.expires_at - chrono::Utc::now()).num_seconds().max(0) as u64),
+            )
+        } else {
+            (
+                match role {
+                    ActorRole::Admin => "admin".to_owned(),
+                    ActorRole::Operator => "operator".to_owned(),
+                    ActorRole::Viewer => "viewer".to_owned(),
+                },
+                None,
+                false,
+                state.auth.remaining_ttl_seconds(),
+            )
+        };
     Json(envelope(AuthSessionDto {
-        role,
-        expires_in_seconds: state.auth.remaining_ttl_seconds(),
+        role: role_name,
+        username,
+        must_change_password,
+        expires_in_seconds,
     }))
 }
 
@@ -279,5 +322,54 @@ mod tests {
     #[test]
     fn default_authenticated_is_true() {
         assert!(default_authenticated());
+    }
+
+    #[tokio::test]
+    async fn scans_reject_invalid_missing_and_unrunnable_requests() {
+        let state = ApiState::new();
+        assert_eq!(
+            list_scans(State(state.clone()), Path("invalid".to_owned()))
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_id"
+        );
+        assert_eq!(
+            start_scan(State(state.clone()), Path("101".to_owned()))
+                .await
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+        assert_eq!(
+            run_scan(State(state.clone()), Path("invalid".to_owned()))
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_id"
+        );
+        assert_eq!(
+            run_scan(State(state.clone()), Path(uuid::Uuid::new_v4().to_string()),)
+                .await
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+
+        let container = lxcup_core::ContainerId::new(101);
+        let scan = Scan::new(container);
+        let scan_id = scan.id;
+        state.store.write().await.scans.push(scan);
+        assert_eq!(
+            run_scan(State(state.clone()), Path(scan_id.as_uuid().to_string()))
+                .await
+                .unwrap_err()
+                .code,
+            "agent_unavailable"
+        );
+        assert_eq!(
+            state.store.read().await.scans[0].status,
+            lxcup_core::ScanStatus::Running
+        );
     }
 }

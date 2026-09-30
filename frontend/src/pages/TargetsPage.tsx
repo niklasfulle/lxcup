@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createAnsibleJob, createSecret, createTarget, listSecrets, type AnsibleJobDto, type SecretKind, type SecretMetadata, type TargetDto, type TargetKind, type TargetTransport } from "../api";
+import { createAnsibleJob, createSecret, createTarget, deleteTarget, listSecrets, type AnsibleJobDto, type SecretKind, type SecretMetadata, type TargetDto, type TargetKind, type TargetTransport } from "../api";
 import { queryKeys, useAnsibleJob, useAnsibleJobs, usePackageInventory, useTargetTelemetry, useTargets } from "../queries";
 import { TargetLifecycle } from "../components/TargetLifecycle";
 import { isTelemetryStale } from "../telemetryFreshness";
@@ -121,6 +121,19 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
       if (startOnboarding) deployment.mutate(target.id);
     },
   });
+  const remove = useMutation({
+    mutationFn: (target: TargetDto) => deleteTarget(target.id, true),
+    onSuccess: async (_, target) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.targets }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.ansibleJobs }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.schedules }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.updatePolicies }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.telemetryAlerts }),
+      ]);
+      queryClient.removeQueries({ queryKey: ["targets", target.id] });
+    },
+  });
 
   const createdTarget = targets.data?.find((target) => target.id === createdTargetId) ?? create.data;
   const visibleTargets = targetsForArea(targets.data ?? [], area);
@@ -206,7 +219,11 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
           </div>
           <span className="text-[var(--muted)]">{visibleTargets.length} Einträge</span>
         </div>
-        <TargetInventory targets={visibleTargets} isLoading={targets.isLoading} jobs={jobs.data ?? []} />
+        {remove.error instanceof Error && <p className="mb-3 font-semibold text-[var(--error)]" role="alert">Ressource konnte nicht entfernt werden: {remove.error.message}</p>}
+        <TargetInventory targets={visibleTargets} isLoading={targets.isLoading} jobs={jobs.data ?? []} removingTargetId={remove.isPending ? remove.variables?.id : undefined} onRemove={(target) => {
+          const message = `Ressource „${target.name}“ und alle zugehörigen Inventar-, Telemetrie-, Docker- und Workflow-Daten aus lxcup entfernen?\n\nDer Agent wird NICHT auf dem Host deinstalliert. Zugangsdaten/Secrets bleiben erhalten, da sie von weiteren Ressourcen verwendet werden können. Laufende Workflows müssen zuerst abgeschlossen sein.`;
+          if (globalThis.confirm(message)) remove.mutate(target);
+        }} />
       </section>
     </>
   );
@@ -356,15 +373,15 @@ function mutationError(error: unknown) {
   return error instanceof Error ? <p className="font-semibold text-[var(--error)]">{error.message}</p> : null;
 }
 
-function TargetInventory({ targets, isLoading, jobs }: Readonly<{ targets: TargetDto[]; isLoading: boolean; jobs: AnsibleJobDto[] }>) {
+function TargetInventory({ targets, isLoading, jobs, removingTargetId, onRemove }: Readonly<{ targets: TargetDto[]; isLoading: boolean; jobs: AnsibleJobDto[]; removingTargetId?: string; onRemove: (target: TargetDto) => void }>) {
   if (isLoading) return <p className="text-[var(--muted)]">Lade Zugangsprofile…</p>;
   if (targets.length === 0) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Noch keine Zugangsprofile für diese Ressourcenart angelegt.</p>;
   return <ul className="m-0 grid list-none gap-3 p-0" aria-label="Ressourcen">
-    {targets.map((target) => <TargetInventoryCard key={target.id} target={target} jobs={jobs} />)}
+    {targets.map((target) => <TargetInventoryCard key={target.id} target={target} jobs={jobs} removing={removingTargetId === target.id} onRemove={() => onRemove(target)} />)}
   </ul>;
 }
 
-function TargetInventoryCard({ target, jobs }: Readonly<{ target: TargetDto; jobs: AnsibleJobDto[] }>) {
+function TargetInventoryCard({ target, jobs, removing, onRemove }: Readonly<{ target: TargetDto; jobs: AnsibleJobDto[]; removing: boolean; onRemove: () => void }>) {
   const inventory = usePackageInventory(target.id);
   const telemetry = useTargetTelemetry(target.id);
   const latestSample = telemetry.data?.samples.at(-1);
@@ -385,6 +402,7 @@ function TargetInventoryCard({ target, jobs }: Readonly<{ target: TargetDto; job
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="inline-flex min-h-8 items-center justify-center border border-[var(--error)]/50 bg-[var(--panel)] px-2.5 py-1 text-xs font-semibold text-[var(--error)] hover:bg-[var(--error-soft)] disabled:cursor-not-allowed disabled:opacity-50" disabled={removing} onClick={onRemove}>{removing ? "Wird entfernt…" : "Ressource entfernen"}</button>
             <span className="border border-[var(--line)] bg-[var(--panel)] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">{target.transport}</span>
             <span className={cn("inline-flex items-center px-2 py-1 text-xs font-bold", targetStateStatusClass(target.state))}>{targetStateLabel(target.state)}</span>
           </div>

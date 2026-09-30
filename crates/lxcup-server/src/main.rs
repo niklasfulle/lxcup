@@ -84,11 +84,6 @@ async fn initialize_state(config: StartupConfig) -> lxcup_server::ApiState {
         database_configured,
         ..
     } = config;
-    if production && !auth.is_production_ready() {
-        panic!(
-            "production requires LXCUP_AUTH_REQUIRED=true and distinct role tokens of at least 16 characters"
-        );
-    }
     let mut state = lxcup_server::ApiState::new().with_auth_config(auth);
     if let Some((secret_root, master_key)) = secret_store {
         let secret_store = EncryptedFileSecretStore::new(secret_root, master_key, [])
@@ -115,6 +110,11 @@ async fn initialize_state(config: StartupConfig) -> lxcup_server::ApiState {
             tracing::info!("Development seed is disabled; resources are registered manually");
         }
         state = state.with_repositories(lxcup_persistence::Repositories::new(&database));
+        state = state.with_account_auth();
+        state
+            .initialize_bootstrap_admin()
+            .await
+            .expect("bootstrap administrator state must be initialized");
         let restored_targets = state.restore_targets().await;
         tracing::info!(restored_targets, "Persisted targets restored");
         let restored_schedules = state.restore_schedules().await;

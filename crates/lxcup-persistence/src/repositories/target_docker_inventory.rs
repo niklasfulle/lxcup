@@ -55,11 +55,26 @@ pub fn update_docker_inventory_events(
         .map(|container| (container.id.as_str(), container))
         .collect::<HashMap<_, _>>();
 
+    record_current_container_events(current, &previous_by_id, previous.is_some(), &mut events);
+    record_removed_container_events(previous, &current_by_id, current.collected_at, &mut events);
+
+    if events.len() > MAX_DOCKER_INVENTORY_EVENTS {
+        events.drain(..events.len() - MAX_DOCKER_INVENTORY_EVENTS);
+    }
+    current.events = events;
+}
+
+fn record_current_container_events(
+    current: &PersistedTargetDockerInventory,
+    previous_by_id: &HashMap<&str, &DockerContainerInfo>,
+    has_previous: bool,
+    events: &mut Vec<DockerInventoryEvent>,
+) {
     for container in &current.containers {
         let Some(old) = previous_by_id.get(container.id.as_str()) else {
-            if previous.is_some() {
+            if has_previous {
                 push_event(
-                    &mut events,
+                    events,
                     current.collected_at,
                     container,
                     DockerInventoryEventKind::Added,
@@ -70,7 +85,7 @@ pub fn update_docker_inventory_events(
             continue;
         };
         record_change(
-            &mut events,
+            events,
             current.collected_at,
             container,
             DockerInventoryEventKind::ImageChanged,
@@ -79,7 +94,7 @@ pub fn update_docker_inventory_events(
             Some(format_image_reference(container)),
         );
         record_change(
-            &mut events,
+            events,
             current.collected_at,
             container,
             DockerInventoryEventKind::StateChanged,
@@ -88,7 +103,7 @@ pub fn update_docker_inventory_events(
             Some(container.state.clone()),
         );
         record_change(
-            &mut events,
+            events,
             current.collected_at,
             container,
             DockerInventoryEventKind::HealthChanged,
@@ -99,7 +114,7 @@ pub fn update_docker_inventory_events(
         if let (Some(old_count), Some(new_count)) = (old.restart_count, container.restart_count) {
             if new_count > old_count {
                 push_event(
-                    &mut events,
+                    events,
                     current.collected_at,
                     container,
                     DockerInventoryEventKind::RestartCountIncreased,
@@ -110,7 +125,7 @@ pub fn update_docker_inventory_events(
         }
         if old.oom_killed != Some(true) && container.oom_killed == Some(true) {
             push_event(
-                &mut events,
+                events,
                 current.collected_at,
                 container,
                 DockerInventoryEventKind::OomKilled,
@@ -119,25 +134,29 @@ pub fn update_docker_inventory_events(
             );
         }
     }
+}
 
-    if previous.is_some() {
-        for container in previous_containers {
-            if !current_by_id.contains_key(container.id.as_str()) {
-                push_event(
-                    &mut events,
-                    current.collected_at,
-                    container,
-                    DockerInventoryEventKind::Removed,
-                    Some("present".to_owned()),
-                    None,
-                );
-            }
+fn record_removed_container_events(
+    previous: Option<&PersistedTargetDockerInventory>,
+    current_by_id: &HashMap<&str, &DockerContainerInfo>,
+    observed_at: DateTime<Utc>,
+    events: &mut Vec<DockerInventoryEvent>,
+) {
+    let Some(previous) = previous else {
+        return;
+    };
+    for container in &previous.containers {
+        if !current_by_id.contains_key(container.id.as_str()) {
+            push_event(
+                events,
+                observed_at,
+                container,
+                DockerInventoryEventKind::Removed,
+                Some("present".to_owned()),
+                None,
+            );
         }
     }
-    if events.len() > MAX_DOCKER_INVENTORY_EVENTS {
-        events.drain(..events.len() - MAX_DOCKER_INVENTORY_EVENTS);
-    }
-    current.events = events;
 }
 
 fn format_image_reference(container: &DockerContainerInfo) -> String {

@@ -334,6 +334,12 @@ pub(crate) async fn retry_ansible_job(
                     "another job is executing for this target",
                 ),
                 lxcup_persistence::RepositoryError::Serialization(_) => ApiError::storage(),
+                lxcup_persistence::RepositoryError::TargetBusy => ApiError::conflict(
+                    "ansible_target_busy",
+                    "another job is executing for this target",
+                ),
+                lxcup_persistence::RepositoryError::LastAdmin => ApiError::storage(),
+                lxcup_persistence::RepositoryError::UsernameExists => ApiError::storage(),
             })?
     } else {
         state
@@ -553,6 +559,34 @@ mod tests {
             confirmed: true,
             actor_role: ActorRole::Operator,
         }
+    }
+
+    #[tokio::test]
+    async fn job_dto_exposes_package_scope_and_only_valid_plan_references() {
+        let state = ApiState::new();
+        let mut request = test_request("package-plan:safe-policy:target");
+        request.operation = AnsibleOperation::UpdatePackages;
+        request.mode = ExecutionMode::Plan;
+        request.parameters = AnsibleParameters::UpdatePackages {
+            packages: vec!["curl".to_owned()],
+        };
+        request.secret_refs = vec![SecretId::new()];
+        let JobSubmission::Created(mut job) = state.ansible.write().await.submit(request).unwrap()
+        else {
+            panic!("the package plan should be newly queued")
+        };
+        let dto = AnsibleJobDto::from(&job);
+        assert_eq!(
+            dto.package_names.as_deref(),
+            Some(["curl".to_owned()].as_slice())
+        );
+        assert_eq!(dto.update_policy_id.as_deref(), Some("safe-policy"));
+        assert!(dto.approved_plan_job_id.is_none());
+
+        job.idempotency_key = "package-apply:not-a-uuid:safe-policy".to_owned();
+        assert!(AnsibleJobDto::from(&job).approved_plan_job_id.is_none());
+        job.idempotency_key = format!("package-apply:{}:safe-policy", Uuid::new_v4());
+        assert!(AnsibleJobDto::from(&job).approved_plan_job_id.is_some());
     }
 
     #[test]

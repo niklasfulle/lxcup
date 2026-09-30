@@ -2,22 +2,12 @@ use super::*;
 
 #[tokio::test]
 async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
-    let Ok(database_url) = std::env::var("DATABASE_TEST_URL") else {
-        eprintln!("skipped: DATABASE_TEST_URL is not configured");
+    let Some(test_database) = scoped_test_database("target_inventory").await else {
         return;
     };
-    let config = DatabaseConfig::from_values(
-        database_url,
-        3,
-        0,
-        Duration::from_secs(10),
-        Duration::from_secs(10),
-        Some(Duration::from_secs(60)),
-    )
-    .unwrap();
-    let database = Database::connect(&config).await.unwrap();
-    database.migrate().await.unwrap();
-    let repositories = Repositories::new(&database);
+    let database = test_database.database();
+    let repositories = Repositories::new(database);
+    let suffix = Uuid::new_v4().simple().to_string();
     let persisted_policy = UpdatePolicy {
         id: "postgres-integration-package-policy".to_owned(),
         allowed_targets: vec![lxcup_core::TargetId::new()],
@@ -63,8 +53,52 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
             .unwrap()
             .contains(&persisted_policy)
     );
+    let mut default_policy = persisted_policy.clone();
+    default_policy.id = format!("generated-{suffix}");
+    assert!(
+        repositories
+            .update_policies
+            .save_if_absent(&default_policy)
+            .await
+            .unwrap()
+    );
+    let mut edited_default = default_policy.clone();
+    edited_default.enabled = false;
+    repositories
+        .update_policies
+        .save(&edited_default)
+        .await
+        .unwrap();
+    assert!(
+        !repositories
+            .update_policies
+            .save_if_absent(&default_policy)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repositories
+            .update_policies
+            .list()
+            .await
+            .unwrap()
+            .contains(&edited_default)
+    );
+    assert!(
+        repositories
+            .update_policies
+            .delete(&default_policy.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repositories
+            .update_policies
+            .delete(&default_policy.id)
+            .await
+            .unwrap()
+    );
     let now = postgres_now();
-    let suffix = Uuid::new_v4().simple().to_string();
     let container_id = ContainerId::new((Uuid::new_v4().as_u128() as u64 % 900_000_000) + 10_000);
     let node = Node::new(
         format!("repository-crud-node-{suffix}"),
@@ -116,6 +150,31 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
             .unwrap()
             .len(),
         1
+    );
+    let additional_container_id = ContainerId::new(container_id.value() + 1);
+    let additional_container = Container::new(
+        additional_container_id,
+        node_id,
+        format!("repository-save-{suffix}"),
+        OperatingSystem::Ubuntu,
+        ContainerStatus::Stopped,
+    )
+    .unwrap();
+    repositories
+        .containers
+        .save(&additional_container)
+        .await
+        .unwrap();
+    let saved_additional_container = repositories
+        .containers
+        .find_by_id(additional_container_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved_additional_container.name, additional_container.name);
+    assert_eq!(
+        saved_additional_container.operating_system,
+        additional_container.operating_system
     );
 
     let workload = DockerWorkload {
@@ -369,7 +428,34 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
             ],
             partial: false,
         },
-        docker_telemetry: Default::default(),
+        docker_telemetry: lxcup_agent::DockerTelemetryWindow {
+            samples: vec![
+                lxcup_agent::DockerTelemetrySample {
+                    collected_at: telemetry_now,
+                    container_id: "ABCDEF012345".to_owned(),
+                    cpu_basis_points: Some(500),
+                    memory_basis_points: Some(2_500),
+                    memory_used_bytes: Some(25),
+                    memory_limit_bytes: Some(100),
+                },
+                lxcup_agent::DockerTelemetrySample {
+                    collected_at: telemetry_now,
+                    container_id: "not-hex".to_owned(),
+                    cpu_basis_points: None,
+                    memory_basis_points: None,
+                    memory_used_bytes: None,
+                    memory_limit_bytes: None,
+                },
+                lxcup_agent::DockerTelemetrySample {
+                    collected_at: telemetry_now,
+                    container_id: "0123456789ab".to_owned(),
+                    cpu_basis_points: None,
+                    memory_basis_points: Some(10_001),
+                    memory_used_bytes: None,
+                    memory_limit_bytes: None,
+                },
+            ],
+        },
     };
     let historical_sample = SystemTelemetrySample {
         collected_at: telemetry_now - chrono::Duration::minutes(9),
@@ -419,6 +505,13 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
     assert_eq!(samples.len(), 2);
     assert_eq!(samples[0].cpu_basis_points, Some(9000));
     assert_eq!(samples[1].cpu_basis_points, Some(1000));
+    let docker_samples = repositories
+        .telemetry
+        .list_docker_recent(target.id)
+        .await
+        .unwrap();
+    assert_eq!(docker_samples.len(), 1);
+    assert_eq!(docker_samples[0].container_id, "ABCDEF012345");
 
     let expired_at = postgres_now() - chrono::Duration::days(31);
     let expired_sample = SystemTelemetrySample {
@@ -432,7 +525,23 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
         .execute(database.pool())
         .await
         .unwrap();
-    assert!(repositories.telemetry.prune_expired().await.unwrap() >= 1);
+    let expired_docker_sample = lxcup_agent::DockerTelemetrySample {
+        collected_at: expired_at,
+        container_id: "0123456789ab".to_owned(),
+        cpu_basis_points: Some(100),
+        memory_basis_points: Some(200),
+        memory_used_bytes: None,
+        memory_limit_bytes: None,
+    };
+    sqlx::query("INSERT INTO target_docker_telemetry_samples (target_id, container_id, collected_at, payload) VALUES ($1, $2, $3, $4)")
+        .bind(target.id.as_uuid())
+        .bind(&expired_docker_sample.container_id)
+        .bind(expired_docker_sample.collected_at)
+        .bind(serde_json::to_value(&expired_docker_sample).unwrap())
+        .execute(database.pool())
+        .await
+        .unwrap();
+    assert!(repositories.telemetry.prune_expired().await.unwrap() >= 2);
     let expired_rows: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM target_telemetry_samples WHERE target_id=$1 AND collected_at=$2",
     )
@@ -442,6 +551,15 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
     .await
     .unwrap();
     assert_eq!(expired_rows, 0);
+    let expired_docker_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM target_docker_telemetry_samples WHERE target_id=$1 AND collected_at=$2",
+    )
+    .bind(target.id.as_uuid())
+    .bind(expired_at)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(expired_docker_rows, 0);
 
     let docker_inventory_row =
         sqlx::query("SELECT containers FROM target_docker_inventory WHERE target_id=$1")
@@ -531,7 +649,11 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
         target_ids: vec![target.id],
         frequency: ScheduleFrequency::EveryMinutes(60),
         enabled: true,
-        threshold: None,
+        threshold: Some(lxcup_core::ThresholdRule {
+            metric: lxcup_core::ThresholdMetric::CpuBasisPoints,
+            operator: lxcup_core::ThresholdOperator::GreaterThanOrEqual,
+            value: 8_000,
+        }),
         policy_id: None,
         last_run_at: None,
         next_run_at: now + chrono::Duration::hours(1),
@@ -547,6 +669,34 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
             .iter()
             .any(|persisted| persisted == &schedule)
     );
+    let mut updated_schedule = schedule.clone();
+    updated_schedule.enabled = false;
+    updated_schedule.last_error = Some("paused for integration coverage".to_owned());
+    repositories
+        .schedules
+        .update(&updated_schedule)
+        .await
+        .unwrap();
+    assert!(
+        repositories
+            .schedules
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|persisted| persisted == &updated_schedule)
+    );
+    let invalid_schedule = JobSchedule {
+        id: format!("invalid-{suffix}"),
+        frequency: ScheduleFrequency::EveryMinutes(u32::MAX),
+        ..schedule.clone()
+    };
+    assert!(matches!(
+        repositories.schedules.save(&invalid_schedule).await,
+        Err(lxcup_persistence::RepositoryError::InvalidValue {
+            field: "schedule interval"
+        })
+    ));
 
     let inventory = PackageInventorySnapshot {
         target_id: target.id,
@@ -604,6 +754,11 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
         .await
         .unwrap();
     sqlx::query("DELETE FROM containers WHERE id = $1")
+        .bind(additional_container_id.value() as i64)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM containers WHERE id = $1")
         .bind(container_id.value() as i64)
         .execute(pool)
         .await
@@ -613,4 +768,5 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
         .execute(pool)
         .await
         .unwrap();
+    test_database.finish().await;
 }
