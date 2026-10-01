@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { ArrowIcon } from "../components/ArrowIcon";
 import type { AnsibleJobDto, TargetDto } from "../api";
 import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
 import { useAnsibleJobs, useTargets, useWorkerAvailability } from "../queries";
@@ -28,7 +29,7 @@ export function Dashboard() {
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <output className={cn("inline-flex min-h-9 items-center gap-2 border px-3 py-2 text-xs font-semibold", workerTone)}><span className="h-2 w-2 rounded-full bg-current" aria-hidden="true" />Worker · {workerLabel}</output>
-        <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to="/workflows">Workflows öffnen <span className="ml-2" aria-hidden="true">→</span></Link>
+          <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to="/workflows">Workflows öffnen <ArrowIcon className="ml-2 h-5 w-5" /></Link>
       </div>
     </header>
 
@@ -39,6 +40,8 @@ export function Dashboard() {
       <MetricCard label="Aktive Jobs" value={jobs.isLoading ? "…" : activeCount} note={jobs.error ? "Jobstatus nicht verfügbar" : `${jobList.filter((job) => job.status === "failed").length} fehlgeschlagen`} tone={activeCount ? "primary" : "neutral"} />
     </section>
 
+    <StaleAgentNotice targets={targetList} />
+
     <section className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(20rem,0.9fr)]" aria-label="Ressourcen und Aktivität">
       <ResourceInventory targets={targets} />
       <RecentJobs jobs={jobs} recentJobs={recentJobs} targets={targetList} />
@@ -47,7 +50,7 @@ export function Dashboard() {
     <section aria-labelledby="resource-types-title">
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Ressourcenbereiche</p><h2 id="resource-types-title" className="mb-0">Infrastruktur verwalten</h2></div>
-        <Link className="text-xs font-semibold text-lxcup-primary hover:underline" to="/targets">Alle Ziele →</Link>
+          <Link className="inline-flex items-center gap-1 text-xs font-semibold text-lxcup-primary hover:underline" to="/targets">Alle Ziele <ArrowIcon /></Link>
       </div>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <ResourceTypeCard title="Linux-Server" count={countKind(targetList, "linux_server")} to="/servers" description="SSH-Ziele verwalten" />
@@ -57,6 +60,26 @@ export function Dashboard() {
       </div>
     </section>
   </div>;
+}
+
+function StaleAgentNotice({ targets }: Readonly<{ targets: TargetDto[] }>) {
+  const outdatedTargets = targets.filter((target) => target.agent_version && target.latest_agent_version && target.agent_version !== target.latest_agent_version);
+  if (!outdatedTargets.length) return null;
+
+  return <output aria-label="Agent-Updates verfügbar" className="grid gap-2 border border-[var(--warning)] bg-[var(--warning-soft)] p-4 text-[var(--ink)]">
+    <div>
+      <h2 className="mb-1 text-sm">Agent-Updates verfügbar</h2>
+      <p className="m-0 text-sm">{outdatedTargets.length} {outdatedTargets.length === 1 ? "Agent ist" : "Agenten sind"} nicht auf der verfügbaren Version.</p>
+    </div>
+    <ul className="m-0 grid list-none gap-1 p-0 sm:grid-cols-2">
+      {outdatedTargets.map((target) => <li key={target.id}>
+        <Link className="inline-flex flex-wrap items-center gap-x-2 text-sm font-semibold text-lxcup-primary hover:underline" to={`/targets/${target.id}`} aria-label={`${target.name} öffnen`}>
+          <span>{target.name}</span>
+          <span className="font-normal text-[var(--muted)]">v{target.agent_version} → v{target.latest_agent_version}</span>
+        </Link>
+      </li>)}
+    </ul>
+  </output>;
 }
 
 function MetricCard({ label, value, note, tone }: Readonly<{ label: string; value: string | number; note: string; tone: "primary" | "success" | "warning" | "neutral" }>) {
@@ -101,7 +124,7 @@ function TargetRow({ target }: Readonly<{ target: TargetDto }>) {
   const state = targetState(target.state);
   return <li><Link className="flex flex-wrap items-center justify-between gap-3 border border-[var(--line)] bg-[var(--paper)] px-3 py-3 transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)]" to={`/targets/${target.id}`}>
     <span className="min-w-0"><strong className="block truncate text-sm text-[var(--ink)]">{target.name}</strong><span className="mt-1 block text-xs text-[var(--muted)]">{kindLabel(target.kind)} · {target.address} · {target.transport.toUpperCase()}</span></span>
-    <span className="flex shrink-0 items-center gap-2"><span className={cn("inline-flex items-center px-2 py-1 text-[10px] font-bold", state.className)}>{state.label}</span><span className="hidden text-xs text-[var(--muted)] sm:inline">{agentVersionLabel(target)}</span><span className="text-lxcup-primary" aria-hidden="true">→</span></span>
+    <span className="flex shrink-0 items-center gap-2"><span className={cn("inline-flex items-center px-2 py-1 text-[10px] font-bold", state.className)}>{state.label}</span><span className="hidden text-xs text-[var(--muted)] sm:inline">{agentVersionLabel(target)}</span><ArrowIcon className="h-5 w-5 text-lxcup-primary" /></span>
   </Link></li>;
 }
 
@@ -114,7 +137,7 @@ function agentVersionLabel(target: TargetDto) {
 
 function RecentJobs({ jobs, recentJobs, targets }: Readonly<{ jobs: ReturnType<typeof useAnsibleJobs>; recentJobs: AnsibleJobDto[]; targets: TargetDto[] }>) {
   return <section className="border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]" aria-labelledby="dashboard-jobs-title">
-    <div className="mb-3 flex items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 id="dashboard-jobs-title" className="mb-1">Letzte Workflows</h2><p className="mb-0 text-xs text-[var(--muted)]">Zuletzt aktualisierte Jobausführungen.</p></div><Link className="text-xs font-semibold text-lxcup-primary hover:underline" to="/workflows">Alle öffnen →</Link></div>
+    <div className="mb-3 flex items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 id="dashboard-jobs-title" className="mb-1">Letzte Workflows</h2><p className="mb-0 text-xs text-[var(--muted)]">Zuletzt aktualisierte Jobausführungen.</p></div><Link className="inline-flex items-center gap-1 text-xs font-semibold text-lxcup-primary hover:underline" to="/workflows">Alle öffnen <ArrowIcon /></Link></div>
     {recentJobContent(jobs, recentJobs, targets)}
   </section>;
 }
@@ -132,9 +155,10 @@ function recentJobContent(jobs: ReturnType<typeof useAnsibleJobs>, recentJobs: A
 function ResourceTypeCard({ title, count, countLabel, to, description }: Readonly<{ title: string; count?: number; countLabel?: string; to: string; description: string }>) {
   return <Link className="group flex min-h-24 flex-col justify-between gap-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)]" to={to}>
     <span className="flex items-center justify-between gap-2"><strong className="text-sm">{title}</strong><span className="border border-[var(--line)] bg-[var(--paper-muted)] px-2 py-1 text-[10px] font-bold text-[var(--muted)]">{countLabel ?? `${count ?? 0} Ziele`}</span></span>
-    <span className="flex items-end justify-between gap-2 text-xs text-[var(--muted)]"><span>{description}</span><span className="font-semibold text-lxcup-primary group-hover:translate-x-0.5" aria-hidden="true">→</span></span>
+    <span className="flex items-end justify-between gap-2 text-xs text-[var(--muted)]"><span>{description}</span><ArrowIcon className="h-4 w-4 text-lxcup-primary transition-transform group-hover:translate-x-0.5" /></span>
   </Link>;
 }
+
 
 function EmptyMessage({ children }: Readonly<{ children: React.ReactNode }>) {
   return <p className="m-0 grid min-h-32 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] p-4 text-center text-sm text-[var(--muted)]">{children}</p>;

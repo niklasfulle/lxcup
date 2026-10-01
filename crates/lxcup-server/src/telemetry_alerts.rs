@@ -43,6 +43,9 @@ pub(super) async fn list_telemetry_alerts(
         .filter(|target| target.state == TargetState::Managed)
     {
         let report = reports.get(&target.id);
+        if let Some(alert) = stale_agent_alert(target, report, now) {
+            alerts.push(alert);
+        }
         let samples = target_samples(&state, target, report).await?;
         let load_samples = samples.iter().map(load_sample).collect::<Vec<_>>();
         alerts.extend(
@@ -56,6 +59,34 @@ pub(super) async fn list_telemetry_alerts(
     }
     alerts.sort_by(|left, right| right.triggered_at.cmp(&left.triggered_at));
     Ok(Json(envelope(alerts)))
+}
+
+fn stale_agent_alert(
+    target: &Target,
+    report: Option<&AgentHeartbeat>,
+    now: DateTime<Utc>,
+) -> Option<TelemetryAlertDto> {
+    let last_heartbeat = report
+        .map(|heartbeat| heartbeat.sent_at)
+        .unwrap_or(target.created_at);
+    let age = now
+        .signed_duration_since(last_heartbeat)
+        .num_seconds()
+        .max(0);
+    (age > TELEMETRY_STALE_AFTER.num_seconds()).then(|| TelemetryAlertDto {
+        id: format!("{}:agent_stale", target.id.as_uuid()),
+        target_id: target.id,
+        target_name: target.name.clone(),
+        target_kind: target.kind,
+        target_address: target.address.clone(),
+        metric: "Agent-Verbindung".to_owned(),
+        severity: TelemetryAlertSeverity::Warning,
+        value_basis_points: None,
+        threshold_basis_points: None,
+        age_seconds: Some(age),
+        triggered_at: last_heartbeat + TELEMETRY_STALE_AFTER,
+        observed_at: now,
+    })
 }
 
 async fn target_samples(
@@ -157,6 +188,41 @@ mod tests {
             network_tx_bytes: None,
             process_count: None,
         }
+    }
+
+    #[test]
+    fn managed_target_without_a_first_heartbeat_raises_then_recovers() {
+        let now = Utc::now();
+        let mut target = target();
+        target.created_at = now - Duration::minutes(5);
+        let alert =
+            stale_agent_alert(&target, None, now).expect("a never-connected managed target warns");
+        assert_eq!(alert.metric, "Agent-Verbindung");
+        assert_eq!(alert.age_seconds, Some(300));
+
+        let heartbeat = AgentHeartbeat {
+            target_id: target.id.as_uuid(),
+            info: lxcup_agent::AgentInfo {
+                agent_id: "agent-1".to_owned(),
+                platform: lxcup_agent::AgentPlatform::Linux,
+                hostname: "test".to_owned(),
+                version: "0.4.0".to_owned(),
+                protocol_version: "1".to_owned(),
+            },
+            metrics: lxcup_agent::AgentMetrics {
+                collected_at: now,
+                commands_total: 0,
+                commands_failed: 0,
+                last_command_at: None,
+            },
+            sent_at: now,
+            telemetry: lxcup_agent::SystemTelemetryWindow {
+                samples: Vec::new(),
+                partial: false,
+            },
+            docker_telemetry: lxcup_agent::DockerTelemetryWindow::default(),
+        };
+        assert!(stale_agent_alert(&target, Some(&heartbeat), now).is_none());
     }
 
     #[test]

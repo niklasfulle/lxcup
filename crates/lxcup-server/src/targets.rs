@@ -46,6 +46,8 @@ pub struct TargetDto {
     /// Version reported by the most recent authenticated agent heartbeat.
     /// This remains absent until the agent has connected at least once.
     pub agent_version: Option<String>,
+    /// Timestamp from the most recent authenticated heartbeat, not target config changes.
+    pub agent_last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Version of the agent artifact shipped with this controller build.
     pub latest_agent_version: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -66,6 +68,7 @@ impl From<&Target> for TargetDto {
             agent_secret_ref: target.agent_secret_ref,
             state: target.state,
             agent_version: None,
+            agent_last_seen_at: None,
             latest_agent_version: env!("CARGO_PKG_VERSION").to_owned(),
             created_at: target.created_at,
             updated_at: target.updated_at,
@@ -77,6 +80,7 @@ impl TargetDto {
     fn with_agent_report(target: &Target, report: Option<&AgentHeartbeat>) -> Self {
         let mut dto = Self::from(target);
         dto.agent_version = report.map(|heartbeat| heartbeat.info.version.clone());
+        dto.agent_last_seen_at = report.map(|heartbeat| heartbeat.sent_at);
         dto
     }
 }

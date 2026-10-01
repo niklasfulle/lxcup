@@ -6,6 +6,7 @@ use super::{Database, RepositoryError, WorkerHeartbeatRepository};
 #[derive(Clone, Debug)]
 pub struct WorkerHeartbeatStatus {
     pub last_seen_at: DateTime<Utc>,
+    pub worker_version: Option<String>,
     pub artifact_store_available: Option<bool>,
     pub artifact_store_checked_at: Option<DateTime<Utc>>,
 }
@@ -21,14 +22,16 @@ impl WorkerHeartbeatRepository {
     pub async fn record(
         &self,
         worker_name: &str,
+        worker_version: &str,
         artifact_store_available: bool,
         artifact_store_checked_at: DateTime<Utc>,
     ) -> Result<(), RepositoryError> {
         sqlx::query(
-            "INSERT INTO worker_heartbeats (worker_name, last_seen_at, artifact_store_available, artifact_store_checked_at) VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (worker_name) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at, artifact_store_available = EXCLUDED.artifact_store_available, artifact_store_checked_at = EXCLUDED.artifact_store_checked_at",
+            "INSERT INTO worker_heartbeats (worker_name, worker_version, last_seen_at, artifact_store_available, artifact_store_checked_at) VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (worker_name) DO UPDATE SET worker_version = EXCLUDED.worker_version, last_seen_at = EXCLUDED.last_seen_at, artifact_store_available = EXCLUDED.artifact_store_available, artifact_store_checked_at = EXCLUDED.artifact_store_checked_at",
         )
         .bind(worker_name)
+        .bind(worker_version)
         .bind(Utc::now())
         .bind(artifact_store_available)
         .bind(artifact_store_checked_at)
@@ -60,7 +63,7 @@ impl WorkerHeartbeatRepository {
 
     pub async fn latest_status(&self) -> Result<Option<WorkerHeartbeatStatus>, RepositoryError> {
         let Some(row) = sqlx::query(
-            "SELECT last_seen_at, artifact_store_available, artifact_store_checked_at FROM worker_heartbeats ORDER BY last_seen_at DESC LIMIT 1",
+            "SELECT worker_version, last_seen_at, artifact_store_available, artifact_store_checked_at FROM worker_heartbeats ORDER BY last_seen_at DESC LIMIT 1",
         )
         .fetch_optional(&self.pool)
         .await?
@@ -68,6 +71,7 @@ impl WorkerHeartbeatRepository {
             return Ok(None);
         };
         Ok(Some(WorkerHeartbeatStatus {
+            worker_version: row.try_get("worker_version")?,
             last_seen_at: row.try_get("last_seen_at")?,
             artifact_store_available: row.try_get("artifact_store_available")?,
             artifact_store_checked_at: row.try_get("artifact_store_checked_at")?,

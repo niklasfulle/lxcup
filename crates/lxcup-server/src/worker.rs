@@ -9,6 +9,7 @@ const WORKER_HEARTBEAT_WINDOW_SECONDS: i64 = 10;
 #[derive(Clone, Debug, Serialize)]
 pub struct WorkerAvailabilityDto {
     pub available: bool,
+    pub worker_version: Option<String>,
     pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
     pub artifact_store_available: Option<bool>,
     pub artifact_store_checked_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -38,6 +39,9 @@ fn availability_dto(
     });
     WorkerAvailabilityDto {
         available,
+        worker_version: latest
+            .as_ref()
+            .and_then(|status| status.worker_version.clone()),
         last_seen_at: latest.as_ref().map(|status| status.last_seen_at),
         artifact_store_available: latest
             .as_ref()
