@@ -7,13 +7,23 @@ Erwartete Worker-Variablen:
 
 - `lxcup_agent_version`: validierte Agent-Version aus dem Workspace-Release
 - `lxcup_agent_binary_src`: vom Worker bereitgestellte Binary-Quelle
+- `lxcup_agent_binary_src_arm64`: zusätzlich verifizierte ARM64-Binary-Quelle
 - `lxcup_agent_token`: zur Laufzeit aus dem Secret Store aufgelöst
 - `lxcup_agent_id`: persistierte Agent-ID
 - `lxcup_agent_bind_address`: standardmäßig `0.0.0.0:8090`
 
+Die Rolle wählt das verifizierte Artefakt für x86-64 oder ARM64 anhand der
+ermittelten Zielarchitektur. Fehlt das passende Artefakt, stoppt sie vor der
+Installation mit einer verständlichen Meldung. Ein nicht mehr vorhandenes
+altes Binärziel wird nicht als Rollback-Version gespeichert.
+
 Token- und Konfigurationsaufgaben verwenden `no_log`. Die Rolle legt
 versionierte Binaries ab, hält den vorherigen Symlink für Rollback vor,
 aktualisiert den systemd-Service und prüft `/health`.
+Bei `--check`/Plan/Reconcile meldet Ansible geplante Dateiänderungen, ohne
+sie anzuwenden. Der Dienstneustart und der anschließende Healthcheck laufen
+daher erst im Apply-Modus; ein neuer Dienst existiert in der Vorschau noch
+nicht. Im Apply-Modus bleibt der Healthcheck verpflichtend.
 
 ```powershell
 .\scripts\test-ansible-playbooks.ps1

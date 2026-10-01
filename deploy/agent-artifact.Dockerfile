@@ -5,4 +5,5 @@ COPY . .
 RUN cargo build --release -p lxcup-agent
 
 FROM scratch AS artifact
-COPY --from=build /src/target/release/lxcup-agent /linux-amd64
+ARG TARGETARCH
+COPY --from=build /src/target/release/lxcup-agent /linux-${TARGETARCH}

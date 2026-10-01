@@ -4,6 +4,11 @@
       "sha256": "c0df489a5181f294ef4f8776b4e9caeebb8900c29e2bd494a37005edb9f3d411",
       "file": "linux-amd64",
       "platform": "linux-amd64"
+    },
+    {
+      "sha256": "273bf87aad3e6eef85055503cc099beaef49c2c94191b8e482b4cb1f6a9048a5",
+      "file": "linux-arm64",
+      "platform": "linux-arm64"
     }
   ],
   "version": "0.4.0"

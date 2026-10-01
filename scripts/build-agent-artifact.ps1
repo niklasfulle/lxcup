@@ -20,28 +20,31 @@ New-Item -ItemType Directory -Path $temporaryOutput | Out-Null
 try {
     Push-Location $repoRoot
     try {
-        docker buildx build --platform linux/amd64 --file deploy/agent-artifact.Dockerfile --output "type=local,dest=$temporaryOutput" .
-        if ($LASTEXITCODE -ne 0) { throw "Linux amd64 agent build failed." }
+        foreach ($architecture in @("amd64", "arm64")) {
+            docker buildx build --platform "linux/$architecture" --file deploy/agent-artifact.Dockerfile --output "type=local,dest=$temporaryOutput" .
+            if ($LASTEXITCODE -ne 0) { throw "Linux $architecture agent build failed." }
+        }
     }
     finally {
         Pop-Location
     }
 
-    $binary = Join-Path $temporaryOutput "linux-amd64"
-    if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Agent build did not produce linux-amd64." }
-    New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
-    Copy-Item -LiteralPath $binary -Destination (Join-Path $artifactDirectory "linux-amd64") -Force
-    $checksum = (Get-FileHash -LiteralPath (Join-Path $artifactDirectory "linux-amd64") -Algorithm SHA256).Hash.ToLowerInvariant()
     $manifest = @{
         version = $Version
-        artifacts = @(@{
-            platform = "linux-amd64"
-            file = "linux-amd64"
-            sha256 = $checksum
+        artifacts = @(("amd64", "arm64") | ForEach-Object {
+            $file = "linux-$_"
+            $binary = Join-Path $temporaryOutput $file
+            if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Agent build did not produce $file." }
+            @{ platform = $file; file = $file; sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant() }
         })
     } | ConvertTo-Json -Depth 4
+    New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
+    foreach ($architecture in @("amd64", "arm64")) {
+        $file = "linux-$architecture"
+        Copy-Item -LiteralPath (Join-Path $temporaryOutput $file) -Destination (Join-Path $artifactDirectory $file) -Force
+    }
     [System.IO.File]::WriteAllText((Join-Path $artifactDirectory "manifest.json"), "$manifest`n", [System.Text.UTF8Encoding]::new($false))
-    Write-Host "Created $artifactDirectory with SHA-256 $checksum"
+    Write-Host "Created $artifactDirectory with verified amd64 and arm64 artifacts."
 }
 finally {
     Remove-Item -LiteralPath $temporaryOutput -Recurse -Force

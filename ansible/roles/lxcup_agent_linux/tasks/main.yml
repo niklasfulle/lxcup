@@ -6,6 +6,13 @@
       - ansible_facts.distribution in ['Debian', 'Ubuntu']
     fail_msg: Only Debian and Ubuntu targets are supported by this role.
 
+- name: Validate supported Linux architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.architecture in ['x86_64', 'aarch64']
+      - ansible_facts.architecture != 'aarch64' or lxcup_agent_binary_src_arm64 is defined
+    fail_msg: No verified Linux agent artifact is available for target architecture {{ ansible_facts.architecture }}.
+
 - name: Validate agent inputs
   ansible.builtin.assert:
     that:
@@ -84,17 +91,24 @@
   failed_when: false
   check_mode: false
 
+- name: Check current agent target for rollback
+  ansible.builtin.stat:
+    path: "{{ lxcup_current_agent.stdout }}"
+    follow: true
+  register: lxcup_previous_agent_target
+  when: lxcup_current_agent.rc == 0 and lxcup_current_agent.stdout | length > 0
+
 - name: Preserve previous agent target
   ansible.builtin.file:
     src: "{{ lxcup_current_agent.stdout }}"
     dest: "{{ lxcup_agent_install_dir }}/lxcup-agent.previous"
     state: link
     force: true
-  when: lxcup_current_agent.rc == 0 and lxcup_current_agent.stdout | length > 0
+  when: lxcup_previous_agent_target.stat.isreg | default(false)
 
 - name: Install versioned agent binary
   ansible.builtin.copy:
-    src: "{{ lxcup_agent_binary_src }}"
+    src: "{{ lxcup_agent_binary_src_arm64 if ansible_facts.architecture == 'aarch64' else lxcup_agent_binary_src }}"
     dest: "{{ lxcup_agent_install_dir }}/lxcup-agent-{{ lxcup_agent_version }}"
     owner: root
     group: root
@@ -146,7 +160,7 @@
   until: lxcup_agent_health.status == 200
   failed_when: false
   no_log: true
-  check_mode: false
+  when: not ansible_check_mode
 
 - name: Collect agent service status after health failure
   ansible.builtin.command: >-
@@ -155,14 +169,14 @@
   register: lxcup_agent_service_status
   changed_when: false
   failed_when: false
-  when: lxcup_agent_health.status | default(0) != 200
+  when: not ansible_check_mode and lxcup_agent_health.status | default(0) != 200
 
 - name: Collect listening TCP sockets after health failure
   ansible.builtin.command: ss --listen --tcp --numeric
   register: lxcup_agent_sockets
   changed_when: false
   failed_when: false
-  when: lxcup_agent_health.status | default(0) != 200
+  when: not ansible_check_mode and lxcup_agent_health.status | default(0) != 200
 
 - name: Report sanitized agent health failure
   ansible.builtin.fail:
@@ -172,4 +186,4 @@
       message={{ lxcup_agent_health.msg | default('no response') }},
       service={{ lxcup_agent_service_status.stdout | default('status unavailable') }},
       sockets={{ lxcup_agent_sockets.stdout | default('socket listing unavailable') }}).
-  when: lxcup_agent_health.status | default(0) != 200
+  when: not ansible_check_mode and lxcup_agent_health.status | default(0) != 200
