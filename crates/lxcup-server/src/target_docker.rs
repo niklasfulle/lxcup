@@ -79,7 +79,7 @@ pub(super) async fn discover_target_docker(
         ));
     }
     let target_id = TargetId::from_uuid(parse_uuid(&target_id, "target id")?);
-    let (target, client) = connected_lxc_agent(&state, target_id).await?;
+    let (target, client) = connected_linux_agent(&state, target_id).await?;
     let discovery = client.docker_containers().await.map_err(|_| {
         ApiError::dependency("agent_unreachable", "the LXC agent could not be reached")
     })?;
@@ -127,7 +127,7 @@ pub(super) async fn operate_target_docker_container(
         ));
     }
     let target_id = TargetId::from_uuid(parse_uuid(&target_id, "target id")?);
-    let (target, client) = connected_lxc_agent(&state, target_id).await?;
+    let (target, client) = connected_linux_agent(&state, target_id).await?;
     let discovery = client.docker_containers().await.map_err(|_| {
         ApiError::dependency("agent_unreachable", "the LXC agent could not be reached")
     })?;
@@ -188,7 +188,7 @@ pub(super) async fn check_target_docker_image_update(
         ));
     }
     let target_id = TargetId::from_uuid(parse_uuid(&target_id, "target id")?);
-    let (target, client) = connected_lxc_agent(&state, target_id).await?;
+    let (target, client) = connected_linux_agent(&state, target_id).await?;
     let discovery = client.docker_containers().await.map_err(|_| {
         ApiError::dependency("agent_unreachable", "the LXC agent could not be reached")
     })?;
@@ -240,7 +240,7 @@ pub(super) async fn apply_target_docker_image_update(
         ));
     }
     let target_id = TargetId::from_uuid(parse_uuid(&target_id, "target id")?);
-    let (target, client) = connected_lxc_agent(&state, target_id).await?;
+    let (target, client) = connected_linux_agent(&state, target_id).await?;
     let discovery = client.docker_containers().await.map_err(|_| {
         ApiError::dependency("agent_unreachable", "the LXC agent could not be reached")
     })?;
@@ -403,7 +403,7 @@ fn map_docker_update_apply_error(error: lxcup_agent::AgentError) -> ApiError {
     }
 }
 
-async fn connected_lxc_agent(
+async fn connected_linux_agent(
     state: &ApiState,
     target_id: TargetId,
 ) -> Result<(Target, AgentClient), ApiError> {
@@ -416,10 +416,10 @@ async fn connected_lxc_agent(
             .cloned()
             .ok_or_else(|| ApiError::not_found("target not found"))?
     };
-    if target.kind != TargetKind::Lxc || target.state != TargetState::Managed {
+    if !supports_linux_docker(target.kind) || target.state != TargetState::Managed {
         return Err(ApiError::conflict(
             "target_not_ready",
-            "Docker actions require a connected LXC target",
+            "Docker actions require a connected Linux target",
         ));
     }
     let address = resolve_private_agent_address(&target.address).await?;
@@ -439,6 +439,10 @@ async fn connected_lxc_agent(
         )
     })?;
     Ok((target, client))
+}
+
+pub(super) const fn supports_linux_docker(kind: TargetKind) -> bool {
+    matches!(kind, TargetKind::Lxc | TargetKind::LinuxServer)
 }
 
 pub(super) async fn get_target_docker_inventory(

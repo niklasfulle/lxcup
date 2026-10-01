@@ -14,6 +14,8 @@ use std::{
 };
 use tokio::process::Command;
 
+mod compose_update_status;
+
 use super::parsers::{
     docker_failure_reason, parse_docker_containers, parse_docker_inspect_metadata,
     parse_remote_image_config_digest,
@@ -418,15 +420,19 @@ pub(super) async fn agent_docker_image_update_apply(
             Ok(image_id) => image_id,
             Err(response) => return response,
         };
-    if let Err(response) = apply_compose_image_update(&state, &inspected, &remote_image_id).await {
-        return response;
-    }
+    let service_status =
+        match apply_compose_image_update(&state, &inspected, &remote_image_id).await {
+            Ok(status) => status,
+            Err(response) => return response,
+        };
     Json(DockerImageUpdateApplyResult {
         container_id: request.container_id,
         image: inspected.image,
         compose_project: inspected.compose.project,
         compose_service: inspected.compose.service,
         image_id: remote_image_id,
+        service_state: service_status.state,
+        health_status: service_status.health,
         completed_at: Utc::now(),
     })
     .into_response()
@@ -590,7 +596,7 @@ async fn apply_compose_image_update(
     state: &LocalAgentState,
     container: &InspectedDockerUpdateContainer,
     remote_image_id: &str,
-) -> Result<(), axum::response::Response> {
+) -> Result<compose_update_status::ComposeServiceStatus, axum::response::Response> {
     let pull = tokio::time::timeout(
         std::time::Duration::from_secs(120),
         state.docker_output(
@@ -609,7 +615,8 @@ async fn apply_compose_image_update(
     }
     verify_pulled_image(state, container, remote_image_id).await?;
     verify_compose_service_scope(state, container).await?;
-    recreate_compose_service(state, container).await
+    recreate_compose_service(state, container).await?;
+    compose_update_status::inspect_updated_compose_service(state, container).await
 }
 
 async fn verify_pulled_image(

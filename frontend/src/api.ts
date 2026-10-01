@@ -13,7 +13,7 @@ export type ContainerDto = {
 export type TargetKind = "lxc" | "linux_server" | "windows_server";
 export type TargetTransport = "ssh" | "winrm";
 export type TargetState = "pending" | "managed" | "disabled";
-export type TargetDto = { id: string; name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string; state: TargetState; agent_version?: string | null; latest_agent_version?: string; created_at: string; updated_at: string };
+export type TargetDto = { id: string; name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string; state: TargetState; agent_version?: string | null; agent_last_seen_at?: string | null; latest_agent_version?: string; created_at: string; updated_at: string };
 export type CreateTargetRequest = { name: string; kind: TargetKind; address: string; transport: TargetTransport; ssh_user?: string | null; credential_secret_ref: string; ssh_known_hosts_secret_ref?: string | null; agent_secret_ref: string };
 export type EnrollmentState = "requested" | "discovering" | "installing_agent" | "registering_agent" | "connected" | "failed" | "disabled";
 export type EnrollmentDto = { id: string; container_id: number; target_id: string | null; state: EnrollmentState; failure_reason: string | null; created_at: string; updated_at: string };
@@ -30,7 +30,18 @@ export type ContainerActionTaskDto = {
   updated_at: string;
 };
 export type AgentHealthDto = { healthy: boolean; info: { agent_id: string; platform: string; hostname: string; version: string; protocol_version: string }; metrics: { collected_at: string; commands_total: number; commands_failed: number; last_command_at: string | null } };
-export type WorkerAvailabilityDto = { available: boolean; last_seen_at: string | null; artifact_store_available: boolean | null; artifact_store_checked_at: string | null };
+export type WorkerAvailabilityDto = { available: boolean; worker_version?: string | null; last_seen_at: string | null; artifact_store_available: boolean | null; artifact_store_checked_at: string | null };
+export type SupportDiagnosticsDto = {
+  schema_version: number;
+  generated_at: string;
+  period_start: string;
+  versions: { controller: string; agent_artifact: string; artifact_store: string | null; worker: string | null };
+  worker: WorkerAvailabilityDto;
+  resources: Array<{ id: string; name: string; kind: string; address: string; state: string; agent_platform: string | null; agent_hostname: string | null; agent_version: string | null; heartbeat_at: string | null; heartbeat_stale: boolean }>;
+  workflows: Array<{ id: string; operation: string; target: string; mode: string; status: string; created_at: string; updated_at: string; failure_codes: string[]; log_summaries: Array<{ at: string; source: string; message: string }> }>;
+  privacy: { secrets_included: false; raw_worker_logs_included: false; external_upload: false; note: string };
+};
+export type AdminBackupDto = { id: string; created_at: string; size_bytes: number };
 
 export type ScanDto = {
   id: string;
@@ -140,7 +151,7 @@ export type DockerTelemetryDto = { target_id: string; collected_at: string | nul
 export type DockerLifecycleAction = "start" | "stop" | "restart";
 export type DockerImageUpdateResult = { container_id: string; image: string; current_image_id: string | null; remote_image_id: string | null; status: "current" | "update_available" | "pinned" | "unknown"; reason: string | null; checked_at: string };
 export type TargetDockerImageUpdateDto = { target_id: string; target_name: string; result: DockerImageUpdateResult };
-export type DockerImageUpdateApplyResult = { container_id: string; image: string; compose_project: string; compose_service: string; image_id: string; completed_at: string };
+export type DockerImageUpdateApplyResult = { container_id: string; image: string; compose_project: string; compose_service: string; image_id: string; service_state: string; health_status: string | null; completed_at: string };
 export type TargetDockerImageUpdateApplyDto = { target_id: string; target_name: string; result: DockerImageUpdateApplyResult };
 export type PackageInventoryDto = {
   target_id: string;
@@ -185,7 +196,7 @@ export type SecretMetadata = {
 export type SecretAuditEvent = { secret_id: string; action: string; role: string; occurred_at: string; related_job_id?: string | null };
 
 export type ApiErrorBody = {
-  error?: { code: string; message: string };
+  error?: { code: string; message: string; blocking_job?: { id: string; status: string } };
   request_id?: string;
 };
 export type AuthRole = "viewer" | "operator" | "admin" | "user";
@@ -210,6 +221,7 @@ export class ApiError extends Error {
     public readonly code: string,
     public readonly requestId?: string,
     public readonly retryable = false,
+    public readonly blockingJob?: { id: string; status: string },
   ) {
     super(message);
     this.name = "ApiError";
@@ -254,6 +266,25 @@ export class ApiClient {
 
   async get<T>(path: string, signal?: AbortSignal): Promise<T> {
     return this.request<T>(path, { signal });
+  }
+
+  async getBlob(path: string, signal?: AbortSignal): Promise<Blob> {
+    this.assertRequestPermission(path, "GET", { signal });
+    const headers = this.requestHeaders({ signal });
+    headers.set("accept", "application/octet-stream");
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers,
+      signal,
+    });
+    if (response.status === 401) this.unauthorizedHandler?.();
+    if (!response.ok) {
+      const payload = parsePayload<ApiErrorBody>(await response.text());
+      const error = payload && "error" in payload ? payload : undefined;
+      throw new ApiError(error?.error?.message ?? "Der Download ist fehlgeschlagen.", response.status, error?.error?.code ?? "download_error", error?.request_id);
+    }
+    return response.blob();
   }
 
   async post<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
@@ -355,7 +386,7 @@ export class ApiClient {
         await delay(attempt);
         return this.requestAttempt<T>(path, init, attempt + 1, maxAttempts);
       }
-      throw new ApiError(error?.error?.message ?? "Die API-Anfrage ist fehlgeschlagen.", response.status, error?.error?.code ?? "api_error", error?.request_id, retryable);
+      throw new ApiError(error?.error?.message ?? "Die API-Anfrage ist fehlgeschlagen.", response.status, error?.error?.code ?? "api_error", error?.request_id, retryable, error?.error?.blocking_job);
     }
     if (payload === undefined || !("data" in payload)) {
       throw new ApiError("Die API hat eine ungültige Antwort geliefert.", response.status, "invalid_response");
@@ -411,7 +442,8 @@ function isReadOnlyPost(path: string, operation: string | undefined) {
 function isAdminOnlyRequest(path: string, method: string) {
   const destructive = method === "DELETE" || /\/(revoke|disable|abort)$/.test(path);
   return destructive || path.startsWith("/api/v1/users") || path.startsWith("/api/v1/audit")
-    || path.startsWith("/api/v1/auth/audit") || path.startsWith("/api/v1/secrets");
+    || path.startsWith("/api/v1/auth/audit") || path.startsWith("/api/v1/secrets")
+    || path.startsWith("/api/v1/admin/");
 }
 
 function consumeEventFrames(
@@ -488,6 +520,10 @@ export function createAnsibleJob(request: CreateAnsibleJobRequest, signal?: Abor
 
 export function listAnsibleJobs(signal?: AbortSignal) { return apiClient.get<AnsibleJobDto[]>("/api/v1/ansible/jobs", signal); }
 export function getWorkerAvailability(signal?: AbortSignal) { return apiClient.get<WorkerAvailabilityDto>("/api/v1/ansible/worker-availability", signal); }
+export function getSupportDiagnostics(days = 7, signal?: AbortSignal) { return apiClient.get<SupportDiagnosticsDto>(`/api/v1/admin/support-diagnostics?days=${days}`, signal); }
+export function listAdminBackups(signal?: AbortSignal) { return apiClient.get<AdminBackupDto[]>("/api/v1/admin/backups", signal); }
+export function createAdminBackup(signal?: AbortSignal) { return apiClient.post<AdminBackupDto>("/api/v1/admin/backups", { confirmed: true }, signal); }
+export function downloadAdminBackup(id: string, signal?: AbortSignal) { return apiClient.getBlob(`/api/v1/admin/backups/${encodeURIComponent(id)}`, signal); }
 export function getAnsibleJob(id: string, signal?: AbortSignal) { return apiClient.get<AnsibleJobDto>(`/api/v1/ansible/jobs/${id}`, signal); }
 export function getAnsibleJobEvents(id: string, signal?: AbortSignal) { return apiClient.get<AnsibleJobEvent[]>(`/api/v1/ansible/jobs/${id}/events`, signal); }
 export function retryAnsibleJob(id: string, confirmed: boolean, signal?: AbortSignal) { return apiClient.post<AnsibleJobDto>(`/api/v1/ansible/jobs/${id}/retry`, { confirmed }, signal); }

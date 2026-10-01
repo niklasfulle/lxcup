@@ -4,7 +4,7 @@ use super::{
     discover_target_docker, get_target_docker_inventory, is_private_network_address,
     is_safe_image_id, load_target_docker_inventory, map_docker_update_apply_error,
     operate_target_docker_container, resolve_private_agent_address, save_target_docker_inventory,
-    validate_fresh_image_update_check,
+    supports_linux_docker, validate_fresh_image_update_check,
 };
 use crate::{ActorRole, ApiState};
 use axum::http::StatusCode;
@@ -65,6 +65,15 @@ fn docker_compose_and_image_update_values_are_validated() {
     assert!(is_safe_image_id(&format!("sha256:{}", "a".repeat(64))));
     assert!(!is_safe_image_id("sha256:abc"));
     assert!(!is_safe_image_id(&format!("sha256:{}", "g".repeat(64))));
+}
+
+#[test]
+fn docker_discovery_supports_lxc_and_linux_server_targets_only() {
+    assert!(supports_linux_docker(lxcup_core::TargetKind::Lxc));
+    assert!(supports_linux_docker(lxcup_core::TargetKind::LinuxServer));
+    assert!(!supports_linux_docker(
+        lxcup_core::TargetKind::WindowsServer
+    ));
 }
 
 #[test]

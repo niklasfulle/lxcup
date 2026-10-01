@@ -248,6 +248,41 @@ fn reconciliation_rejects_jobs_without_unresolved_apply_state() {
 }
 
 #[test]
+fn persisted_reconciliation_can_bypass_a_stale_in_memory_target_lock() {
+    let mut coordinator = AnsibleJobCoordinator::default();
+    let blocker = match coordinator
+        .submit(request(
+            AnsibleOperation::HealthCheck,
+            AnsibleParameters::HealthCheck,
+        ))
+        .unwrap()
+    {
+        JobSubmission::Created(job) => job,
+        JobSubmission::Duplicate(_) => unreachable!(),
+    };
+    coordinator
+        .transition(blocker.id, AnsibleJobStatus::Checking)
+        .unwrap();
+
+    let mut source_request = request(
+        AnsibleOperation::RepairAgent,
+        AnsibleParameters::RepairAgent,
+    );
+    source_request.target = blocker.target;
+    let mut source = AnsibleJob::from_request(source_request).unwrap();
+    source.status = AnsibleJobStatus::ReconcileRequired;
+
+    assert_eq!(
+        coordinator.submit_reconciliation(&source),
+        Err(CoordinatorError::TargetBusy)
+    );
+    assert!(matches!(
+        coordinator.submit_persisted_reconciliation(&source),
+        Ok(JobSubmission::Created(_))
+    ));
+}
+
+#[test]
 fn job_contains_hash_and_never_secret_values() {
     let job = AnsibleJob::from_request(request(
         AnsibleOperation::UpdatePackages,

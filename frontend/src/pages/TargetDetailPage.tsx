@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { discoverDockerWorkloads } from "../api";
+import { discoverDockerWorkloads, discoverTargetDocker } from "../api";
 import { cn } from "../classnames";
 import { ActivityIcon, activityIconForOperation, activityStatusTone } from "../components/ActivityIcon";
 import { dockerDiscoveryFailureLabel } from "../dockerDiscoveryStatus";
 import { isTelemetryStale, telemetryAgeLabel } from "../telemetryFreshness";
 import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
 import { TELEMETRY_WINDOW_MS, telemetryXPosition } from "../telemetryChart";
-import { useAnsibleJobs, useContainers, useDockerDiscovery, useDockerWorkloads, usePackageInventory, useTargetTelemetry, useTargets } from "../queries";
+import { queryKeys, useAnsibleJobs, useContainers, useDockerDiscovery, useDockerWorkloads, usePackageInventory, useTargetDockerInventory, useTargetTelemetry, useTargets } from "../queries";
 
 type Target = NonNullable<ReturnType<typeof useTargets>["data"]>[number];
 type InventoryQuery = ReturnType<typeof usePackageInventory>;
@@ -54,6 +54,14 @@ export function TargetDetailPage() {
   const hostContainer = (containers.data ?? []).find((container) => container.target_id === target?.id);
   const dockerWorkloads = useDockerWorkloads(target?.kind === "lxc" ? hostContainer?.id : undefined);
   const dockerDiscovery = useDockerDiscovery(target?.kind === "lxc" ? hostContainer?.id : undefined);
+  const targetDockerInventory = useTargetDockerInventory(target?.kind === "linux_server" ? target.id : undefined);
+  const discoverServerDocker = useMutation({
+    mutationFn: () => target ? discoverTargetDocker(target.id) : Promise.reject(new Error("Ziel nicht gefunden.")),
+    onSuccess: (result) => queryClient.setQueryData(queryKeys.targetDockerInventory(result.target_id), result),
+    onSettled: () => {
+      if (target) void queryClient.invalidateQueries({ queryKey: queryKeys.targetDockerInventory(target.id) });
+    },
+  });
   const discoverDocker = useMutation({
     mutationFn: () => {
       if (hostContainer === undefined) throw new Error("Kein verknüpfter LXC-Host vorhanden.");
@@ -71,9 +79,12 @@ export function TargetDetailPage() {
   }, []);
   const samples = telemetry.data?.samples ?? [];
   const latest = samples.at(-1);
-  const stale = isTelemetryStale(target?.updated_at, now);
+  const stale = isTelemetryStale(target?.agent_last_seen_at, now);
   const inventoryStale = Boolean(inventory.data?.collected_at && Date.now() - new Date(inventory.data.collected_at).getTime() > 24 * 60 * 60 * 1000);
-  const dockerStale = Boolean(dockerDiscovery.data?.finished_at && Date.now() - new Date(dockerDiscovery.data.finished_at).getTime() > 15 * 60 * 1000);
+  const dockerCollectedAt = target?.kind === "linux_server"
+    ? targetDockerInventory.data?.collected_at
+    : dockerDiscovery.data?.finished_at;
+  const dockerStale = Boolean(dockerCollectedAt && Date.now() - new Date(dockerCollectedAt).getTime() > 15 * 60 * 1000);
 
   if (targets.isLoading) return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]"><p className="text-[var(--muted)]">Ziel wird geladen…</p></section>;
   if (!target) return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]"><p className="font-semibold text-[var(--error)]">Ziel nicht gefunden.</p><Link className="mt-3 inline-block text-xs font-semibold text-lxcup-primary hover:underline" to="/targets">Zur Zielübersicht</Link></section>;
@@ -81,18 +92,18 @@ export function TargetDetailPage() {
   return <div className="grid gap-4">
     <header className="flex flex-wrap items-end justify-between gap-4 border-b border-[var(--line)] pb-4 max-[720px]:items-start">
       <div className="min-w-0"><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">{targetKindLabel(target.kind)}</p><h1 className="break-words">{target.name}</h1><div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-[var(--muted)]"><span>{target.address}</span><span aria-hidden="true">·</span><span className="border border-[var(--line)] bg-[var(--panel)] px-2 py-1 text-[10px] font-bold uppercase tracking-wider">{target.transport}</span></div></div>
-      <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={targetListPath(target.kind)}>← Ressourcenübersicht</Link>
+       <Link className="inline-flex min-h-9 items-center justify-center gap-1 border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={targetListPath(target.kind)}><span className="text-base leading-none" aria-hidden="true">←</span>Ressourcenübersicht</Link>
     </header>
     <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-label="Zielstatus">
       <article className="grid min-h-24 content-between gap-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><span className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">Lifecycle</span><strong className={cn("inline-flex w-fit items-center px-2.5 py-1 text-xs font-bold", targetStateClass(target.state))}>{stateLabel(target.state)}</strong></article>
       <article className="grid min-h-24 content-between gap-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><span className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">Agent-Version</span><strong className="text-lg">{target.agent_version ?? <span className="text-sm font-normal text-[var(--muted)]">Noch nicht gemeldet</span>}</strong></article>
-      <article className="grid min-h-24 content-between gap-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><span className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">Letzter Heartbeat</span><div><strong className="block">{new Date(target.updated_at).toLocaleString()}</strong><span className={cn("mt-2 inline-flex items-center px-2 py-1 text-xs font-bold", stale ? "bg-[var(--warning-soft)] text-[var(--warning)]" : "bg-[var(--success-soft)] text-[var(--success)]")}>{stale ? "Veraltet" : "Aktuell"}</span></div></article>
+      <article className="grid min-h-24 content-between gap-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><span className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">Letzter Heartbeat</span><div><strong className="block">{target.agent_last_seen_at ? new Date(target.agent_last_seen_at).toLocaleString() : "Noch nicht gemeldet"}</strong><span className={cn("mt-2 inline-flex items-center px-2 py-1 text-xs font-bold", stale ? "bg-[var(--warning-soft)] text-[var(--warning)]" : "bg-[var(--success-soft)] text-[var(--success)]")}>{stale ? "Veraltet" : "Aktuell"}</span></div></article>
     </section>
     {target.agent_version && target.latest_agent_version && target.agent_version !== target.latest_agent_version ? <output className="border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--ink)]"><strong className="block">Agent-Update verfügbar</strong><span>Installiert: v{target.agent_version} · Verfügbar: v{target.latest_agent_version}. Starte „Agent aktualisieren“ über Workflows.</span></output> : null}
     {stale ? <output className="flex items-start gap-3 border border-[var(--warning)] bg-[var(--warning-soft)] p-4 text-sm text-[var(--ink)]"><span className="grid h-6 w-6 shrink-0 place-items-center border border-[var(--warning)] text-xs font-bold text-[var(--warning)]" aria-hidden="true">!</span><span><strong className="block">Heartbeat veraltet</strong><span>Der letzte Heartbeat liegt mehr als 2 Minuten zurück. Telemetrie und Agentstatus können veraltet sein.</span></span></output> : null}
     <section className="grid grid-cols-1 gap-4 xl:grid-cols-2" aria-label="Ressourcenstatus">
       <TargetPackageInventory target={target} inventory={inventory} stale={inventoryStale} />
-      <TargetDockerInventory target={target} host={hostContainer} workloads={dockerWorkloads} discovery={dockerDiscovery} stale={dockerStale} discovering={discoverDocker.isPending} discoveryError={discoverDocker.error} onDiscover={() => discoverDocker.mutate()} />
+      <TargetDockerInventory target={target} host={hostContainer} workloads={dockerWorkloads} discovery={dockerDiscovery} targetInventory={targetDockerInventory} stale={dockerStale} discovering={target.kind === "linux_server" ? discoverServerDocker.isPending : discoverDocker.isPending} discoveryError={target.kind === "linux_server" ? discoverServerDocker.error : discoverDocker.error} onDiscover={() => target.kind === "linux_server" ? discoverServerDocker.mutate() : discoverDocker.mutate()} />
       <TargetTelemetry telemetry={telemetry} samples={samples} latest={latest} now={now} />
     </section>
     <TargetWorkflowList targetId={target.id} jobs={jobs} targetJobs={targetJobs} />
@@ -101,7 +112,7 @@ export function TargetDetailPage() {
 
 function TargetPackageInventory({ target, inventory, stale }: Readonly<{ target: Target; inventory: InventoryQuery; stale: boolean }>) {
   const summary = packageInventorySummary(inventory);
-  return <article className="flex min-h-44 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Paketinventar</h2><p className="mb-0 text-sm text-[var(--muted)]">{summary}</p></div><Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/targets/${target.id}/packages`}>Inventar öffnen <span className="ml-2" aria-hidden="true">→</span></Link></div><div className="flex-1">{packageInventoryContent(inventory, stale)}</div></article>;
+   return <article className="flex min-h-44 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Paketinventar</h2><p className="mb-0 text-sm text-[var(--muted)]">{summary}</p></div><Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/targets/${target.id}/packages`}>Inventar öffnen <span className="ml-2 text-base leading-none" aria-hidden="true">→</span></Link></div><div className="flex-1">{packageInventoryContent(inventory, stale)}</div></article>;
 }
 
 function packageInventorySummary(inventory: InventoryQuery) {
@@ -156,15 +167,57 @@ function LatestTelemetryNotice({ latest }: Readonly<{ latest: TelemetrySample }>
   return <output className="mb-3 block border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--ink)]">Messwerte sind seit mehr als 2 Minuten veraltet; letzter Messpunkt {telemetryAgeLabel(latest.collected_at)} ({new Date(latest.collected_at).toLocaleString()}).</output>;
 }
 
-function TargetDockerInventory({ target, host, workloads, discovery, stale, discovering, discoveryError, onDiscover }: Readonly<{ target: Target; host: ContainerItem | undefined; workloads: DockerWorkloadsQuery; discovery: DockerDiscoveryQuery; stale: boolean; discovering: boolean; discoveryError: Error | null; onDiscover: () => void }>) {
-  if (target.kind !== "lxc") return null;
-  return <article className="flex min-h-36 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Docker-Inventar</h2><p className="mb-0 text-sm text-[var(--muted)]">Docker-Container werden getrennt vom LXC-Inventar geführt.</p></div><DockerInventoryActions target={target} host={host} discovering={discovering} onDiscover={onDiscover} /></div><div className="flex-1">{discoveryError ? <p className="mb-3 border border-[var(--error)] bg-[var(--paper-muted)] p-3 text-sm" role="alert">Docker-Erkennung fehlgeschlagen: {dockerDiscoveryFailureLabel(discoveryError.message)}</p> : null}{host ? targetDockerContent(host, workloads, discovery, stale) : <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Keine alte Container-Verknüpfung nötig: verbundene LXC-Agenten lassen sich direkt über die Docker-Erkennung auswählen.</p>}</div></article>;
+function TargetDockerInventory({ target, host, workloads, discovery, targetInventory, stale, discovering, discoveryError, onDiscover }: Readonly<{ target: Target; host: ContainerItem | undefined; workloads: DockerWorkloadsQuery; discovery: DockerDiscoveryQuery; targetInventory: ReturnType<typeof useTargetDockerInventory>; stale: boolean; discovering: boolean; discoveryError: Error | null; onDiscover: () => void }>) {
+  if (target.kind === "linux_server") {
+    return <LinuxServerDockerInventory target={target} targetInventory={targetInventory} stale={stale} discovering={discovering} discoveryError={discoveryError} onDiscover={onDiscover} />;
+  }
+  if (target.kind === "lxc") {
+    return <LxcDockerInventory target={target} host={host} workloads={workloads} discovery={discovery} stale={stale} discovering={discovering} discoveryError={discoveryError} onDiscover={onDiscover} />;
+  }
+  return null;
+}
+
+function LinuxServerDockerInventory({ target, targetInventory, stale, discovering, discoveryError, onDiscover }: Readonly<{ target: Target; targetInventory: ReturnType<typeof useTargetDockerInventory>; stale: boolean; discovering: boolean; discoveryError: Error | null; onDiscover: () => void }>) {
+  return <article className="flex min-h-36 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]">
+    <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3">
+      <div><h2 className="mb-1">Docker-Inventar</h2><p className="mb-0 text-sm text-[var(--muted)]">Docker-Container auf diesem Linux-Server-Agenten erkennen und verwalten.</p></div>
+      <div className="flex flex-wrap gap-2">
+        {target.state === "managed" ? <button className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discovering} onClick={onDiscover}>{discovering ? "Erkennung läuft…" : "Docker erkennen"}</button> : null}
+        <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?target=${encodeURIComponent(target.id)}`}>Docker-Inventar öffnen <span className="ml-2 text-base leading-none" aria-hidden="true">→</span></Link>
+      </div>
+    </div>
+    <div className="flex-1"><DockerDiscoveryErrorNotice error={discoveryError} /><LinuxServerDockerInventoryStatus inventory={targetInventory} stale={stale} /></div>
+  </article>;
+}
+
+function LinuxServerDockerInventoryStatus({ inventory, stale }: Readonly<{ inventory: ReturnType<typeof useTargetDockerInventory>; stale: boolean }>) {
+  if (inventory.error) return <p className="font-semibold text-[var(--error)]" role="alert">{inventory.error.message}</p>;
+  if (inventory.isLoading) return <p className="text-[var(--muted)]">Docker-Inventar wird geladen…</p>;
+  if (!inventory.data?.available) return <p className="m-0 grid min-h-20 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Noch keine Docker-Erkennung für diesen Server.</p>;
+  return <p className="text-sm text-[var(--muted)]">{inventory.data.containers.length} Container · erkannt {new Date(inventory.data.collected_at).toLocaleString()}{stale ? " · Erkennung möglicherweise veraltet" : ""}</p>;
+}
+
+function LxcDockerInventory({ target, host, workloads, discovery, stale, discovering, discoveryError, onDiscover }: Readonly<{ target: Target; host: ContainerItem | undefined; workloads: DockerWorkloadsQuery; discovery: DockerDiscoveryQuery; stale: boolean; discovering: boolean; discoveryError: Error | null; onDiscover: () => void }>) {
+  return <article className="flex min-h-36 flex-col border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]">
+    <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3">
+      <div><h2 className="mb-1">Docker-Inventar</h2><p className="mb-0 text-sm text-[var(--muted)]">Docker-Container werden getrennt vom LXC-Inventar geführt.</p></div>
+      <DockerInventoryActions target={target} host={host} discovering={discovering} onDiscover={onDiscover} />
+    </div>
+    <div className="flex-1"><DockerDiscoveryErrorNotice error={discoveryError} />{host ? targetDockerContent(host, workloads, discovery, stale) : <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Keine alte Container-Verknüpfung nötig: verbundene LXC-Agenten lassen sich direkt über die Docker-Erkennung auswählen.</p>}</div>
+  </article>;
+}
+
+function DockerDiscoveryErrorNotice({ error }: Readonly<{ error: Error | null }>) {
+  if (!error) return null;
+  return <p className="mb-3 border border-[var(--error)] bg-[var(--paper-muted)] p-3 text-sm" role="alert">Docker-Erkennung fehlgeschlagen: {dockerDiscoveryFailureLabel(error.message)}</p>;
 }
 
 function DockerInventoryActions({ target, host, discovering, onDiscover }: Readonly<{ target: Target; host: ContainerItem | undefined; discovering: boolean; onDiscover: () => void }>) {
-  if (host) return <div className="flex flex-wrap gap-2"><button className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discovering} onClick={onDiscover}>{discovering ? "Erkennung läuft…" : "Docker erkennen"}</button><Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?host=${host.id}`}>Docker-Inventar öffnen <span className="ml-2" aria-hidden="true">→</span></Link></div>;
+  if (host) {
+    return <div className="flex flex-wrap gap-2"><button className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discovering} onClick={onDiscover}>{discovering ? "Erkennung läuft…" : "Docker erkennen"}</button><Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?host=${host.id}`}>Docker-Inventar öffnen <span className="ml-2 text-base leading-none" aria-hidden="true">→</span></Link></div>;
+  }
   if (target.state !== "managed") return null;
-  return <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?target=${encodeURIComponent(target.id)}`}>Docker-Erkennung öffnen <span className="ml-2" aria-hidden="true">→</span></Link>;
+  return <Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/docker?target=${encodeURIComponent(target.id)}`}>Docker-Erkennung öffnen <span className="ml-2 text-base leading-none" aria-hidden="true">→</span></Link>;
 }
 
 function targetDockerContent(host: ContainerItem | undefined, workloads: DockerWorkloadsQuery, discovery: DockerDiscoveryQuery, stale: boolean) {
@@ -198,7 +251,7 @@ function dockerWorkloadList(workloads: NonNullable<DockerWorkloadsQuery["data"]>
 }
 
 function TargetWorkflowList({ targetId, jobs, targetJobs }: Readonly<{ targetId: string; jobs: ReturnType<typeof useAnsibleJobs>; targetJobs: NonNullable<ReturnType<typeof useAnsibleJobs>["data"]> }>) {
-  return <section className="border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Letzte Workflows</h2><p className="mb-0 text-sm text-[var(--muted)]">Ausführungen für dieses Ziel</p></div><div className="flex items-center gap-3"><span className="text-xs text-[var(--muted)]">{jobs.isLoading ? "…" : `${targetJobs.length} angezeigt`}</span><Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/workflows?target=${encodeURIComponent(targetId)}`}>Alle Workflows <span className="ml-2" aria-hidden="true">→</span></Link></div></div>{targetWorkflowContent(jobs, targetJobs)}</section>;
+   return <section className="border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3"><div><h2 className="mb-1">Letzte Workflows</h2><p className="mb-0 text-sm text-[var(--muted)]">Ausführungen für dieses Ziel</p></div><div className="flex items-center gap-3"><span className="text-xs text-[var(--muted)]">{jobs.isLoading ? "…" : `${targetJobs.length} angezeigt`}</span><Link className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/workflows?target=${encodeURIComponent(targetId)}`}>Alle Workflows <span className="ml-2 text-base leading-none" aria-hidden="true">→</span></Link></div></div>{targetWorkflowContent(jobs, targetJobs)}</section>;
 }
 
 function targetWorkflowContent(jobs: ReturnType<typeof useAnsibleJobs>, targetJobs: NonNullable<ReturnType<typeof useAnsibleJobs>["data"]>) {

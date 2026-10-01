@@ -11,16 +11,17 @@ export function DockerPage() {
   const targets = useTargets();
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedHost = Number(searchParams.get("host"));
-  const [hostId, setHostId] = useState<number | undefined>(() => Number.isSafeInteger(requestedHost) && requestedHost > 0 ? requestedHost : undefined);
-  const [targetId, setTargetId] = useState<string | undefined>(() => searchParams.get("target") || undefined);
+  const targetId = searchParams.get("target") || undefined;
+  const hostId = targetId === undefined && Number.isSafeInteger(requestedHost) && requestedHost > 0 ? requestedHost : undefined;
   const [targetDiscoveryResult, setTargetDiscoveryResult] = useState<TargetDockerDiscoveryDto>();
   const [hostSelectorOpen, setHostSelectorOpen] = useState(false);
   const workloads = useDockerWorkloads(hostId);
   const discovery = useDockerDiscovery(hostId);
   const targetInventory = useTargetDockerInventory(targetId);
+  const selectedInventory = targetDiscoveryResult?.target_id === targetId ? targetDiscoveryResult : targetInventory.data;
   const targetTelemetry = useTargetDockerTelemetry(targetId);
-  const lxcTargets = (targets.data ?? []).filter((target) => target.kind === "lxc");
-  const targetInventories = useTargetDockerInventories(lxcTargets.map((target) => target.id));
+  const dockerTargets = (targets.data ?? []).filter((target) => target.kind === "lxc" || target.kind === "linux_server");
+  const targetInventories = useTargetDockerInventories(dockerTargets.map((target) => target.id));
   const queryClient = useQueryClient();
   const refresh = () => refreshDockerHost(queryClient, hostId);
   const discover = useMutation({ mutationFn: () => discoverDockerWorkloads(hostId!), onSuccess: refresh });
@@ -40,17 +41,17 @@ export function DockerPage() {
   const [removeCandidate, setRemoveCandidate] = useState<{ id: string; name: string } | null>(null);
   const host = (containers.data ?? []).find((container) => container.id === hostId);
   const targetHost = (targets.data ?? []).find((target) => target.id === targetId);
-  const availableLxcTargets = lxcTargets.filter((target) => target.state === "managed");
-  const inventoryCount = countVisibleDockerInventory(targetId, hostId, targetDiscoveryResult ?? targetInventory.data, workloads.data, targetInventories);
+  const availableDockerTargets = dockerTargets.filter((target) => target.state === "managed");
+  const inventoryCount = countVisibleDockerInventory(targetId, hostId, selectedInventory, workloads.data, targetInventories);
 
   return <>
     <DockerPageHeader hostSelectorOpen={hostSelectorOpen} onToggle={() => setHostSelectorOpen((open) => !open)} />
-    {hostSelectorOpen ? <DockerHostSelector targets={availableLxcTargets} containers={containers.data ?? []} value={targetId ? `target:${targetId}` : hostId ?? ""} onSelectTarget={(nextTargetId) => { setTargetId(nextTargetId); setHostId(undefined); setTargetDiscoveryResult(undefined); setSearchParams({ target: nextTargetId }); setHostSelectorOpen(false); }} onSelectContainer={(nextHostId) => { setTargetId(undefined); setTargetDiscoveryResult(undefined); setHostId(nextHostId); setSearchParams(nextHostId ? { host: String(nextHostId) } : {}); if (nextHostId !== undefined) setHostSelectorOpen(false); }} /> : null}
-    <SelectedDockerHostPanel targetId={targetId} hostId={hostId} targetHost={targetHost} host={host} targetDiscovery={targetDiscoveryResult ?? targetInventory.data} targetDiscoveryError={targetDiscover.error ?? targetInventory.error} targetDiscoveryPending={targetDiscover.isPending} discoveryPending={discover.isPending} discovery={discovery} discoveryError={discover.error} onDiscoverTarget={() => targetDiscover.mutate()} onDiscoverContainer={() => discover.mutate()} />
+    {hostSelectorOpen ? <DockerHostSelector targets={availableDockerTargets} containers={containers.data ?? []} value={targetId ? `target:${targetId}` : hostId ?? ""} onSelectTarget={(nextTargetId) => { setTargetDiscoveryResult(undefined); setSearchParams({ target: nextTargetId }); setHostSelectorOpen(false); }} onSelectContainer={(nextHostId) => { setTargetDiscoveryResult(undefined); setSearchParams(nextHostId ? { host: String(nextHostId) } : {}); if (nextHostId !== undefined) setHostSelectorOpen(false); }} /> : null}
+    <SelectedDockerHostPanel targetId={targetId} hostId={hostId} targetHost={targetHost} host={host} targetDiscovery={selectedInventory} targetDiscoveryError={targetDiscover.error ?? targetInventory.error} targetDiscoveryPending={targetDiscover.isPending} discoveryPending={discover.isPending} discovery={discovery} discoveryError={discover.error} onDiscoverTarget={() => targetDiscover.mutate()} onDiscoverContainer={() => discover.mutate()} />
     <DockerInventoryPanel
-      targetId={targetId} hostId={hostId} inventoryCount={inventoryCount} discovery={targetDiscoveryResult ?? targetInventory.data}
+      targetId={targetId} hostId={hostId} inventoryCount={inventoryCount} discovery={selectedInventory}
       telemetry={targetTelemetry.data} telemetryError={targetTelemetry.error} telemetryLoading={targetTelemetry.isLoading}
-      targets={lxcTargets} inventories={targetInventories} targetsLoading={targets.isLoading} targetsError={targets.error}
+      targets={dockerTargets} inventories={targetInventories} targetsLoading={targets.isLoading} targetsError={targets.error}
       hostName={host?.name} workloads={workloads} adoptPending={adopt.isPending} onAdopt={(dockerId) => adopt.mutate(dockerId)} onRemove={(item) => setRemoveCandidate(item)}
     />
     <RemoveWorkloadDialog candidate={removeCandidate} pending={remove.isPending} error={remove.error} onCancel={() => setRemoveCandidate(null)} onConfirm={() => removeCandidate && remove.mutate(removeCandidate.id, { onSuccess: () => setRemoveCandidate(null) })} />
@@ -79,7 +80,7 @@ function DockerPageHeader({ hostSelectorOpen, onToggle }: Readonly<{ hostSelecto
   const buttonClass = hostSelectorOpen
     ? "inline-flex min-h-9 items-center justify-center gap-2 border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary"
     : "inline-flex min-h-9 items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700";
-  return <header className="mb-3 flex items-end justify-between gap-4 border-b border-[var(--line)] pb-3 max-[720px]:flex-col max-[720px]:items-start"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Agent-Inventar</p><h1>Docker-Container</h1><p className="text-[var(--muted)]">Erkannte Docker-Container auf eingebundenen LXC-Agenten aufnehmen und verwalten.</p></div><button className={buttonClass} type="button" aria-expanded={hostSelectorOpen} aria-controls="docker-host-selector" onClick={onToggle}>{hostSelectorOpen ? "Schließen" : "Hinzufügen"}</button></header>;
+  return <header className="mb-3 flex items-end justify-between gap-4 border-b border-[var(--line)] pb-3 max-[720px]:flex-col max-[720px]:items-start"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Agent-Inventar</p><h1>Docker-Container</h1><p className="text-[var(--muted)]">Erkannte Docker-Container auf eingebundenen Linux-Agenten aufnehmen und verwalten.</p></div><button className={buttonClass} type="button" aria-expanded={hostSelectorOpen} aria-controls="docker-host-selector" onClick={onToggle}>{hostSelectorOpen ? "Schließen" : "Hinzufügen"}</button></header>;
 }
 
 function SelectedDockerHostPanel({ targetId, hostId, targetHost, host, targetDiscovery, targetDiscoveryError, targetDiscoveryPending, discoveryPending, discovery, discoveryError, onDiscoverTarget, onDiscoverContainer }: Readonly<{
@@ -123,9 +124,9 @@ function DockerInventoryPanel({ targetId, hostId, inventoryCount, discovery, tel
   onAdopt: (dockerId: string) => void;
   onRemove: (item: { id: string; name: string }) => void;
 }>) {
-  return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]">
-    <div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start"><div><h2>Docker-Inventar</h2><p className="text-[var(--muted)]">„Aufnehmen“ verwaltet den Inventareintrag in lxcup; der Docker-Container bleibt unverändert.</p></div><span className="text-[var(--muted)]">{inventoryCount} Container</span></div>
-    {targetId === undefined ? null : <TargetDockerInventoryWorkspace targetId={targetId} discovery={discovery} telemetry={telemetry} telemetryError={telemetryError} telemetryLoading={telemetryLoading} />}
+  return <section className="mb-3 grid min-w-0 grid-cols-1 gap-4 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]">
+    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] pb-3"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Inventar</p><h2 className="mb-1">Docker-Inventar</h2><p className="m-0 text-sm text-[var(--muted)]">„Aufnehmen“ verwaltet den Inventareintrag in lxcup; der Docker-Container bleibt unverändert.</p></div><span className="inline-flex min-h-9 shrink-0 items-center border border-[var(--line)] bg-[var(--paper-muted)] px-3 text-xs text-[var(--muted)]"><strong className="mr-1 text-[var(--ink)]">{inventoryCount}</strong> Container</span></div>
+    {targetId === undefined ? null : <TargetDockerInventoryWorkspace key={targetId} targetId={targetId} discovery={discovery} telemetry={telemetry} telemetryError={telemetryError} telemetryLoading={telemetryLoading} />}
     {targetId === undefined && hostId !== undefined ? <WorkloadInventory hostId={hostId} hostName={hostName} workloads={workloads} adoptPending={adoptPending} onAdopt={onAdopt} onRemove={onRemove} /> : null}
     {targetId === undefined && hostId === undefined ? <SavedTargetDockerInventoryContent targets={targets} inventories={inventories} targetsLoading={targetsLoading} targetsError={targetsError} /> : null}
   </section>;
@@ -190,7 +191,7 @@ function TargetDockerInventoryWorkspace({ targetId, discovery, telemetry, teleme
     {lifecycle.error ? <p className="font-semibold text-[var(--error)]" role="alert">Docker-Aktion fehlgeschlagen: {lifecycle.error.message}</p> : null}
     {bulkResults.length > 0 ? <output className="mb-3 block border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-sm"><strong>Bulk-Ergebnis:</strong> {bulkResults.filter((result) => result.success).length} erfolgreich · {bulkResults.filter((result) => !result.success).length} fehlgeschlagen</output> : null}
     <DockerBulkActionBar selectedCount={selectedDockerIds.length} pending={lifecycle.isPending} onClear={() => setSelectedDockerIds([])} onSelectAll={() => setSelectedDockerIds(discovery?.containers.map((item) => item.id) ?? [])} onAction={handleBulkAction} />
-    <div className="mb-3">
+    <div className="mb-3 min-w-0">
       <TargetDockerInventoryContent discovery={discovery} actions={{
         onAction: handleSingleAction,
         pendingContainerId,
@@ -205,7 +206,7 @@ function TargetDockerInventoryWorkspace({ targetId, discovery, telemetry, teleme
     </div>
     {imageUpdateCheck.error ? <p className="mb-2 text-sm text-[var(--error)]" role="alert">Registry-Updatecheck fehlgeschlagen: {imageUpdateCheck.error.message}</p> : null}
     {imageUpdateApply.error ? <p className="mb-2 text-sm text-[var(--error)]" role="alert">Compose-Update fehlgeschlagen: {imageUpdateApply.error.message}</p> : null}
-    {imageUpdateApply.isSuccess ? <output className="mb-2 block text-sm text-[var(--success)]">Compose-Service „{imageUpdateApply.data.result.compose_service}“ wurde aktualisiert.</output> : null}
+    {imageUpdateApply.isSuccess ? <output className="mb-2 block text-sm text-[var(--success)]">Compose-Service „{imageUpdateApply.data.result.compose_service}“ wurde aktualisiert · Status: {imageUpdateApply.data.result.service_state} · Health: {imageUpdateApply.data.result.health_status ?? "nicht konfiguriert"}.</output> : null}
     <DockerTelemetryPanel discovery={discovery} telemetry={telemetry} error={telemetryError} loading={telemetryLoading} />
   </>;
 }
@@ -261,11 +262,11 @@ function DockerHostSelector({ targets, containers, value, onSelectTarget, onSele
     }
     onSelectContainer(selection ? Number(selection) : undefined);
   }
-  return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]" id="docker-host-selector"><div className="mb-3"><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Docker-Host</p><h2 className="m-0">LXC mit Agent auswählen</h2><p className="mt-1 text-sm text-[var(--muted)]">Docker-Container werden über einen bereits eingebundenen LXC-Agenten erkannt.</p></div><div className="grid max-w-xl grid-cols-1 gap-3"><label className="grid gap-1 text-xs font-semibold text-[var(--muted)]"><span>LXC mit Agent</span><select value={value} onChange={(event) => changeSelection(event.target.value)}><option value="">LXC auswählen</option>{targets.map((target) => <option key={target.id} value={`target:${target.id}`}>{target.name} · {target.address}</option>)}{containers.map((container) => <option key={`container:${container.id}`} value={container.id}>{container.name} · VMID {container.id}</option>)}</select></label></div>{targets.length === 0 ? <p className="mt-2 text-xs text-[var(--muted)]">Es gibt noch kein verbundenes LXC mit gemeldetem Agent-Heartbeat.</p> : null}</section>;
+  return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]" id="docker-host-selector"><div className="mb-3"><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Docker-Host</p><h2 className="m-0">Linux-Ziel mit Agent auswählen</h2><p className="mt-1 text-sm text-[var(--muted)]">Docker-Container werden über einen verbundenen LXC- oder Linux-Server-Agenten erkannt.</p></div><div className="grid max-w-xl grid-cols-1 gap-3"><label className="grid gap-1 text-xs font-semibold text-[var(--muted)]"><span>Linux-Ziel mit Agent</span><select value={value} onChange={(event) => changeSelection(event.target.value)}><option value="">Linux-Ziel auswählen</option>{targets.map((target) => <option key={target.id} value={`target:${target.id}`}>{target.name} · {target.address}</option>)}{containers.map((container) => <option key={`container:${container.id}`} value={container.id}>{container.name} · VMID {container.id}</option>)}</select></label></div>{targets.length === 0 ? <p className="mt-2 text-xs text-[var(--muted)]">Es gibt noch kein verbundenes Linux-Ziel mit gemeldetem Agent-Heartbeat.</p> : null}</section>;
 }
 
 function SelectedDockerHost({ targetHost, host, targetDiscoveryPending, discoveryPending, onDiscoverTarget, onDiscoverContainer }: Readonly<{ targetHost: TargetDto | undefined; host: ContainerDto | undefined; targetDiscoveryPending: boolean; discoveryPending: boolean; onDiscoverTarget: () => void; onDiscoverContainer: () => void }>) {
-  if (targetHost) return <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Ausgewählter Docker-Host</p><strong>{targetHost.name}</strong><span className="ml-2 text-xs text-[var(--muted)]">LXC · {targetHost.address}</span></div><div className="flex flex-wrap items-center gap-2"><button className="inline-flex items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={targetDiscoveryPending} onClick={onDiscoverTarget}>{targetDiscoveryPending ? "Suche läuft…" : "Docker-Container entdecken"}</button><Link className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/targets/${targetHost.id}`}>LXC öffnen</Link></div></div>;
+  if (targetHost) return <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Ausgewählter Docker-Host</p><strong>{targetHost.name}</strong><span className="ml-2 text-xs text-[var(--muted)]">{targetHost.kind === "lxc" ? "LXC" : "Linux-Server"} · {targetHost.address}</span></div><div className="flex flex-wrap items-center gap-2"><button className="inline-flex items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={targetDiscoveryPending} onClick={onDiscoverTarget}>{targetDiscoveryPending ? "Suche läuft…" : "Docker-Container entdecken"}</button><Link className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/targets/${targetHost.id}`}>Ressource öffnen</Link></div></div>;
   return <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Ausgewählter Docker-Host</p><strong>{host?.name ?? "Kein LXC mit Agent ausgewählt"}</strong>{host ? <span className="ml-2 text-xs text-[var(--muted)]">LXC · VMID {host.id}</span> : null}</div><div className="flex flex-wrap items-center gap-2"><button className="inline-flex items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={discoveryPending} onClick={onDiscoverContainer}>{discoveryPending ? "Suche läuft…" : "Docker-Container entdecken"}</button>{host ? <Link className="inline-flex items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" to={`/containers/${host.id}`}>LXC öffnen</Link> : null}</div></div>;
 }
 
@@ -288,16 +289,16 @@ function DockerTelemetryPanel({ discovery, telemetry, error, loading }: Readonly
       sustained("memory_basis_points") ? `${container.name}: RAM seit mindestens drei Messpunkten über 90 %` : null,
     ].filter((warning): warning is string => warning !== null);
   });
-  return <section className="mt-3 border-t border-[var(--line)] pt-3" aria-labelledby="docker-telemetry-title">
+  return <section className="mt-3 min-w-0 border-t border-[var(--line)] pt-3" aria-labelledby="docker-telemetry-title">
     <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2"><div><h3 id="docker-telemetry-title" className="m-0 text-sm">Container-Auslastung</h3><p className="m-0 text-xs text-[var(--muted)]">CPU und RAM · letzte 10 Minuten · Messung alle 10 Sekunden</p></div><span className="text-xs text-[var(--muted)]">{telemetry?.samples.length ?? 0} Messpunkte</span></div>
     {error ? <p className="text-sm text-[var(--error)]" role="alert">Docker-Telemetrie konnte nicht geladen werden.</p> : null}
     {warnings.length ? <ul className="mb-3 border-l-2 border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-sm text-[var(--ink)]" role="alert">{warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : null}
     {loading ? <p className="text-sm text-[var(--muted)]">Docker-Telemetrie wird geladen…</p> : null}
     {!loading && !error && (telemetry?.samples.length ?? 0) === 0 ? <p className="text-sm text-[var(--muted)]">Noch keine Container-Messwerte. Sie erscheinen nach dem nächsten Agent-Heartbeat.</p> : null}
-    {discovery.containers.length > 0 ? <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{discovery.containers.map((container) => {
+    {discovery.containers.length > 0 ? <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,20rem),1fr))] gap-3">{discovery.containers.map((container) => {
       const samples = (samplesByContainer.get(container.id) ?? []).slice().sort((a, b) => a.collected_at.localeCompare(b.collected_at)).slice(-60);
       const latest = samples.at(-1);
-      return <article className="border border-[var(--line)] bg-[var(--paper-muted)] p-3" key={container.id}>
+      return <article className="min-w-0 border border-[var(--line)] bg-[var(--paper-muted)] p-3" key={container.id}>
         <div className="mb-2 flex items-center justify-between gap-2"><strong className="truncate" title={container.name}>{container.name}</strong><span className="text-xs text-[var(--muted)]">{samples.length} Punkte</span></div>
         <div className="grid grid-cols-2 gap-3"><DockerMetric label="CPU" value={latest?.cpu_basis_points ?? null} samples={samples.map((sample) => sample.cpu_basis_points)} /><DockerMetric label="RAM" value={latest?.memory_basis_points ?? null} samples={samples.map((sample) => sample.memory_basis_points)} /></div>
         {latest?.memory_used_bytes != null && latest.memory_limit_bytes != null ? <p className="mb-0 mt-2 text-xs text-[var(--muted)]">{formatBytes(latest.memory_used_bytes)} / {formatBytes(latest.memory_limit_bytes)}</p> : null}
@@ -320,13 +321,13 @@ function formatBytes(bytes: number) {
 function TargetDockerResult({ discovery, error }: Readonly<{ discovery: TargetDockerDiscoveryDto | undefined; error: Error | null }>) {
   if (error) return <p className="font-semibold text-[var(--error)]" role="alert">Docker-Erkennung fehlgeschlagen: {dockerDiscoveryFailureLabel(error.message)}</p>;
   if (!discovery) return <p className="mt-3 text-sm text-[var(--muted)]">Starte die Erkennung. Der Controller kontaktiert den Agenten im privaten LAN über HTTP.</p>;
-  if (discovery.reason === "not_discovered") return <p className="mt-3 text-sm text-[var(--muted)]">Für diesen LXC ist noch kein Docker-Inventar gespeichert. Starte eine Erkennung.</p>;
+  if (discovery.reason === "not_discovered") return <p className="mt-3 text-sm text-[var(--muted)]">Für dieses Linux-Ziel ist noch kein Docker-Inventar gespeichert. Starte eine Erkennung.</p>;
   if (!discovery.available) return <p className="mt-3 text-sm text-[var(--warning)]">{dockerDiscoveryFailureLabel(discovery.reason ?? "docker_unavailable")} · Host: {discovery.target_name}</p>;
   return <p className="mt-3 text-sm text-[var(--muted)]">Erkannt am {new Date(discovery.collected_at).toLocaleString()} · {discovery.containers.length} Container</p>;
 }
 
 function DockerBulkActionBar({ selectedCount, pending, onClear, onSelectAll, onAction }: Readonly<{ selectedCount: number; pending: boolean; onClear: () => void; onSelectAll: () => void; onAction: (action: DockerLifecycleAction) => void }>) {
-  return <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border border-[var(--line)] bg-[var(--paper-muted)] p-3"><div className="flex items-center gap-2"><strong className="text-sm">{selectedCount} ausgewählt</strong><button className="border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)]" type="button" onClick={onSelectAll}>Alle auswählen</button><button className="border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)]" type="button" onClick={onClear}>Auswahl leeren</button></div><div className="flex flex-wrap gap-2">{(["start", "stop", "restart"] as const).map((action) => <button key={action} className="border border-[var(--line)] px-2 py-1 text-xs font-semibold hover:border-[var(--primary)] disabled:opacity-50" type="button" disabled={selectedCount === 0 || pending} onClick={() => onAction(action)}>{dockerBulkActionLabel(action)}</button>)}</div></div>;
+  return <div className="mb-3 flex min-w-0 flex-wrap items-center justify-between gap-3 border border-[var(--line)] bg-[var(--paper-muted)] p-3"><div className="flex min-w-0 flex-wrap items-center gap-2"><strong className="mr-1 text-sm">{selectedCount} ausgewählt</strong><button className="min-h-8 border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)]" type="button" onClick={onSelectAll}>Alle auswählen</button><button className="min-h-8 border border-[var(--line)] px-2 py-1 text-xs hover:border-[var(--primary)]" type="button" onClick={onClear}>Auswahl leeren</button></div><div className="flex min-w-0 flex-wrap gap-2">{(["start", "stop", "restart"] as const).map((action) => <button key={action} className="min-h-8 border border-[var(--line)] px-2 py-1 text-xs font-semibold hover:border-[var(--primary)] disabled:opacity-50" type="button" disabled={selectedCount === 0 || pending} onClick={() => onAction(action)}>{dockerBulkActionLabel(action)}</button>)}</div></div>;
 }
 
 function dockerBulkActionLabel(action: DockerLifecycleAction) {
@@ -346,47 +347,78 @@ type TargetDockerInventoryActions = Readonly<{
   pendingImageApplyId?: string;
 }>;
 
-function TargetDockerInventoryContent({ discovery, actions = {} }: Readonly<{ discovery: TargetDockerDiscoveryDto | undefined; actions?: TargetDockerInventoryActions }>) {
-  if (!discovery) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Wähle ein verbundenes LXC und starte eine Erkennung.</p>;
+function TargetDockerInventoryContent({ discovery, actions = {}, compact = false }: Readonly<{ discovery: TargetDockerDiscoveryDto | undefined; actions?: TargetDockerInventoryActions; compact?: boolean }>) {
+  if (!discovery) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Wähle einen verbundenen Linux-Agenten und starte eine Erkennung.</p>;
   if (discovery.containers.length === 0) return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">{discovery.reason === "not_discovered" ? "Noch kein Docker-Inventar gespeichert." : "Keine Docker-Container vom Agenten gemeldet."}</p>;
   const events = [...(discovery.events ?? [])].reverse();
+  const showImageUpdate = actions.onCheckUpdate !== undefined;
+  const minimumTableWidth = showImageUpdate ? "min-w-[98rem]" : "min-w-[86rem]";
   return <>
-    <div className="overflow-x-auto">
-      <table>
-        <thead><tr>{actions.onAction ? <th>Auswahl</th> : null}<th>Name</th><th>Compose-Projekt</th><th>Image</th><th>Image-Update</th><th>Ports</th><th>Status</th><th>Health</th><th>Neustarts</th><th>OOM</th><th>Image-ID</th>{actions.onAction ? <th>Aktionen</th> : null}</tr></thead>
+    <section className="min-w-0 max-w-full overflow-x-auto border border-[var(--line)] bg-[var(--panel)] [scrollbar-color:var(--line)_transparent] [scrollbar-width:thin]" aria-label="Docker-Containertabelle" tabIndex={-1}>
+      <table className={cn("w-full table-fixed [&_th]:px-4 [&_th]:py-3 [&_td]:px-4 [&_td]:py-3", minimumTableWidth)}>
+        <colgroup>{actions.onAction ? <col className="w-12" /> : null}<col className="w-40" />{compact ? null : <col className="w-32" />}<col className="w-72" />{showImageUpdate ? <col className="w-44" /> : null}<col className="w-64" /><col className="w-40" /><col className="w-32" /><col className="w-20" /><col className="w-20" /><col className="w-48" />{actions.onAction ? <col className="w-44" /> : null}</colgroup>
+        <thead><tr>{actions.onAction ? <th className="!px-2 text-center"><span className="sr-only">Auswahl</span></th> : null}<th>Name</th>{compact ? null : <th>Compose-Projekt</th>}<th>Image</th>{showImageUpdate ? <th>Image-Update</th> : null}<th>Ports</th><th>Status</th><th>Health</th><th>Neustarts</th><th>OOM</th><th>Image-ID</th>{actions.onAction ? <th>Aktionen</th> : null}</tr></thead>
         <tbody>
-          {discovery.containers.map((item) => <TargetDockerInventoryRow key={item.id} item={item} actions={actions} />)}
+          {discovery.containers.map((item) => <TargetDockerInventoryRow key={item.id} item={item} actions={actions} compact={compact} />)}
         </tbody>
       </table>
-    </div>
-    {events.length > 0 ? <section className="mt-3 border-t border-[var(--line)] pt-3" aria-label="Docker-Änderungsverlauf">
+    </section>
+    {events.length > 0 ? <section className="mt-4 border-t border-[var(--line)] pt-4" aria-label="Docker-Änderungsverlauf">
       <h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-[var(--muted)]">Letzte Änderungen</h3>
-      <ul className="m-0 grid list-none gap-1 p-0 text-xs">
-        {events.slice(0, 20).map((event, index) => <li className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-[var(--line)] py-1.5 last:border-0" key={`${event.observed_at}-${event.container_id}-${event.kind}-${index}`}>
-          <time className="text-[var(--muted)]" dateTime={event.observed_at}>{new Date(event.observed_at).toLocaleString()}</time>
-          <strong>{event.container_name}</strong>
-          <span>{dockerInventoryEventLabel(event.kind)}</span>
-          {event.previous_value || event.current_value ? <span className="text-[var(--muted)]">{event.previous_value ?? "—"} → {event.current_value ?? "—"}</span> : null}
-        </li>)}
+      <ul className="m-0 grid list-none p-0">
+        {events.slice(0, 20).map((event, index) => <li className="min-w-0 border-b border-[var(--line)] py-3 last:border-0" key={`${event.observed_at}-${event.container_id}-${event.kind}-${index}`}><DockerInventoryChange event={event} /></li>)}
       </ul>
     </section> : null}
   </>;
 }
 
-function TargetDockerInventoryRow({ item, actions }: Readonly<{ item: TargetDockerDiscoveryDto["containers"][number]; actions: TargetDockerInventoryActions }>) {
+function DockerInventoryChange({ event }: Readonly<{ event: NonNullable<TargetDockerDiscoveryDto["events"]>[number] }>) {
+  const previous = event.previous_value ?? "—";
+  const current = event.current_value ?? "—";
+  const hasValues = Boolean(event.previous_value || event.current_value);
+  return <div className="grid gap-2">
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs">
+      <span className="min-w-0 break-words"><strong className="mr-2 text-[var(--ink)]">{event.container_name}</strong><span className="text-[var(--muted)]">{dockerInventoryEventLabel(event.kind)}</span></span>
+      <time className="shrink-0 text-[var(--muted)]" dateTime={event.observed_at}>{new Date(event.observed_at).toLocaleString()}</time>
+    </div>
+    {hasValues ? <DockerInventoryChangeValues previous={previous} current={current} /> : null}
+  </div>;
+}
+
+function DockerInventoryChangeValues({ previous, current }: Readonly<{ previous: string; current: string }>) {
+  if (previous.length + current.length <= 120) return <span className="break-all font-mono text-xs leading-relaxed text-[var(--muted)]">{previous} → {current}</span>;
+  return <details className="min-w-0 text-xs">
+      <summary className="w-fit cursor-pointer font-medium text-lxcup-primary">Vorher und nachher anzeigen</summary>
+      <dl className="mb-0 mt-2 grid min-w-0 gap-3 border-l-2 border-[var(--line)] pl-3 sm:grid-cols-2">
+        <div className="min-w-0"><dt className="mb-1 text-[var(--muted)]">Vorher</dt><dd className="m-0 break-all font-mono leading-relaxed">{previous}</dd></div>
+        <div className="min-w-0"><dt className="mb-1 text-[var(--muted)]">Nachher</dt><dd className="m-0 break-all font-mono leading-relaxed">{current}</dd></div>
+      </dl>
+    </details>;
+}
+
+function DockerImageReference({ image }: Readonly<{ image: string }>) {
+  const digestSeparator = image.indexOf("@sha256:");
+  if (digestSeparator < 0) return <span className="break-words [overflow-wrap:anywhere]">{image}</span>;
+  return <details className="min-w-0">
+    <summary className="cursor-pointer break-words text-sm [overflow-wrap:anywhere]" title="Image mit vollständigem Digest anzeigen">{image.slice(0, digestSeparator)}</summary>
+    <code className="mt-2 block break-all text-xs leading-relaxed text-[var(--muted)]">{image}</code>
+  </details>;
+}
+
+function TargetDockerInventoryRow({ item, actions, compact }: Readonly<{ item: TargetDockerDiscoveryDto["containers"][number]; actions: TargetDockerInventoryActions; compact: boolean }>) {
   const update = actions.imageChecks?.[item.id];
   return <tr>
-    {actions.onAction ? <td><input type="checkbox" aria-label={`${item.name} auswählen`} checked={actions.selectedIds?.includes(item.id) ?? false} onChange={(event) => actions.onSelectionChange?.(item.id, event.target.checked)} /></td> : null}
-    <td><strong>{item.name}</strong>{item.created_at ? <span className="block text-xs text-[var(--muted)]">Erstellt <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time></span> : null}</td>
-    <td>{composeProjectName(item.labels) ?? "—"}</td>
-    <td>{item.image}</td>
-    <td><DockerImageUpdateControls item={item} actions={actions} result={update} /></td>
-    <td>{item.ports.length > 0 ? item.ports.join(", ") : "—"}</td>
-    <td>{item.state} · {item.status}</td>
-    <td>{item.health ?? "Nicht gemeldet"}</td>
-    <td>{item.restart_count ?? "—"}</td>
-    <td>{oomStatusLabel(item.oom_killed)}</td>
-    <td title={item.image_id ?? undefined}>{item.image_id ? `${item.image_id.slice(0, 19)}…` : "—"}</td>
+    {actions.onAction ? <td className="!px-2 text-center align-middle"><input className="h-4 w-4 p-0 align-middle" type="checkbox" aria-label={`${item.name} auswählen`} checked={actions.selectedIds?.includes(item.id) ?? false} onChange={(event) => actions.onSelectionChange?.(item.id, event.target.checked)} /></td> : null}
+    <td className="align-top"><strong className="block break-words">{item.name}</strong>{item.created_at ? <span className="mt-1 block text-[11px] text-[var(--muted)]">Erstellt <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time></span> : null}</td>
+    {compact ? null : <td className="align-top break-words">{composeProjectName(item.labels) ?? "—"}</td>}
+    <td className="align-top"><DockerImageReference image={item.image} /></td>
+    {actions.onCheckUpdate ? <td><DockerImageUpdateControls item={item} actions={actions} result={update} /></td> : null}
+    <td className="align-top break-words">{item.ports.length > 0 ? item.ports.join(", ") : "—"}</td>
+    <td className="align-top"><span className={cn("inline-flex items-center gap-1.5 px-2 py-1 text-xs font-semibold", item.state === "running" ? "bg-[var(--success-soft)] text-[var(--success)]" : "bg-[var(--paper-muted)] text-[var(--muted)]")}><span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />{item.state}</span><span className="mt-1 block text-xs leading-relaxed text-[var(--muted)]">{item.status}</span></td>
+    <td className="align-top">{item.health ? <span className={cn("inline-flex border px-2 py-1 text-xs font-semibold", item.health === "healthy" ? "border-[var(--success)]/30 bg-[var(--success-soft)] text-[var(--success)]" : "border-[var(--warning)]/30 bg-[var(--warning-soft)] text-[var(--warning)]")}>{item.health}</span> : <span className="text-xs text-[var(--muted)]">Nicht gemeldet</span>}</td>
+    <td className="align-top text-center">{item.restart_count ?? "—"}</td>
+    <td className="align-top"><span className={cn("text-xs", item.oom_killed ? "bg-[var(--error-soft)] px-2 py-1 font-semibold text-[var(--error)]" : "text-[var(--muted)]")}>{oomStatusLabel(item.oom_killed)}</span></td>
+    <td className="align-top">{item.image_id ? <details className="min-w-0"><summary className="cursor-pointer break-all font-mono text-[10px] text-lxcup-primary" title="Vollständige Image-ID anzeigen">{`${item.image_id.slice(0, 19)}…`}</summary><code className="mt-1 block break-all text-[10px] text-[var(--muted)]">{item.image_id}</code></details> : <span className="text-[var(--muted)]">—</span>}</td>
     {actions.onAction ? <DockerLifecycleActions item={item} actions={actions} /> : null}
   </tr>;
 }
@@ -444,7 +476,7 @@ function SavedTargetDockerInventoryContent({ targets, inventories, targetsLoadin
 }>) {
   const [projectFilter, setProjectFilter] = useState("");
   if (targetsError) {
-    return <p className="font-semibold text-[var(--error)]" role="alert">LXC-Ressourcen konnten nicht geladen werden: {targetsError.message}</p>;
+    return <p className="font-semibold text-[var(--error)]" role="alert">Linux-Ressourcen konnten nicht geladen werden: {targetsError.message}</p>;
   }
   const savedInventories = targets.flatMap((target, index) => {
     const inventory = inventories[index]?.data;
@@ -456,7 +488,7 @@ function SavedTargetDockerInventoryContent({ targets, inventories, targetsLoadin
     if (inventories.some((inventory) => inventory.error)) {
       return <p className="font-semibold text-[var(--error)]" role="alert">Gespeicherte Docker-Inventare konnten nicht geladen werden.</p>;
     }
-    return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Noch keine Docker-Container gespeichert. Wähle einen verbundenen LXC und starte eine Erkennung.</p>;
+    return <p className="m-0 grid min-h-24 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-3 text-sm text-[var(--muted)]">Noch keine Docker-Container gespeichert. Wähle einen verbundenen Linux-Agenten und starte eine Erkennung.</p>;
   }
   const composeProjects = [...new Set(savedInventories.flatMap(({ inventory }) => inventory.containers.map((item) => composeProjectName(item.labels)).filter((project): project is string => project !== null)))].sort((left, right) => left.localeCompare(right));
   const visibleInventories = savedInventories.flatMap(({ target, inventory }) => {
@@ -469,24 +501,28 @@ function SavedTargetDockerInventoryContent({ targets, inventories, targetsLoadin
     return groups.size > 0 ? [{ target, inventory, groups }] : [];
   });
   return (
-    <div className="grid gap-3">
-      <label className="grid max-w-sm gap-1 text-xs font-semibold text-[var(--muted)]"><span>Nach Compose-Projekt filtern</span><select aria-label="Compose-Projekt filtern" value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="">Alle Projekte</option>{composeProjects.map((project) => <option key={project} value={project}>{project}</option>)}</select></label>
+    <div className="grid min-w-0 grid-cols-1 gap-4">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <label className="grid w-full max-w-sm gap-1 text-xs font-semibold text-[var(--muted)]"><span>Nach Compose-Projekt filtern</span><select className="h-10" aria-label="Compose-Projekt filtern" value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="">Alle Projekte</option>{composeProjects.map((project) => <option key={project} value={project}>{project}</option>)}</select></label>
+        <span className="pb-2 text-xs text-[var(--muted)]">{composeProjects.length} {composeProjects.length === 1 ? "Compose-Projekt" : "Compose-Projekte"}</span>
+      </div>
       {loading ? <p className="m-0 text-xs text-[var(--muted)]">Weitere Inventare werden geladen…</p> : null}
       {visibleInventories.map(({ target, inventory, groups }) => (
-        <article className="border border-[var(--line)] bg-[var(--paper-muted)] p-3" key={target.id}>
-          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+        <article className="grid min-w-0 grid-cols-1 gap-4 border-t border-[var(--line)] pt-4" key={target.id}>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3">
             <div>
-              <h3 className="m-0 text-sm">{target.name} <span className="font-normal text-[var(--muted)]">· {target.address}</span></h3>
-              <Link className="text-xs text-lxcup-primary hover:underline" to={`/docker?target=${encodeURIComponent(target.id)}`}>Erkennung öffnen</Link>
+              <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Docker-Host</p>
+              <h3 className="m-0 text-base">{target.name} <span className="font-normal text-[var(--muted)]">· {target.address}</span></h3>
             </div>
-            <span className="text-xs text-[var(--muted)]">
-              Erkannt am <time dateTime={inventory.collected_at}>{new Date(inventory.collected_at).toLocaleString()}</time> · {Array.from(groups.values()).reduce((count, items) => count + items.length, 0)} Container
-            </span>
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-xs text-[var(--muted)]">Letzte Erkennung <time dateTime={inventory.collected_at}>{new Date(inventory.collected_at).toLocaleString()}</time></span>
+               <Link className="inline-flex min-h-8 items-center border border-[var(--line)] bg-[var(--panel)] px-2.5 text-xs font-semibold text-lxcup-primary hover:border-[var(--primary)] hover:bg-[var(--primary-soft)]" to={`/docker?target=${encodeURIComponent(target.id)}`}>Erkennung öffnen <span className="ml-2 text-base leading-none" aria-hidden="true">→</span></Link>
+            </div>
           </div>
-          <div className="grid gap-3">{Array.from(groups.entries()).map(([project, containers]) => {
+          <div className="grid min-w-0 grid-cols-1 gap-4">{Array.from(groups.entries()).map(([project, containers]) => {
             const ids = new Set(containers.map((item) => item.id));
             const groupedInventory = { ...inventory, containers, events: (inventory.events ?? []).filter((event) => ids.has(event.container_id)) };
-            return <section className="border border-[var(--line)] p-3" key={project}><h4 className="mb-2 text-xs font-bold uppercase tracking-wide text-[var(--muted)]">Compose · {project} <span className="font-normal">· {containers.length} Container</span></h4><TargetDockerInventoryContent discovery={groupedInventory} /></section>;
+            return <section className="grid min-w-0 grid-cols-1 gap-4" key={project}><h4 className="m-0 flex flex-wrap items-center gap-2 text-xs font-bold uppercase tracking-wide text-[var(--muted)]"><span className="break-all text-[var(--ink)]">Compose · {project}</span><span className="ml-auto font-medium normal-case tracking-normal">{containers.length} Container</span></h4><TargetDockerInventoryContent discovery={groupedInventory} compact /></section>;
           })}</div>
         </article>
       ))}

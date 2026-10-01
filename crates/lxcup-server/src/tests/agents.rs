@@ -98,6 +98,8 @@ async fn compose_image_update_requires_and_uses_a_fresh_successful_check() {
                             compose_project: "shop".to_owned(),
                             compose_service: "web".to_owned(),
                             image_id: expected_digest,
+                            service_state: "running".to_owned(),
+                            health_status: Some("healthy".to_owned()),
                             completed_at: chrono::Utc::now(),
                         })
                     }
@@ -162,6 +164,20 @@ async fn compose_image_update_requires_and_uses_a_fresh_successful_check() {
     let applied = api.oneshot(apply_request()).await.unwrap();
     assert_eq!(applied.status(), StatusCode::OK);
     assert_eq!(apply_count.load(Ordering::SeqCst), 1);
+    let applied_payload: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(applied.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        applied_payload["data"]["result"]["service_state"],
+        "running"
+    );
+    assert_eq!(
+        applied_payload["data"]["result"]["health_status"],
+        "healthy"
+    );
     let saved = state
         .store
         .read()

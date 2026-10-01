@@ -10,6 +10,21 @@ function StatefulTaskMonitor({ events, onClear }: Readonly<{ events: GlobalEvent
 }
 
 describe("TaskMonitor", () => {
+  it("shows every counted event including activities beyond the first eight", () => {
+    const events: GlobalEvent[] = Array.from({ length: 40 }, (_, index) => ({
+      id: `event-${index}`,
+      receivedAt: "2026-09-30T19:00:00Z",
+      event: { type: "Status", payload: { resource: "ansible_job", resource_id: `job-${index}`, state: "completed" } },
+      jobDetails: { operationLabel: "Paketinventar sammeln", resourceName: `resource-${index}` },
+    }));
+    render(<StatefulTaskMonitor events={events} onClear={() => undefined} />);
+
+    expect(screen.getByText("40 Ereignisse")).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(40);
+    expect(screen.getByText("Paketinventar sammeln · resource-39")).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "Öffnen" })[39]).toHaveAttribute("href", "/workflows/job-39");
+  });
+
   it("renders recent activity with safe navigation targets", () => {
     const events: GlobalEvent[] = [
       { id: "event-1", receivedAt: "2026-09-20T12:00:00.000Z", event: { type: "Status", payload: { resource: "container_action", resource_id: "101", state: "running" } } },

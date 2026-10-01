@@ -519,6 +519,24 @@ impl AnsibleJobCoordinator {
         &mut self,
         source: &AnsibleJob,
     ) -> Result<JobSubmission, CoordinatorError> {
+        self.submit_reconciliation_with_lock(source, true)
+    }
+
+    /// Persistent job repositories arbitrate target exclusivity. Their
+    /// reconciliation route may ignore an in-memory lock left by a prior
+    /// worker lifecycle while still registering the reconciliation locally.
+    pub fn submit_persisted_reconciliation(
+        &mut self,
+        source: &AnsibleJob,
+    ) -> Result<JobSubmission, CoordinatorError> {
+        self.submit_reconciliation_with_lock(source, false)
+    }
+
+    fn submit_reconciliation_with_lock(
+        &mut self,
+        source: &AnsibleJob,
+        enforce_memory_lock: bool,
+    ) -> Result<JobSubmission, CoordinatorError> {
         if !source.can_be_reconciled() {
             return Err(CoordinatorError::ReconcileNotAllowed);
         }
@@ -530,10 +548,11 @@ impl AnsibleJobCoordinator {
                 .ok_or(CoordinatorError::NotFound)?;
             return Ok(JobSubmission::Duplicate(existing.clone()));
         }
-        if self
-            .active_targets
-            .get(&source.target)
-            .is_some_and(|active_job_id| *active_job_id != source.id)
+        if enforce_memory_lock
+            && self
+                .active_targets
+                .get(&source.target)
+                .is_some_and(|active_job_id| *active_job_id != source.id)
         {
             return Err(CoordinatorError::TargetBusy);
         }

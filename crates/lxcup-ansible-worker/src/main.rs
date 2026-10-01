@@ -34,6 +34,11 @@ struct Artifact {
     file: String,
     sha256: String,
 }
+#[derive(Debug, PartialEq, Eq)]
+struct AgentArtifactPaths {
+    amd64: String,
+    arm64: Option<String>,
+}
 struct Runtime {
     secrets: EncryptedFileSecretStore,
     artifacts: String,
@@ -58,6 +63,7 @@ async fn main() {
     tokio::spawn(artifact_store::report_availability(
         repos.worker_heartbeats.clone(),
         worker_name.clone(),
+        env!("CARGO_PKG_VERSION").to_owned(),
         runtime.artifact_probe.clone(),
         runtime.artifacts.clone(),
     ));
@@ -430,8 +436,12 @@ async fn prepare_invocation(
     if let AnsibleParameters::DeployAgent { agent_version }
     | AnsibleParameters::UpdateAgent { agent_version } = &job.parameters
     {
+        let binaries = artifact(r, agent_version, dir).await?;
         vars["lxcup_agent_version"] = serde_json::json!(agent_version);
-        vars["lxcup_agent_binary_src"] = serde_json::json!(artifact(r, agent_version, dir).await?);
+        vars["lxcup_agent_binary_src"] = serde_json::json!(binaries.amd64);
+        if let Some(arm64) = binaries.arm64 {
+            vars["lxcup_agent_binary_src_arm64"] = serde_json::json!(arm64);
+        }
     }
     if let AnsibleParameters::UpdatePackages { packages } = &job.parameters {
         vars["lxcup_update_packages"] = serde_json::json!(packages);
@@ -521,7 +531,11 @@ fn redact_output(output: &str, secrets: &[Option<&str>]) -> String {
             }
         })
 }
-async fn artifact(r: &Runtime, version: &str, dir: &Path) -> Result<String, JobFailureCode> {
+async fn artifact(
+    r: &Runtime,
+    version: &str,
+    dir: &Path,
+) -> Result<AgentArtifactPaths, JobFailureCode> {
     let base = format!("{}/agent/{version}", r.artifacts);
     let m: Manifest = reqwest::get(format!("{base}/manifest.json"))
         .await
@@ -534,24 +548,63 @@ async fn artifact(r: &Runtime, version: &str, dir: &Path) -> Result<String, JobF
     if m.version != version {
         return Err(JobFailureCode::PlaybookFailed);
     }
-    let a = m
+    let amd64 = m
         .artifacts
-        .into_iter()
+        .iter()
         .find(|a| a.platform == "linux-amd64")
         .ok_or(JobFailureCode::PlaybookFailed)?;
-    let b = reqwest::get(format!("{base}/{}", a.file))
+    let amd64_path = download_agent_artifact(&base, amd64, &dir.join("agent-amd64")).await?;
+    let arm64_path = if let Some(arm64) = m.artifacts.iter().find(|a| a.platform == "linux-arm64") {
+        Some(download_agent_artifact(&base, arm64, &dir.join("agent-arm64")).await?)
+    } else {
+        None
+    };
+    Ok(AgentArtifactPaths {
+        amd64: amd64_path,
+        arm64: arm64_path,
+    })
+}
+
+async fn download_agent_artifact(
+    base: &str,
+    artifact: &Artifact,
+    destination: &Path,
+) -> Result<String, JobFailureCode> {
+    if artifact.file.is_empty()
+        || !artifact.file.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        })
+    {
+        return Err(JobFailureCode::PlaybookFailed);
+    }
+    let binary = reqwest::get(format!("{base}/{}", artifact.file))
         .await
         .map_err(|_| JobFailureCode::WorkerUnavailable)?
         .bytes()
         .await
         .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    if format!("{:x}", Sha256::digest(&b)) != a.sha256 {
+    if format!("{:x}", Sha256::digest(&binary)) != artifact.sha256
+        || !matches!(artifact.platform.as_str(), "linux-amd64" | "linux-arm64")
+        || !agent_binary_matches_platform(&binary, &artifact.platform)
+    {
         return Err(JobFailureCode::PlaybookFailed);
     }
-    let p = dir.join("agent");
-    fs::write(&p, b).map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    Ok(p.display().to_string())
+    fs::write(destination, binary).map_err(|_| JobFailureCode::WorkerUnavailable)?;
+    Ok(destination.display().to_string())
 }
+
+fn agent_binary_matches_platform(binary: &[u8], platform: &str) -> bool {
+    if binary.len() < 20 || binary.get(..4) != Some(b"\x7fELF") || binary[4] != 2 || binary[5] != 1
+    {
+        return false;
+    }
+    let machine = u16::from_le_bytes([binary[18], binary[19]]);
+    matches!(
+        (platform, machine),
+        ("linux-amd64", 62) | ("linux-arm64", 183)
+    )
+}
+
 fn playbook(o: AnsibleOperation, k: TargetKind) -> Option<&'static str> {
     match (o, k) {
         (

@@ -38,17 +38,19 @@ fn supports_manifest(manifest: &serde_json::Value) -> bool {
             .get("artifacts")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|artifacts| {
-                artifacts.iter().any(|artifact| {
-                    artifact.get("platform").and_then(serde_json::Value::as_str)
-                        == Some("linux-amd64")
-                        && artifact
-                            .get("file")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some()
-                        && artifact
-                            .get("sha256")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some()
+                ["linux-amd64", "linux-arm64"].iter().all(|platform| {
+                    artifacts.iter().any(|artifact| {
+                        artifact.get("platform").and_then(serde_json::Value::as_str)
+                            == Some(*platform)
+                            && artifact
+                                .get("file")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some()
+                            && artifact
+                                .get("sha256")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some()
+                    })
                 })
             })
 }
@@ -56,6 +58,7 @@ fn supports_manifest(manifest: &serde_json::Value) -> bool {
 pub(crate) async fn report_availability(
     repository: WorkerHeartbeatRepository,
     worker_name: String,
+    worker_version: String,
     client: reqwest::Client,
     base_url: String,
 ) {
@@ -77,7 +80,10 @@ pub(crate) async fn report_availability(
             previous_status = Some(available);
             next_probe = tokio::time::Instant::now() + PROBE_INTERVAL;
         }
-        if let Err(error) = repository.record(&worker_name, available, checked_at).await {
+        if let Err(error) = repository
+            .record(&worker_name, &worker_version, available, checked_at)
+            .await
+        {
             tracing::error!(?error, "worker heartbeat failed");
         }
         tokio::time::sleep(HEARTBEAT_INTERVAL).await;
@@ -92,13 +98,19 @@ mod tests {
     fn manifest_probe_requires_current_version_and_linux_artifact_metadata() {
         let manifest = serde_json::json!({
             "version": lxcup_core::VERSION,
-            "artifacts": [{ "platform": "linux-amd64", "file": "agent", "sha256": "digest" }]
+            "artifacts": [
+                { "platform": "linux-amd64", "file": "agent-amd64", "sha256": "digest" },
+                { "platform": "linux-arm64", "file": "agent-arm64", "sha256": "digest" }
+            ]
         });
         assert!(supports_manifest(&manifest));
 
         let wrong_version = serde_json::json!({
             "version": "0.0.0",
-            "artifacts": [{ "platform": "linux-amd64", "file": "agent", "sha256": "digest" }]
+            "artifacts": [
+                { "platform": "linux-amd64", "file": "agent-amd64", "sha256": "digest" },
+                { "platform": "linux-arm64", "file": "agent-arm64", "sha256": "digest" }
+            ]
         });
         assert!(!supports_manifest(&wrong_version));
 
@@ -107,5 +119,11 @@ mod tests {
             "artifacts": [{ "platform": "windows-amd64", "file": "agent.exe", "sha256": "digest" }]
         });
         assert!(!supports_manifest(&missing_linux_artifact));
+
+        let missing_arm64_artifact = serde_json::json!({
+            "version": lxcup_core::VERSION,
+            "artifacts": [{ "platform": "linux-amd64", "file": "agent-amd64", "sha256": "digest" }]
+        });
+        assert!(!supports_manifest(&missing_arm64_artifact));
     }
 }

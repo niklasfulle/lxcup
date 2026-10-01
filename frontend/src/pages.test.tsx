@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type ContainerDto, type DockerWorkloadDto, type SecretMetadata, type TargetDto, type WorkerAvailabilityDto } from "./api";
 
@@ -42,7 +42,7 @@ const mocks = vi.hoisted(() => ({
   discoverTargetDocker: vi.fn(async () => ({ target_id: "target-1", target_name: "test-target", available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [{ id: "docker-target-1", name: "web", image: "nginx:1", state: "running", status: "Up", ports: ["80/tcp"], started_at: null, labels: [] }] })),
   operateTargetDockerContainer: vi.fn(async (_targetId: string, containerId: string, action: string) => ({ target_id: "target-1", target_name: "test-target", container_id: containerId, container_name: "web", action, completed_at: "2026-01-01T00:00:00Z" })),
   checkTargetDockerImageUpdate: vi.fn(async (_targetId: string, containerId: string) => ({ target_id: "target-1", target_name: "test-target", result: { container_id: containerId, image: "nginx:latest", current_image_id: "sha256:old", remote_image_id: "sha256:new", status: "update_available", reason: null, checked_at: "2026-01-01T00:00:00Z" } })),
-  applyTargetDockerImageUpdate: vi.fn(async (_targetId: string, containerId: string, _digest: string) => ({ target_id: "target-1", target_name: "test-target", result: { container_id: containerId, image: "nginx:latest", compose_project: "shop", compose_service: "web", image_id: "sha256:new", completed_at: "2026-01-01T00:01:00Z" } })),
+  applyTargetDockerImageUpdate: vi.fn(async (_targetId: string, containerId: string, _digest: string) => ({ target_id: "target-1", target_name: "test-target", result: { container_id: containerId, image: "nginx:latest", compose_project: "shop", compose_service: "web", image_id: "sha256:new", service_state: "running", health_status: "healthy", completed_at: "2026-01-01T00:01:00Z" } })),
   adoptDockerWorkload: vi.fn(async () => undefined),
   removeDockerWorkload: vi.fn(async () => undefined),
   subscribe: vi.fn(() => () => undefined),
@@ -107,6 +107,11 @@ import { SchedulesPage } from "./pages/SchedulesPage";
 import { UpdatePoliciesPage } from "./pages/UpdatePoliciesPage";
 import { ContainersPage } from "./pages/ContainersPage";
 
+function DockerNavigationTestPage() {
+  const navigate = useNavigate();
+  return <><button onClick={() => navigate(-1)}>Zurück testen</button><button onClick={() => navigate(1)}>Vorwärts testen</button><DockerPage /></>;
+}
+
 function renderPage(element: React.ReactElement, route = "/") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[route]}><Routes><Route path="/containers/:containerId/*" element={element} /><Route path="/workflows/:jobId/*" element={element} /><Route path="/targets/:targetId/*" element={element} /><Route path="*" element={element} /></Routes></MemoryRouter></QueryClientProvider>);
@@ -120,6 +125,9 @@ function TargetAreaSwitcher() {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 beforeEach(() => {
+  window.localStorage.removeItem("lxcup-read-notifications");
+  window.localStorage.removeItem("lxcup-telemetry-alert-history");
+  window.localStorage.removeItem("lxcup-system-alert-history");
   mocks.targets.data = [];
   mocks.targets.isLoading = false;
   mocks.targets.error = null;
@@ -158,6 +166,7 @@ beforeEach(() => {
   mocks.telemetry.isLoading = false;
   mocks.telemetry.error = null;
   mocks.telemetryAlerts.data = [];
+  mocks.workerAvailability.data = { available: true, worker_version: "0.4.0", last_seen_at: "2026-01-01T00:00:00Z", artifact_store_available: true, artifact_store_checked_at: "2026-01-01T00:00:00Z" };
   mocks.telemetryAlerts.isLoading = false;
   mocks.telemetryAlerts.error = null;
   mocks.schedules.data = [];
@@ -202,6 +211,17 @@ describe("inventory pages", () => {
     expect(screen.getByText("Healthcheck")).toBeInTheDocument();
     expect(screen.getByText("Fehlgeschlagen")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /LXC-Container.*1 Ziele.*Manuell eingebundene LXCs/ })).toHaveAttribute("href", "/containers");
+  });
+
+  it("clearly notifies when a managed agent is behind the available version", () => {
+    mocks.targets.data = [{ ...target, agent_version: "0.3.1", latest_agent_version: "0.4.0" }];
+
+    renderPage(<Dashboard />);
+
+    expect(screen.getByRole("status", { name: "Agent-Updates verfügbar" })).toHaveTextContent("test-target");
+    expect(screen.getByRole("status", { name: "Agent-Updates verfügbar" })).toHaveTextContent("v0.3.1");
+    expect(screen.getByRole("status", { name: "Agent-Updates verfügbar" })).toHaveTextContent("v0.4.0");
+    expect(within(screen.getByRole("status", { name: "Agent-Updates verfügbar" })).getByRole("link", { name: "test-target öffnen" })).toHaveAttribute("href", "/targets/target-1");
   });
 
   it("shows resource onboarding shortcuts on an empty dashboard", () => {
@@ -279,7 +299,7 @@ describe("inventory pages", () => {
       const telemetryFigure = screen.getByRole("figure", { name: /CPU-Auslastung im Verlauf/ });
       const plottedX = [...telemetryFigure.querySelectorAll("circle")].map((point) => Math.round(Number(point.getAttribute("cx"))));
       expect(plottedX).toEqual([571, 580, 590]);
-      expect(screen.getByRole("status")).toHaveTextContent("fehlen 2 erwartete Messpunkte");
+      expect(screen.getByText("Im 10-Minuten-Verlauf fehlen 2 erwartete Messpunkte.")).toBeInTheDocument();
       expect(telemetryFigure.querySelector('line[stroke="var(--primary)"]')).toBeInTheDocument();
 
       const telemetryCard = screen.getByRole("heading", { name: "Systemauslastung" }).closest("article");
@@ -301,6 +321,15 @@ describe("inventory pages", () => {
     expect(screen.queryByRole("button", { name: "Docker erkennen" })).not.toBeInTheDocument();
   });
 
+  it("offers Docker discovery for a managed Linux server target", async () => {
+    mocks.targets.data = [{ ...target, kind: "linux_server", name: "test-server" }];
+    renderPage(<TargetDetailPage />, "/targets/target-1");
+    expect(screen.getByRole("heading", { name: "Docker-Inventar" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Docker-Inventar öffnen/ })).toHaveAttribute("href", "/docker?target=target-1");
+    await userEvent.click(screen.getByRole("button", { name: "Docker erkennen" }));
+    await waitFor(() => expect(mocks.discoverTargetDocker).toHaveBeenCalledWith("target-1"));
+  });
+
   it("shows Docker discovery status and actions in the LXC inventory", async () => {
     mocks.containers.data = [container];
     mocks.dockerDiscovery.data = { host_container_id: 101, status: "succeeded", started_at: "2026-01-01T00:00:00Z", finished_at: "2026-01-01T00:00:02Z", container_count: 2, error_code: null };
@@ -315,7 +344,7 @@ describe("inventory pages", () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
-      mocks.targets.data = [{ ...target, updated_at: "2026-01-01T00:00:00Z" }];
+      mocks.targets.data = [{ ...target, agent_last_seen_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }];
       renderPage(<TargetDetailPage />, "/targets/target-1");
 
       expect(screen.queryByText(/Der letzte Heartbeat liegt mehr als 2 Minuten zurück/)).not.toBeInTheDocument();
@@ -626,10 +655,20 @@ describe("inventory pages", () => {
     renderPage(<DockerPage />);
     await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
     expect(screen.getByRole("option", { name: "test-target · 192.0.2.10" })).toBeInTheDocument();
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "LXC mit Agent" }), "target:target-1");
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Linux-Ziel mit Agent" }), "target:target-1");
     await userEvent.click(screen.getByRole("button", { name: "Docker-Container entdecken" }));
     await waitFor(() => expect(mocks.discoverTargetDocker).toHaveBeenCalledWith("target-1"));
     expect((await screen.findAllByText("web")).length).toBeGreaterThan(0);
+  });
+
+  it("offers managed Linux server targets for Docker discovery", async () => {
+    const server = { ...target, id: "server-1", kind: "linux_server" as const, name: "test-server" };
+    mocks.targets.data = [server];
+    renderPage(<DockerPage />);
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Linux-Ziel mit Agent" }), "target:server-1");
+    await userEvent.click(screen.getByRole("button", { name: "Docker-Container entdecken" }));
+    await waitFor(() => expect(mocks.discoverTargetDocker).toHaveBeenCalledWith("server-1"));
   });
 
   it("requires confirmation before restarting an LXC Docker container", async () => {
@@ -695,7 +734,37 @@ describe("inventory pages", () => {
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Vorher: nginx:latest (sha256:old)"));
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Nachher: nginx:latest (sha256:new)"));
     expect(await screen.findByRole("status")).toHaveTextContent("wurde aktualisiert");
+    expect(screen.getByRole("status")).toHaveTextContent("Status: running · Health: healthy");
     confirm.mockRestore();
+  });
+
+  it("opens a saved Docker target and follows back and forward navigation without reloading", async () => {
+    mocks.targets.data = [target];
+    const inventory = { target_id: target.id, target_name: target.name, available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [{ id: "docker-target-1", name: "web", image: "nginx:1", state: "running", status: "Up", ports: [], labels: [] }], events: [] };
+    mocks.targetDockerInventory.data = inventory;
+    mocks.targetDockerInventories = [{ data: inventory, isLoading: false, error: null }];
+    renderPage(<DockerNavigationTestPage />, "/docker");
+    await userEvent.click(screen.getByRole("link", { name: /Erkennung öffnen/ }));
+    expect(screen.getByText("Ausgewählter Docker-Host")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Ressource öffnen" })).toHaveAttribute("href", "/targets/target-1");
+    await userEvent.click(screen.getByRole("button", { name: "Zurück testen" }));
+    expect(screen.queryByText("Ausgewählter Docker-Host")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Vorwärts testen" }));
+    expect(screen.getByText("Ausgewählter Docker-Host")).toBeInTheDocument();
+    expect(mocks.discoverTargetDocker).not.toHaveBeenCalled();
+  });
+
+  it("does not carry discovered containers into another selected Docker target", async () => {
+    mocks.targets.data = [target, { ...target, id: "target-2", name: "second-host" }];
+    mocks.discoverTargetDocker.mockResolvedValueOnce({ target_id: target.id, target_name: target.name, available: true, reason: null, collected_at: "2026-01-01T00:00:00Z", containers: [{ id: "docker-target-1", name: "web", image: "nginx:1", state: "running", status: "Up", ports: [], started_at: null, labels: [] }] });
+    renderPage(<DockerPage />, "/docker?target=target-1");
+    await userEvent.click(screen.getByRole("button", { name: "Docker-Container entdecken" }));
+    expect(await screen.findByRole("checkbox", { name: "web auswählen" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Linux-Ziel mit Agent" }), "target:target-2");
+    expect(screen.getByRole("link", { name: "Ressource öffnen" })).toHaveAttribute("href", "/targets/target-2");
+    expect(screen.queryByRole("checkbox", { name: "web auswählen" })).not.toBeInTheDocument();
+    expect(mocks.discoverTargetDocker).toHaveBeenCalledTimes(1);
   });
 
   it("loads the last saved Docker inventory for a target after reopening the page", () => {
@@ -714,6 +783,27 @@ describe("inventory pages", () => {
     expect(screen.getByText("Container-Auslastung")).toBeInTheDocument();
     expect(screen.getByText("web: CPU seit mindestens drei Messpunkten über 90 %")).toBeInTheDocument();
     expect(screen.getByText("web: RAM seit mindestens drei Messpunkten über 90 %")).toBeInTheDocument();
+  });
+
+  it("keeps long image digests and change values collapsed until opened", async () => {
+    const image = `redis:7-alpine@sha256:${"a".repeat(64)}`;
+    const previous = `example/app:1 (sha256:${"b".repeat(64)})`;
+    const current = `example/app:2 (sha256:${"c".repeat(64)})`;
+    mocks.targets.data = [{ ...target, state: "managed" }];
+    mocks.targetDockerInventory.data = {
+      target_id: target.id, target_name: target.name, available: true, reason: null, collected_at: "2026-01-01T00:00:00Z",
+      containers: [{ id: "digest-container", name: "cache", image, state: "running", status: "Up", ports: [], started_at: null, labels: [] }],
+      events: [{ observed_at: "2026-01-01T00:00:00Z", container_id: "digest-container", container_name: "cache", kind: "image_changed", previous_value: previous, current_value: current }],
+    };
+    renderPage(<DockerPage />, `/docker?target=${target.id}`);
+
+    expect(screen.getByText(image)).not.toBeVisible();
+    expect(screen.getByText(previous)).not.toBeVisible();
+    await userEvent.click(screen.getByText("redis:7-alpine"));
+    expect(screen.getByText(image)).toBeVisible();
+    await userEvent.click(screen.getByText("Vorher und nachher anzeigen"));
+    expect(screen.getByText(previous)).toBeVisible();
+    expect(screen.getByText(current)).toBeVisible();
   });
 
   it("shows saved LXC Docker inventories on the main page without selecting a host again", () => {
@@ -744,6 +834,8 @@ describe("inventory pages", () => {
     renderPage(<DockerPage />);
     expect(screen.getByText("Compose · shop")).toBeInTheDocument();
     expect(screen.getByText("Compose · Ohne Compose-Projekt")).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Compose-Projekt" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Image-Update" })).not.toBeInTheDocument();
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "Compose-Projekt filtern" }), "shop");
     expect(screen.getByText("api")).toBeInTheDocument();
     expect(screen.queryByText("database")).not.toBeInTheDocument();
@@ -1245,6 +1337,10 @@ describe("application shell", () => {
     await screen.findByRole("link", { name: "lxcup Übersicht" });
     const sidebar = document.querySelector('aside[aria-label="Aktivitäten"]');
     expect(sidebar).not.toHaveClass("translate-x-full");
+    const contentScroll = screen.getByRole("region", { name: "Seiteninhalt" });
+    expect(contentScroll).toHaveClass("overflow-y-auto");
+    expect(contentScroll).not.toHaveClass("px-4");
+    expect(contentScroll.firstElementChild).toHaveClass("px-4", "sm:px-6");
     await userEvent.click(screen.getByRole("button", { name: "Aktivitäten ausblenden" }));
     expect(window.localStorage.getItem("lxcup-activity-sidebar-open")).toBe("false");
 
@@ -1285,7 +1381,10 @@ describe("application shell", () => {
     expect(screen.getByRole("link", { name: "Docker-Container" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Windows" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Tasks & Workflows" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Secrets" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("link", { name: "Wiki" }));
+    expect(await screen.findByRole("heading", { name: "lxcup-Wiki" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Brotkrumennavigation" })).toHaveTextContent("Wiki");
+    expect(screen.getAllByRole("link", { name: "Secrets" }).some((link) => link.getAttribute("href") === "/secrets")).toBe(true);
     expect(screen.getByText("Ansible-Worker nicht verfügbar")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Zugänge & Agenten" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /LXC einbinden/ })).not.toBeInTheDocument();
@@ -1331,8 +1430,37 @@ describe("application shell", () => {
 
     mocks.telemetryAlerts.data = [];
     await userEvent.click(screen.getByRole("button", { name: "Alle als gelesen markieren" }));
-    expect(await screen.findByText("Behoben")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Hohe CPU-Auslastung/ })).toHaveTextContent("Auslastung wieder im Normalbereich.");
+    const recovered = await screen.findByRole("link", { name: /Hohe CPU-Auslastung/ });
+    expect(within(recovered).getByText("Behoben")).toBeInTheDocument();
+    expect(recovered).toHaveTextContent("Auslastung wieder im Normalbereich.");
+  });
+
+  it("deduplicates worker outages in the notification center and links to workflows", async () => {
+    window.localStorage.removeItem("lxcup-read-notifications");
+    window.localStorage.removeItem("lxcup-system-alert-history");
+    mocks.workerAvailability.data = { available: false, worker_version: "0.4.0", last_seen_at: "2026-01-01T00:00:00Z", artifact_store_available: false, artifact_store_checked_at: "2026-01-01T00:00:00Z" };
+    renderPage(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Benachrichtigungen" }));
+    expect(await screen.findByText(/Systemwarnungen/)).toHaveTextContent("1 Systemwarnungen");
+    const warning = screen.getByRole("link", { name: /Ansible-Worker nicht verfügbar/ });
+    expect(warning).toHaveAttribute("href", "/workflows");
+    expect(screen.queryByText("Artifact Store nicht verfügbar")).not.toBeInTheDocument();
+  });
+
+  it("notifies admins and users about outdated agents with a resource link and recovery", async () => {
+    mocks.targets.data = [{ ...target, agent_version: "0.3.0", latest_agent_version: "0.4.0" }];
+    renderPage(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Benachrichtigungen" }));
+    const warning = await screen.findByRole("link", { name: /Agent-Version auf test-target veraltet/ });
+    expect(warning).toHaveAttribute("href", "/targets/target-1");
+    expect(warning).toHaveTextContent("Installiert v0.3.0; verfügbar v0.4.0.");
+
+    mocks.targets.data = [{ ...target, agent_version: "0.4.0", latest_agent_version: "0.4.0" }];
+    cleanup();
+    renderPage(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Benachrichtigungen" }));
+    const recovered = await screen.findByRole("link", { name: /Agent-Version auf test-target veraltet/ });
+    expect(within(recovered).getByText("Behoben")).toBeInTheDocument();
   });
 
   it("warns when the worker is online but its artifact store is unavailable", async () => {

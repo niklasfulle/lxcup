@@ -8,6 +8,32 @@ use std::{
     time::Duration,
 };
 
+#[test]
+fn downloaded_agent_binary_must_match_its_manifest_architecture() {
+    let mut amd64 = vec![0; 20];
+    amd64[..4].copy_from_slice(b"\x7fELF");
+    amd64[4] = 2;
+    amd64[5] = 1;
+    amd64[18..20].copy_from_slice(&62_u16.to_le_bytes());
+    assert!(agent_binary_matches_platform(&amd64, "linux-amd64"));
+    assert!(!agent_binary_matches_platform(&amd64, "linux-arm64"));
+
+    amd64[18..20].copy_from_slice(&183_u16.to_le_bytes());
+    assert!(agent_binary_matches_platform(&amd64, "linux-arm64"));
+    amd64[4] = 1;
+    assert!(!agent_binary_matches_platform(&amd64, "linux-arm64"));
+    assert!(!agent_binary_matches_platform(&[], "linux-amd64"));
+}
+
+fn test_linux_agent_binary(machine: u16) -> Vec<u8> {
+    let mut binary = vec![0; 64];
+    binary[..4].copy_from_slice(b"\x7fELF");
+    binary[4] = 2;
+    binary[5] = 1;
+    binary[18..20].copy_from_slice(&machine.to_le_bytes());
+    binary
+}
+
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 #[cfg(windows)]
@@ -115,8 +141,11 @@ async fn artifact_server(
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0_u8; 1024];
             let _ = stream.read(&mut request).await.unwrap();
+            let request_path = String::from_utf8_lossy(&request);
             let body = if index == 0 {
                 serde_json::to_vec(&manifest).unwrap()
+            } else if request_path.contains("agent-arm64") {
+                test_linux_agent_binary(183)
             } else {
                 binary.clone()
             };
@@ -168,6 +197,7 @@ async fn artifact_store_monitor_persists_unavailable_and_recovered_states() {
     let task = tokio::spawn(artifact_store::report_availability(
         repository.clone(),
         "artifact-store-unavailable-test".to_owned(),
+        "0.4.0".to_owned(),
         client.clone(),
         "http://127.0.0.1:1".to_owned(),
     ));
@@ -175,15 +205,20 @@ async fn artifact_store_monitor_persists_unavailable_and_recovered_states() {
     task.abort();
     let _ = task.await;
     assert_eq!(unavailable.artifact_store_available, Some(false));
+    assert_eq!(unavailable.worker_version.as_deref(), Some("0.4.0"));
 
     let manifest = serde_json::json!({
         "version": lxcup_core::VERSION,
-        "artifacts": [{ "platform": "linux-amd64", "file": "agent", "sha256": "digest" }]
+        "artifacts": [
+            { "platform": "linux-amd64", "file": "agent-amd64", "sha256": "digest" },
+            { "platform": "linux-arm64", "file": "agent-arm64", "sha256": "digest" }
+        ]
     });
     let (base_url, server) = artifact_server(manifest, Vec::new(), 1).await;
     let task = tokio::spawn(artifact_store::report_availability(
         repository.clone(),
         "artifact-store-recovered-test".to_owned(),
+        "0.4.0".to_owned(),
         client,
         base_url,
     ));
@@ -559,13 +594,15 @@ fn current_agent_manifest_matches_binary_checksum() {
     )
     .expect("current agent manifest must be valid JSON");
     assert_eq!(manifest.version, version);
-    let artifact = manifest
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.platform == "linux-amd64")
-        .expect("linux artifact must be registered");
-    let digest = Sha256::digest(fs::read(root.join(&artifact.file)).expect("binary exists"));
-    assert_eq!(format!("{digest:x}"), artifact.sha256);
+    for platform in ["linux-amd64", "linux-arm64"] {
+        let artifact = manifest
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.platform == platform)
+            .expect("current Linux architecture must be registered");
+        let digest = Sha256::digest(fs::read(root.join(&artifact.file)).expect("binary exists"));
+        assert_eq!(format!("{digest:x}"), artifact.sha256);
+    }
 }
 
 #[test]
@@ -830,16 +867,16 @@ async fn invocation_builds_apply_and_inventory_vars_with_private_key_credentials
 async fn agent_update_invocation_uses_only_the_verified_artifact_for_its_requested_version() {
     let root = std::env::temp_dir().join(format!("lxcup-worker-agent-update-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
-    let binary = b"agent-update-artifact".to_vec();
+    let amd64_binary = test_linux_agent_binary(62);
+    let arm64_binary = test_linux_agent_binary(183);
     let manifest = serde_json::json!({
         "version": "0.3.1",
-        "artifacts": [{
-            "platform": "linux-amd64",
-            "file": "agent",
-            "sha256": format!("{:x}", Sha256::digest(&binary))
-        }]
+        "artifacts": [
+            {"platform": "linux-amd64", "file": "agent-amd64", "sha256": format!("{:x}", Sha256::digest(&amd64_binary))},
+            {"platform": "linux-arm64", "file": "agent-arm64", "sha256": format!("{:x}", Sha256::digest(&arm64_binary))}
+        ]
     });
-    let (base, artifact_task) = artifact_server(manifest, binary.clone(), 2).await;
+    let (base, artifact_task) = artifact_server(manifest, amd64_binary.clone(), 3).await;
     let (mut runtime, credential_ref, agent_ref, known_hosts_ref) = runtime_with_secrets(&root);
     runtime.artifacts = base;
     let mut target = Target::new(
@@ -872,8 +909,11 @@ async fn agent_update_invocation_uses_only_the_verified_artifact_for_its_request
     let vars: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&context.vars_file).unwrap()).unwrap();
     let artifact_path = vars["lxcup_agent_binary_src"].as_str().unwrap();
+    let arm64_path = vars["lxcup_agent_binary_src_arm64"].as_str().unwrap();
     assert_eq!(vars["lxcup_agent_version"], "0.3.1");
-    assert_eq!(fs::read(artifact_path).unwrap(), binary);
+    assert_eq!(fs::read(artifact_path).unwrap(), amd64_binary);
+    assert_eq!(fs::read(arm64_path).unwrap(), arm64_binary);
+    assert_ne!(artifact_path, arm64_path);
     artifact_task.await.unwrap();
     fs::remove_dir_all(root).unwrap();
 }
@@ -1312,18 +1352,24 @@ async fn execution_support_persists_redacted_logs_summaries_reconciliation_and_i
 async fn artifact_download_checks_version_platform_and_sha256() {
     let root = std::env::temp_dir().join(format!("lxcup-worker-artifact-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
-    let binary = b"verified test agent".to_vec();
-    let digest = format!("{:x}", Sha256::digest(&binary));
+    let amd64_binary = test_linux_agent_binary(62);
+    let arm64_binary = test_linux_agent_binary(183);
+    let amd64_digest = format!("{:x}", Sha256::digest(&amd64_binary));
+    let arm64_digest = format!("{:x}", Sha256::digest(&arm64_binary));
     let base_manifest = serde_json::json!({
         "version": "0.3.1",
-        "artifacts": [{"platform": "linux-amd64", "file": "agent", "sha256": digest}]
+        "artifacts": [
+            {"platform": "linux-amd64", "file": "agent-amd64", "sha256": amd64_digest},
+            {"platform": "linux-arm64", "file": "agent-arm64", "sha256": arm64_digest}
+        ]
     });
 
-    let (base, server) = artifact_server(base_manifest.clone(), binary.clone(), 2).await;
+    let (base, server) = artifact_server(base_manifest.clone(), amd64_binary.clone(), 3).await;
     let mut runtime = runtime_with_secrets(&root).0;
     runtime.artifacts = base;
-    let path = artifact(&runtime, "0.3.1", &root).await.unwrap();
-    assert_eq!(fs::read(path).unwrap(), binary);
+    let paths = artifact(&runtime, "0.3.1", &root).await.unwrap();
+    assert_eq!(fs::read(paths.amd64).unwrap(), amd64_binary);
+    assert_eq!(fs::read(paths.arm64.unwrap()).unwrap(), arm64_binary);
     server.await.unwrap();
 
     let mut wrong_version = base_manifest.clone();
@@ -1338,7 +1384,17 @@ async fn artifact_download_checks_version_platform_and_sha256() {
 
     let mut wrong_hash = base_manifest.clone();
     wrong_hash["artifacts"][0]["sha256"] = serde_json::json!("00");
-    let (base, server) = artifact_server(wrong_hash, binary, 2).await;
+    let (base, server) = artifact_server(wrong_hash, amd64_binary.clone(), 2).await;
+    runtime.artifacts = base;
+    assert_eq!(
+        artifact(&runtime, "0.3.1", &root).await,
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    server.await.unwrap();
+
+    let mut wrong_arm64_hash = base_manifest.clone();
+    wrong_arm64_hash["artifacts"][1]["sha256"] = serde_json::json!("00");
+    let (base, server) = artifact_server(wrong_arm64_hash, amd64_binary, 3).await;
     runtime.artifacts = base;
     assert_eq!(
         artifact(&runtime, "0.3.1", &root).await,

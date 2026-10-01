@@ -17,8 +17,8 @@ use std::{
 use tower::ServiceExt;
 
 #[derive(Default)]
-struct ScriptedDockerRunner {
-    outputs: Mutex<std::collections::VecDeque<crate::docker::DockerCommandOutput>>,
+pub(crate) struct ScriptedDockerRunner {
+    pub(crate) outputs: Mutex<std::collections::VecDeque<crate::docker::DockerCommandOutput>>,
     commands: Mutex<Vec<(Vec<String>, Option<PathBuf>)>>,
 }
 
@@ -43,7 +43,10 @@ impl crate::docker::DockerCommandRunner for ScriptedDockerRunner {
     }
 }
 
-fn docker_result(success: bool, stdout: impl Into<Vec<u8>>) -> crate::docker::DockerCommandOutput {
+pub(crate) fn docker_result(
+    success: bool,
+    stdout: impl Into<Vec<u8>>,
+) -> crate::docker::DockerCommandOutput {
     crate::docker::DockerCommandOutput {
         success,
         stdout: stdout.into(),
@@ -588,14 +591,16 @@ async fn compose_image_update_recreates_only_the_unchanged_service_without_depen
     );
     let runner = Arc::new(ScriptedDockerRunner::default());
     runner.outputs.lock().unwrap().extend([
-        docker_result(true, inspect),
+        docker_result(true, inspect.clone()),
         docker_result(true, "unchanged-hash\n"),
         docker_result(true, "linux/amd64\n"),
-        docker_result(true, manifest),
+        docker_result(true, manifest.clone()),
         docker_result(true, ""),
         docker_result(true, format!("{remote_image_id}\n")),
         docker_result(true, format!("{container_id}\n")),
         docker_result(true, ""),
+        docker_result(true, format!("{container_id}\n")),
+        docker_result(true, "running\thealthy\n"),
     ]);
     let state = LocalAgentState::new(
         AgentInfo {
@@ -608,7 +613,7 @@ async fn compose_image_update_recreates_only_the_unchanged_service_without_depen
         "docker-token",
     )
     .with_docker_command_runner(runner.clone());
-    let response = agent_router(state)
+    let response = agent_router(state.clone())
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -634,33 +639,75 @@ async fn compose_image_update_recreates_only_the_unchanged_service_without_depen
     assert_eq!(applied.compose_project, "shop");
     assert_eq!(applied.compose_service, "web");
     assert_eq!(applied.image_id, remote_image_id);
+    assert_eq!(applied.service_state, "running");
+    assert_eq!(applied.health_status.as_deref(), Some("healthy"));
 
-    let commands = runner.commands.lock().unwrap();
-    assert_eq!(commands.len(), 8);
-    assert!(
-        commands[4]
-            .0
-            .ends_with(&["pull".to_owned(), "web".to_owned()])
-    );
-    assert!(commands[6].0.ends_with(&[
-        "ps".to_owned(),
-        "--all".to_owned(),
-        "--quiet".to_owned(),
-        "web".to_owned()
-    ]));
-    assert!(commands[7].0.ends_with(&[
-        "up".to_owned(),
-        "--detach".to_owned(),
-        "--no-deps".to_owned(),
-        "--force-recreate".to_owned(),
-        "--wait".to_owned(),
-        "--wait-timeout".to_owned(),
-        "120".to_owned(),
-        "web".to_owned()
-    ]));
-    assert_eq!(commands[1].1.as_deref(), Some(project_dir.as_path()));
-    assert_eq!(commands[4].1.as_deref(), Some(project_dir.as_path()));
-    drop(commands);
+    {
+        let commands = runner.commands.lock().unwrap();
+        assert_eq!(commands.len(), 10);
+        assert!(
+            commands[4]
+                .0
+                .ends_with(&["pull".to_owned(), "web".to_owned()])
+        );
+        assert!(commands[6].0.ends_with(&[
+            "ps".to_owned(),
+            "--all".to_owned(),
+            "--quiet".to_owned(),
+            "web".to_owned()
+        ]));
+        assert!(commands[7].0.ends_with(&[
+            "up".to_owned(),
+            "--detach".to_owned(),
+            "--no-deps".to_owned(),
+            "--force-recreate".to_owned(),
+            "--wait".to_owned(),
+            "--wait-timeout".to_owned(),
+            "120".to_owned(),
+            "web".to_owned()
+        ]));
+        assert_eq!(commands[1].1.as_deref(), Some(project_dir.as_path()));
+        assert_eq!(commands[4].1.as_deref(), Some(project_dir.as_path()));
+    }
+
+    runner.outputs.lock().unwrap().extend([
+        docker_result(true, inspect),
+        docker_result(true, "unchanged-hash\n"),
+        docker_result(true, "linux/amd64\n"),
+        docker_result(true, manifest),
+        docker_result(true, ""),
+        docker_result(true, format!("{remote_image_id}\n")),
+        docker_result(true, format!("{container_id}\n")),
+        docker_result(true, ""),
+        docker_result(true, format!("{container_id}\n")),
+        docker_result(true, "running\tunhealthy\n"),
+    ]);
+    let response = agent_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/docker/containers/image-update-apply")
+                .header("authorization", "Bearer docker-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "container_id": container_id,
+                        "expected_remote_image_id": remote_image_id
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+    let failure: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(failure["error"], "updated_service_unhealthy");
     std::fs::remove_dir_all(project_dir).unwrap();
 }
 

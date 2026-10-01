@@ -175,6 +175,8 @@ pub struct DockerImageUpdateApplyResult {
     pub compose_project: String,
     pub compose_service: String,
     pub image_id: String,
+    pub service_state: String,
+    pub health_status: Option<String>,
     pub completed_at: DateTime<Utc>,
 }
 
