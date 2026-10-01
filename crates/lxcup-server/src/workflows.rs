@@ -24,16 +24,14 @@ mod reconciliation;
 
 pub(super) use enrollment::{create_enrollment, get_enrollment};
 pub(super) use jobs::{
-    create_ansible_job, get_ansible_job, get_ansible_job_events, list_ansible_jobs,
-    persist_created_job, reconcile_ansible_job, retry_ansible_job,
+    CreateAnsibleJobRequest, create_ansible_job, get_ansible_job, get_ansible_job_events,
+    list_ansible_jobs, persist_created_job, reconcile_ansible_job, retry_ansible_job,
 };
 pub(super) use reconciliation::{queue_agent_reconfiguration, reconcile_onboarding_jobs};
 
-use jobs::{
-    CreateAnsibleJobRequest, configured_ansible_secret_refs, map_ansible_error,
-    queue_enrollment_job,
-};
+use jobs::{configured_ansible_secret_refs, map_ansible_error, queue_enrollment_job};
 use package_policy::{
-    find_existing_job, resolve_ansible_target, resolve_job_secret_refs, validate_package_update,
+    find_existing_job, find_idempotent_job, resolve_ansible_target, resolve_job_secret_refs,
+    validate_package_update,
 };
 use reconciliation::ensure_deployment_followups;

@@ -4,8 +4,8 @@ use super::{
     EnrollmentDto, EnrollmentState, ExecutionMode, Extension, JobEventKind, JobFailureCode,
     JobSubmission, Json, JsonBody, Path, PlaybookRegistry, ResourceLifecycle, ResourceTarget,
     SecretId, State, StatusCode, TargetId, TargetState, Uuid, envelope, find_existing_job,
-    parse_uuid, require_permission, resolve_ansible_target, resolve_job_secret_refs,
-    validate_package_update,
+    find_idempotent_job, parse_uuid, require_permission, resolve_ansible_target,
+    resolve_job_secret_refs, validate_package_update,
 };
 use lxcup_ansible::JobEvent;
 use serde::{Deserialize, Serialize};
@@ -206,6 +206,36 @@ pub(crate) async fn create_ansible_job(
             Json(envelope(AnsibleJobDto::from(&existing))),
         ));
     }
+    if let Some(repositories) = state.repositories.clone() {
+        if repositories
+            .ansible_jobs
+            .has_reconciliation_required_target(target)
+            .await
+            .map_err(|_| ApiError::storage())?
+        {
+            let blocking = find_active_target_job(&state, target, None).await?;
+            if let Some(blocking) = blocking {
+                return Err(ApiError::conflict_with_blocking_job(
+                    "ansible_target_busy",
+                    "target requires reconciliation before another workflow can start",
+                    blocking.id.as_uuid(),
+                    job_status_name(blocking.status),
+                ));
+            }
+            return Err(ApiError::conflict(
+                "ansible_target_busy",
+                "target requires reconciliation before another workflow can start",
+            ));
+        }
+    }
+    if let Some(blocking) = find_active_target_job(&state, target, None).await? {
+        return Err(ApiError::conflict_with_blocking_job(
+            "ansible_target_busy",
+            "another job is active for this target",
+            blocking.id.as_uuid(),
+            job_status_name(blocking.status),
+        ));
+    }
     let submission = state
         .ansible
         .write()
@@ -391,20 +421,34 @@ pub(crate) async fn reconcile_ansible_job(
         ));
     }
     let idempotency_key = lxcup_ansible::reconcile_idempotency_key(source_id);
-    if let Some(existing) = find_existing_job(&state, source.target, &idempotency_key).await? {
+    if let Some(existing) = find_idempotent_job(&state, source.target, &idempotency_key).await? {
         return Ok((
             StatusCode::OK,
             Json(envelope(AnsibleJobDto::from(&existing))),
         ));
     }
-    let submission = state
-        .ansible
-        .write()
-        .await
-        .submit_reconciliation(&source)
-        .map_err(map_ansible_error)?;
+    let persistent = state.repositories.clone();
+    if let Some(blocking) = find_active_target_job(&state, source.target, Some(source.id)).await? {
+        return Err(ApiError::conflict_with_blocking_job(
+            "ansible_target_busy",
+            "another job is executing for this target",
+            blocking.id.as_uuid(),
+            job_status_name(blocking.status),
+        ));
+    }
+    let submission = if persistent.is_some() {
+        state
+            .ansible
+            .write()
+            .await
+            .submit_persisted_reconciliation(&source)
+    } else {
+        state.ansible.write().await.submit_reconciliation(&source)
+    }
+    .map_err(map_ansible_error)?;
     let (status, job, created) = match submission {
         JobSubmission::Created(job) => (StatusCode::ACCEPTED, job, true),
+        JobSubmission::Duplicate(job) if persistent.is_some() => (StatusCode::ACCEPTED, job, true),
         JobSubmission::Duplicate(job) => (StatusCode::OK, job, false),
     };
     if created {
@@ -416,6 +460,53 @@ pub(crate) async fn reconcile_ansible_job(
         "queued",
     ));
     Ok((status, Json(envelope(AnsibleJobDto::from(&job)))))
+}
+
+async fn find_active_target_job(
+    state: &ApiState,
+    target: ResourceTarget,
+    excluded_job_id: Option<lxcup_core::AnsibleJobId>,
+) -> Result<Option<AnsibleJob>, ApiError> {
+    let jobs = if let Some(repositories) = state.repositories.as_ref() {
+        repositories
+            .ansible_jobs
+            .list()
+            .await
+            .map_err(|_| ApiError::storage())?
+    } else {
+        state.ansible.read().await.jobs()
+    };
+    Ok(jobs
+        .into_iter()
+        .filter(|job| {
+            job.target == target
+                && Some(job.id) != excluded_job_id
+                && is_active_job_status(job.status)
+        })
+        .max_by_key(|job| job.updated_at))
+}
+
+fn is_active_job_status(status: AnsibleJobStatus) -> bool {
+    matches!(
+        status,
+        AnsibleJobStatus::Checking
+            | AnsibleJobStatus::Planned
+            | AnsibleJobStatus::Applying
+            | AnsibleJobStatus::ReconcileRequired
+    )
+}
+
+const fn job_status_name(status: AnsibleJobStatus) -> &'static str {
+    match status {
+        AnsibleJobStatus::Queued => "queued",
+        AnsibleJobStatus::Checking => "checking",
+        AnsibleJobStatus::Planned => "planned",
+        AnsibleJobStatus::Applying => "applying",
+        AnsibleJobStatus::ReconcileRequired => "reconcile_required",
+        AnsibleJobStatus::Succeeded => "succeeded",
+        AnsibleJobStatus::Failed => "failed",
+        AnsibleJobStatus::Aborted => "aborted",
+    }
 }
 
 pub(crate) async fn get_ansible_job_events(
@@ -541,238 +632,5 @@ pub(super) fn map_ansible_error(error: lxcup_ansible::CoordinatorError) -> ApiEr
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{ContainerId, Enrollment};
-    use lxcup_ansible::{AnsibleContractError, CoordinatorError};
-    use std::sync::{Mutex, OnceLock};
-
-    fn test_request(key: &str) -> AnsibleJobRequest {
-        AnsibleJobRequest {
-            operation: AnsibleOperation::HealthCheck,
-            target: ResourceTarget::Target(TargetId::new()),
-            lifecycle: ResourceLifecycle::Managed,
-            mode: ExecutionMode::Check,
-            parameters: AnsibleParameters::HealthCheck,
-            secret_refs: Vec::new(),
-            idempotency_key: key.to_owned(),
-            confirmed: true,
-            actor_role: ActorRole::Operator,
-        }
-    }
-
-    #[tokio::test]
-    async fn job_dto_exposes_package_scope_and_only_valid_plan_references() {
-        let state = ApiState::new();
-        let mut request = test_request("package-plan:safe-policy:target");
-        request.operation = AnsibleOperation::UpdatePackages;
-        request.mode = ExecutionMode::Plan;
-        request.parameters = AnsibleParameters::UpdatePackages {
-            packages: vec!["curl".to_owned()],
-        };
-        request.secret_refs = vec![SecretId::new()];
-        let JobSubmission::Created(mut job) = state.ansible.write().await.submit(request).unwrap()
-        else {
-            panic!("the package plan should be newly queued")
-        };
-        let dto = AnsibleJobDto::from(&job);
-        assert_eq!(
-            dto.package_names.as_deref(),
-            Some(["curl".to_owned()].as_slice())
-        );
-        assert_eq!(dto.update_policy_id.as_deref(), Some("safe-policy"));
-        assert!(dto.approved_plan_job_id.is_none());
-
-        job.idempotency_key = "package-apply:not-a-uuid:safe-policy".to_owned();
-        assert!(AnsibleJobDto::from(&job).approved_plan_job_id.is_none());
-        job.idempotency_key = format!("package-apply:{}:safe-policy", Uuid::new_v4());
-        assert!(AnsibleJobDto::from(&job).approved_plan_job_id.is_some());
-    }
-
-    #[test]
-    fn coordinator_errors_keep_stable_api_codes() {
-        let cases = [
-            (CoordinatorError::TargetBusy, "ansible_target_busy"),
-            (CoordinatorError::NotFound, "not_found"),
-            (CoordinatorError::RetryNotAllowed, "ansible_job_invalid"),
-            (CoordinatorError::InvalidTransition, "ansible_job_invalid"),
-            (CoordinatorError::Terminal, "ansible_job_invalid"),
-            (
-                CoordinatorError::Contract(AnsibleContractError::PermissionDenied),
-                "ansible_permission_denied",
-            ),
-            (
-                CoordinatorError::Contract(AnsibleContractError::ConfirmationRequired),
-                "ansible_confirmation_required",
-            ),
-            (
-                CoordinatorError::Contract(AnsibleContractError::MissingSecretReference),
-                "secret_reference_missing",
-            ),
-            (
-                CoordinatorError::Contract(AnsibleContractError::UnsupportedTarget),
-                "ansible_target_invalid",
-            ),
-            (
-                CoordinatorError::Contract(AnsibleContractError::UnsupportedMode),
-                "ansible_mode_invalid",
-            ),
-            (
-                CoordinatorError::Contract(AnsibleContractError::Invalid),
-                "ansible_request_invalid",
-            ),
-            (
-                CoordinatorError::Contract(AnsibleContractError::InvalidTransition),
-                "ansible_request_invalid",
-            ),
-        ];
-
-        for (error, expected_code) in cases {
-            assert_eq!(map_ansible_error(error).code, expected_code);
-        }
-    }
-
-    #[tokio::test]
-    async fn job_queries_and_retry_cover_in_memory_lifecycle() {
-        let state = ApiState::new();
-        let submission = state
-            .ansible
-            .write()
-            .await
-            .submit(test_request("jobs-handler-test"))
-            .unwrap();
-        let JobSubmission::Created(job) = submission else {
-            panic!("first request should create a job")
-        };
-
-        let listed = list_ansible_jobs(State(state.clone())).await.unwrap();
-        assert_eq!(listed.0.data.len(), 1);
-        let queried = get_ansible_job(State(state.clone()), Path(job.id.as_uuid().to_string()))
-            .await
-            .unwrap();
-        assert_eq!(queried.0.data.id, job.id);
-        let events =
-            get_ansible_job_events(State(state.clone()), Path(job.id.as_uuid().to_string()))
-                .await
-                .unwrap();
-        assert!(!events.0.data.is_empty());
-
-        state
-            .ansible
-            .write()
-            .await
-            .transition(job.id, AnsibleJobStatus::Checking)
-            .unwrap();
-        state
-            .ansible
-            .write()
-            .await
-            .transition(job.id, AnsibleJobStatus::Failed)
-            .unwrap();
-        let retried = retry_ansible_job(
-            State(state.clone()),
-            Extension(ActorRole::Viewer),
-            Path(job.id.as_uuid().to_string()),
-            JsonBody(RetryAnsibleJobRequest { confirmed: false }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(retried.0.data.status, AnsibleJobStatus::Queued);
-        assert!(
-            get_ansible_job(State(state), Path("not-a-uuid".to_owned()),)
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_target_and_unconfigured_secret_are_reported_without_mutation() {
-        let state = ApiState::new();
-        let request = CreateAnsibleJobRequest {
-            operation: AnsibleOperation::HealthCheck,
-            target_id: Some(TargetId::new()),
-            container_id: 0,
-            mode: ExecutionMode::Check,
-            parameters: AnsibleParameters::HealthCheck,
-            idempotency_key: "missing-target".to_owned(),
-            confirmed: true,
-            policy_id: None,
-            approved_plan_job_id: None,
-        };
-        let error = create_ansible_job(
-            State(state.clone()),
-            Extension(ActorRole::Operator),
-            JsonBody(request),
-        )
-        .await
-        .err()
-        .unwrap();
-        assert_eq!(error.status, StatusCode::NOT_FOUND);
-        assert!(state.ansible.read().await.jobs().is_empty());
-
-        let _lock = env_lock().lock().unwrap();
-        let old_value = std::env::var("LXCUP_ANSIBLE_SECRET_IDS").ok();
-        unsafe_env_remove();
-        assert_eq!(
-            configured_ansible_secret_refs().unwrap_err().code,
-            "secret_reference_missing"
-        );
-        unsafe { std::env::set_var("LXCUP_ANSIBLE_SECRET_IDS", "not-a-uuid") };
-        assert_eq!(
-            configured_ansible_secret_refs().unwrap_err().code,
-            "invalid_secret_reference"
-        );
-        let first = SecretId::new();
-        let second = SecretId::new();
-        unsafe {
-            std::env::set_var(
-                "LXCUP_ANSIBLE_SECRET_IDS",
-                format!(" {},, {} ", first.as_uuid(), second.as_uuid()),
-            );
-        }
-        assert_eq!(
-            configured_ansible_secret_refs().unwrap(),
-            vec![first, second]
-        );
-        match old_value {
-            Some(value) => unsafe { std::env::set_var("LXCUP_ANSIBLE_SECRET_IDS", value) },
-            None => unsafe_env_remove(),
-        }
-    }
-
-    #[tokio::test]
-    async fn no_repository_persistence_and_optional_enrollment_target_are_noops() {
-        let state = ApiState::new();
-        let job = state
-            .ansible
-            .write()
-            .await
-            .submit(test_request("no-repository-persist"))
-            .unwrap();
-        let JobSubmission::Created(job) = job else {
-            panic!("request should create a job")
-        };
-        persist_created_job(&state, &job).await.unwrap();
-        let enrollment_request = CreateEnrollmentRequest {
-            container_id: 1,
-            target_id: None,
-            idempotency_key: "without-target".to_owned(),
-            start_onboarding: true,
-        };
-        let enrollment = Enrollment::new(ContainerId::new(1), "without-target".to_owned()).unwrap();
-        let dto = EnrollmentDto::from(&enrollment);
-        queue_enrollment_job(&state, &enrollment_request, &dto)
-            .await
-            .unwrap();
-        assert_eq!(state.ansible.read().await.jobs().len(), 1);
-    }
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn unsafe_env_remove() {
-        unsafe { std::env::remove_var("LXCUP_ANSIBLE_SECRET_IDS") };
-    }
-}
+#[path = "jobs_tests.rs"]
+mod tests;

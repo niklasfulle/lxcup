@@ -37,7 +37,7 @@ async fn postgres_ansible_job_repository_claims_jobs_and_persists_events() {
     assert!(queue_metrics.oldest_queued_at.is_some());
     repositories
         .worker_heartbeats
-        .record("integration-worker", false, chrono::Utc::now())
+        .record("integration-worker", "0.4.0", false, chrono::Utc::now())
         .await
         .unwrap();
     let heartbeat_status = repositories
@@ -206,5 +206,116 @@ async fn postgres_ansible_job_repository_claims_jobs_and_persists_events() {
         .execute(pool)
         .await
         .unwrap();
+    test_database.finish().await;
+}
+
+#[tokio::test]
+async fn postgres_worker_claims_reconciliation_while_unresolved_apply_locks_target() {
+    let Some(test_database) = scoped_test_database("ansible_reconciliation").await else {
+        return;
+    };
+    let database = test_database.database();
+    let repositories = Repositories::new(database);
+    let target = Target::new(
+        "ansible-reconcile-repository-target",
+        TargetKind::LinuxServer,
+        "192.0.2.56",
+        TargetTransport::Ssh,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    repositories.targets.save(&target).await.unwrap();
+    let target_ref = ResourceTarget::Target(target.id);
+    let mut source = AnsibleJob::from_request(AnsibleJobRequest {
+        operation: AnsibleOperation::RepairAgent,
+        target: target_ref,
+        lifecycle: ResourceLifecycle::Managed,
+        mode: ExecutionMode::Apply,
+        parameters: AnsibleParameters::RepairAgent,
+        secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
+        idempotency_key: "reconcile-source-job".to_owned(),
+        confirmed: true,
+        actor_role: ActorRole::Admin,
+    })
+    .unwrap();
+    for status in [
+        AnsibleJobStatus::Checking,
+        AnsibleJobStatus::Planned,
+        AnsibleJobStatus::Applying,
+        AnsibleJobStatus::ReconcileRequired,
+    ] {
+        source.transition_to(status).unwrap();
+    }
+    repositories.ansible_jobs.save(&source).await.unwrap();
+    assert!(
+        repositories
+            .ansible_jobs
+            .has_reconciliation_required_target(target_ref)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repositories
+            .ansible_jobs
+            .has_other_active_target_job(target_ref, source.id)
+            .await
+            .unwrap()
+    );
+
+    let queued_healthcheck = AnsibleJob::from_request(AnsibleJobRequest {
+        operation: AnsibleOperation::HealthCheck,
+        target: target_ref,
+        lifecycle: ResourceLifecycle::Managed,
+        mode: ExecutionMode::Check,
+        parameters: AnsibleParameters::HealthCheck,
+        secret_refs: Vec::new(),
+        idempotency_key: "queued-healthcheck-before-reconcile".to_owned(),
+        confirmed: true,
+        actor_role: ActorRole::Admin,
+    })
+    .unwrap();
+    repositories
+        .ansible_jobs
+        .save(&queued_healthcheck)
+        .await
+        .unwrap();
+
+    let mut coordinator = lxcup_ansible::AnsibleJobCoordinator::default();
+    let lxcup_ansible::JobSubmission::Created(reconciliation) =
+        coordinator.submit_reconciliation(&source).unwrap()
+    else {
+        panic!("reconciliation should be newly queued")
+    };
+    repositories
+        .ansible_jobs
+        .save(&reconciliation)
+        .await
+        .unwrap();
+    assert!(
+        repositories
+            .ansible_jobs
+            .has_other_active_target_job(target_ref, reconciliation.id)
+            .await
+            .unwrap()
+    );
+
+    assert!(
+        repositories
+            .ansible_jobs
+            .has_active_target(target_ref)
+            .await
+            .unwrap()
+    );
+    let claimed = repositories
+        .ansible_jobs
+        .claim_next_queued()
+        .await
+        .unwrap()
+        .expect("the linked reconciliation must bypass its source lock");
+    assert_eq!(claimed.id, reconciliation.id);
+    assert_eq!(claimed.mode, ExecutionMode::Reconcile);
+    assert_eq!(claimed.status, AnsibleJobStatus::Checking);
+
     test_database.finish().await;
 }

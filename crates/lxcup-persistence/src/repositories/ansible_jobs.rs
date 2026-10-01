@@ -166,7 +166,24 @@ impl AnsibleJobRepository {
     pub async fn claim_next_queued(&self) -> Result<Option<AnsibleJob>, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
-            "SELECT payload FROM ansible_jobs WHERE status = 'queued' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1",
+            "SELECT candidate.payload FROM ansible_jobs AS candidate \
+             WHERE candidate.status = 'queued' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM ansible_jobs AS active \
+                   WHERE active.target = candidate.target \
+                     AND active.status IN ('checking', 'planned', 'applying') \
+               ) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM ansible_jobs AS unresolved \
+                   WHERE unresolved.target = candidate.target \
+                     AND unresolved.status = 'reconcile_required' \
+                     AND NOT ( \
+                         candidate.payload->>'mode' = 'reconcile' \
+                         AND candidate.idempotency_key = 'reconcile-job:' || unresolved.id::text \
+                     ) \
+               ) \
+             ORDER BY candidate.created_at \
+             FOR UPDATE OF candidate SKIP LOCKED LIMIT 1",
         )
         .fetch_optional(&mut *transaction)
         .await?;
@@ -280,6 +297,43 @@ impl AnsibleJobRepository {
             row.try_get::<String, _>("status")
                 .is_ok_and(|status| is_active_ansible_job_status(&status))
         }))
+    }
+
+    pub async fn has_other_active_target_job(
+        &self,
+        target: lxcup_core::ResourceTarget,
+        excluded_job_id: lxcup_core::AnsibleJobId,
+    ) -> Result<bool, RepositoryError> {
+        let target = serde_json::to_value(target).map_err(RepositoryError::Serialization)?;
+        sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                SELECT 1 FROM ansible_jobs \
+                WHERE target = $1 AND id <> $2 \
+                  AND status IN ('checking', 'planned', 'applying', 'reconcile_required') \
+            )",
+        )
+        .bind(target)
+        .bind(excluded_job_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn has_reconciliation_required_target(
+        &self,
+        target: lxcup_core::ResourceTarget,
+    ) -> Result<bool, RepositoryError> {
+        let target = serde_json::to_value(target).map_err(RepositoryError::Serialization)?;
+        sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                SELECT 1 FROM ansible_jobs \
+                WHERE target = $1 AND status = 'reconcile_required' \
+            )",
+        )
+        .bind(target)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn append_event(&self, event: &JobEvent) -> Result<(), RepositoryError> {

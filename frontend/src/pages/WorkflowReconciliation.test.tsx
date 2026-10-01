@@ -26,6 +26,7 @@ vi.mock("../queries", () => ({
 }));
 
 import { WorkflowDetailPage } from "./WorkflowDetailPage";
+import { ApiError } from "../api";
 
 function renderWorkflow() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -67,5 +68,21 @@ describe("Workflow reconciliation actions", () => {
     renderWorkflow();
     expect(screen.getByRole("link", { name: "source-job" })).toHaveAttribute("href", "/workflows/source-job");
     expect(screen.queryByRole("button", { name: "Ist-Zustand abgleichen" })).not.toBeInTheDocument();
+  });
+
+  it("links the blocking active job and its status when reconciliation is rejected", async () => {
+    mocks.reconcile.mockRejectedValueOnce(new ApiError(
+      "another job is executing for this target",
+      409,
+      "ansible_target_busy",
+      undefined,
+      false,
+      { id: "blocking-job", status: "applying" },
+    ));
+    renderWorkflow();
+    fireEvent.click(screen.getByRole("button", { name: "Ist-Zustand abgleichen" }));
+    const blocker = await screen.findByRole("link", { name: "blocking-job" });
+    expect(blocker).toHaveAttribute("href", "/workflows/blocking-job");
+    expect(screen.getByText(/Blockierender Workflow \(Läuft\)/)).toBeInTheDocument();
   });
 });
