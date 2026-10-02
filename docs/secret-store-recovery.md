@@ -38,13 +38,42 @@ Die Tests verwenden ausschließlich synthetische Werte.
 
 ## Gemeinsamer Backup- und Restore-Test
 
-Ein verschlüsseltes Stack-Backup enthält den PostgreSQL-Custom-Dump und den
-bereits verschlüsselten Secret-Store. Der Age-Empfänger wird nur als
-Kommandozeilenargument verwendet; der private Schlüssel wird nie ausgegeben
-oder im Repository gespeichert:
+Admins können ein verschlüsseltes Datenbank- und Secret-Store-Backup unter
+**System → Backups** erstellen und herunterladen. Jedes Backup verwendet das
+im Erstellungsdialog angegebene Passwort und standardmäßige age-Passphrase-
+Verschlüsselung; lxcup speichert das Passwort nicht. Die App behält
+verschlüsselte Archive im separaten persistenten Backup-Volume gemäß
+`LXCUP_BACKUP_RETENTION_DAYS` (Standard: 30 Tage). Kopiere Downloads zusätzlich
+auf ein Offsite-Ziel. Das Archiv enthält keine Live-`.env`-Datei oder Schlüssel;
+Compose-Dateien und `.env.example` liegen ausschließlich als versionierte
+Vorlage bei. Ohne das Backup-Passwort ist das Archiv nicht wiederherstellbar.
+
+Entschlüssele ein heruntergeladenes App-Backup lokal mit age:
 
 ```powershell
-.\scripts\backup-stack.ps1 -AgeRecipient $env:LXCUP_BACKUP_AGE_RECIPIENT
+age --decrypt --output .\backup.tar .\lxcup-backup-<id>.tar.age
+```
+
+age fragt nach dem Backup-Passwort. Entpacke das entschlüsselte TAR-Archiv in
+einem zugriffsbeschränkten lokalen Verzeichnis. Der separate
+`LXCUP_SECRET_MASTER_KEY` muss ebenfalls extern gesichert sein, um den
+Secret-Store nach einer Wiederherstellung lesen zu können.
+
+Für reproduzierbare Stack-Backups und Restore-Tests außerhalb der Anwendung
+bleibt das folgende Runbookskript verfügbar:
+
+Ein verschlüsseltes Stack-Backup enthält den PostgreSQL-Custom-Dump, den
+bereits verschlüsselten Secret-Store sowie Compose-Datei und `.env.example` als
+Konfigurationsvorlage. Während der Erfassung wird der Controller kurz angehalten,
+damit Secret-Metadaten und Secret-Dateien konsistent bleiben. Die standortspezifische
+`.env`-Datei und Schlüssel bleiben außerhalb des Archivs und müssen aus dem
+externen Konfigurations-/Secret-Manager wiederhergestellt werden. Dieses
+separate Runbookskript verwendet weiterhin einen öffentlichen Age-Empfänger
+und ist unabhängig von der Passphrase-Verschlüsselung der App:
+
+```powershell
+$recipient = Read-Host "Öffentlicher age-Empfänger für das separate Stack-Backup"
+.\scripts\backup-stack.ps1 -AgeRecipient $recipient
 ```
 
 Die Aufbewahrung beträgt standardmäßig 30 Tage und kann mit
@@ -54,13 +83,16 @@ Hosts. Der Age-Private-Key und `LXCUP_SECRET_MASTER_KEY` müssen getrennt vom
 Archiv in einem Passwortmanager, Secret Manager oder KMS liegen. Das lokale
 Verzeichnis `backups` ist kein Ersatz für ein externes/offsite Backup.
 
-Für einen regelmäßigen isolierten Restore-Test muss `DATABASE_TEST_URL` auf
-eine dedizierte, entbehrliche Testdatenbank zeigen. Das Skript verlangt eine
-explizite Bestätigung und akzeptiert nur Datenbanknamen mit `test` oder
-`restore`, da `pg_restore --clean` vorhandene Testdaten ersetzt:
+Für einen isolierten Restore-Test muss `DATABASE_TEST_URL` auf eine dedizierte,
+entbehrliche Testdatenbank zeigen. Das Skript akzeptiert optional
+`-AgeIdentity` für Empfänger-verschlüsselte Archive. Bei einem passwort-
+verschlüsselten App-Backup wird der Parameter weggelassen und age fragt nach
+dem Passwort. Das Skript verlangt weiterhin eine ausdrückliche Bestätigung und
+akzeptiert nur Datenbanknamen mit `test` oder `restore`, da `pg_restore --clean`
+vorhandene Testdaten ersetzt:
 
 ```powershell
-.\scripts\restore-backup-test.ps1 -BackupFile .\backups\lxcup-<timestamp>.tar.age -AgeIdentity $env:LXCUP_BACKUP_AGE_IDENTITY -ConfirmIsolatedDatabase
+.\scripts\restore-backup-test.ps1 -BackupFile .\backups\lxcup-<id>.tar.age -ConfirmIsolatedDatabase
 ```
 
 Wenn `age` lokal verfügbar ist, aber `pg_restore` und `psql` nicht installiert
@@ -68,7 +100,7 @@ sind, können die PostgreSQL-Werkzeuge aus dem bereits laufenden Compose-
 PostgreSQL-Container verwendet werden:
 
 ```powershell
-.\scripts\restore-backup-test.ps1 -BackupFile .\backups\lxcup-<timestamp>.tar.age -AgeIdentity $env:LXCUP_BACKUP_AGE_IDENTITY -ConfirmIsolatedDatabase -PostgresToolsContainer lxcup-postgres-test-1
+.\scripts\restore-backup-test.ps1 -BackupFile .\backups\lxcup-<id>.tar.age -ConfirmIsolatedDatabase -PostgresToolsContainer lxcup-postgres-test-1
 ```
 
 `PostgresToolsContainer` muss auf den Container zeigen, der die in

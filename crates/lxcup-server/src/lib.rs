@@ -49,6 +49,10 @@ pub(crate) use workflows::{
 };
 mod worker;
 pub(crate) use worker::get_worker_availability;
+mod support_diagnostics;
+pub(crate) use support_diagnostics::get_support_diagnostics;
+mod backups;
+pub(crate) use backups::{create_backup, create_scheduled_backup, download_backup, list_backups};
 mod package_inventory;
 pub(crate) use package_inventory::get_package_inventory;
 mod telemetry;
@@ -122,6 +126,7 @@ pub struct ApiState {
     secrets: Arc<dyn SecretStore>,
     scheduler_lock: Arc<Mutex<()>>,
     docker_discovery_lock: Arc<Mutex<()>>,
+    backup_gate: Arc<RwLock<()>>,
 }
 
 impl ApiState {
@@ -142,6 +147,7 @@ impl ApiState {
             secrets: Arc::new(InMemorySecretStore::default()),
             scheduler_lock: Arc::new(Mutex::new(())),
             docker_discovery_lock: Arc::new(Mutex::new(())),
+            backup_gate: Arc::new(RwLock::new(())),
         }
     }
 
@@ -331,35 +337,85 @@ impl ApiState {
             .collect::<Vec<_>>();
         let mut dispatched = 0;
         for schedule in due {
-            if schedule.operation != "docker_discovery" && !self.scheduled_worker_available().await
-            {
+            if self.schedule_waits_for_worker(&schedule).await {
                 continue;
             }
-            let mut failure = None;
-            for target_id in &schedule.target_ids {
-                match dispatch_scheduled_target(self, &schedule, *target_id, now).await {
-                    Ok(true) => dispatched += 1,
-                    Ok(false) => {}
-                    Err(error) => failure = Some(error),
+            let (completed, failure) = self.execute_due_schedule(&schedule, now).await;
+            dispatched += completed;
+            if let Some(updated) = self
+                .advance_schedule_after_run(&schedule, now, failure)
+                .await
+            {
+                if let Some(repositories) = self.repositories.clone() {
+                    let _ = repositories.schedules.update(&updated).await;
                 }
-            }
-            let updated = {
-                let mut store = self.store.write().await;
-                let Some(current) = store
-                    .schedules
-                    .iter_mut()
-                    .find(|item| item.id == schedule.id)
-                else {
-                    continue;
-                };
-                current.advance_after_run(now, failure);
-                current.clone()
-            };
-            if let Some(repositories) = self.repositories.clone() {
-                let _ = repositories.schedules.update(&updated).await;
             }
         }
         dispatched
+    }
+
+    async fn schedule_waits_for_worker(&self, schedule: &lxcup_core::JobSchedule) -> bool {
+        !matches!(
+            schedule.operation.as_str(),
+            "docker_discovery" | "create_backup"
+        ) && !self.scheduled_worker_available().await
+    }
+
+    async fn execute_due_schedule(
+        &self,
+        schedule: &lxcup_core::JobSchedule,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> (usize, Option<String>) {
+        if schedule.operation == "create_backup" {
+            return self.execute_scheduled_backup(schedule).await;
+        }
+        let mut dispatched = 0;
+        let mut failure = None;
+        for target_id in &schedule.target_ids {
+            match dispatch_scheduled_target(self, schedule, *target_id, now).await {
+                Ok(true) => dispatched += 1,
+                Ok(false) => {}
+                Err(error) => failure = Some(error),
+            }
+        }
+        (dispatched, failure)
+    }
+
+    async fn execute_scheduled_backup(
+        &self,
+        schedule: &lxcup_core::JobSchedule,
+    ) -> (usize, Option<String>) {
+        let result = match schedule.backup_secret_ref {
+            Some(secret_ref) => create_scheduled_backup(self, secret_ref).await,
+            None => Err(ApiError::bad_request(
+                "backup_secret_required",
+                "scheduled backup has no passphrase secret configured",
+            )),
+        };
+        match result {
+            Ok(_) => (1, None),
+            Err(error) => {
+                if schedule.last_error.as_deref() != Some(error.message) {
+                    self.publish(ApiEvent::status("backup", schedule.id.clone(), "failed"));
+                }
+                (0, Some(error.message.to_owned()))
+            }
+        }
+    }
+
+    async fn advance_schedule_after_run(
+        &self,
+        schedule: &lxcup_core::JobSchedule,
+        now: chrono::DateTime<chrono::Utc>,
+        failure: Option<String>,
+    ) -> Option<lxcup_core::JobSchedule> {
+        let mut store = self.store.write().await;
+        let current = store
+            .schedules
+            .iter_mut()
+            .find(|item| item.id == schedule.id)?;
+        current.advance_after_run(now, failure);
+        Some(current.clone())
     }
 
     /// Applies configured history retention independently of request traffic.
@@ -661,7 +717,7 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/api/v1/enrollments": {"post": {"responses": {"202": {"description": "Enrollment accepted"}}}},
     "/api/v1/telemetry-alerts": {"get": {"responses": {"200": {"description": "Active telemetry threshold and freshness alerts"}}}},
     "/api/v1/targets/{target_id}/docker/telemetry": {"get": {"responses": {"200": {"description": "Recent per-container Docker CPU and memory telemetry"}}}},
-    "/api/v1/targets/{target_id}": {"get": {"responses": {"200": {"description": "Registered target"}}}, "delete": {"description": "Admin-only confirmed removal of a target and its target-scoped operational data; does not uninstall the host agent or delete shared secrets", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["confirmed"], "properties": {"confirmed": {"type": "boolean"}}}}}}, "responses": {"204": {"description": "Target removed"}, "409": {"description": "Target has active workflows"}}}},
+    "/api/v1/targets/{target_id}": {"get": {"responses": {"200": {"description": "Registered target including the most recent authenticated agent heartbeat timestamp"}}}, "delete": {"description": "Admin-only confirmed removal of a target and its target-scoped operational data; does not uninstall the host agent or delete shared secrets", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["confirmed"], "properties": {"confirmed": {"type": "boolean"}}}}}}, "responses": {"204": {"description": "Target removed"}, "409": {"description": "Target has active workflows"}}}},
     "/api/v1/targets/{target_id}/docker/containers/{container_id}/action": {"post": {"responses": {"200": {"description": "Confirmed allow-listed Docker lifecycle action"}}}},
     "/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-check": {"post": {"responses": {"200": {"description": "Read-only registry digest comparison for a Docker image"}}}},
     "/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-apply": {"post": {"responses": {"200": {"description": "Explicitly confirmed Compose image update for one Linux service"}}}},
@@ -669,6 +725,9 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/api/v1/ansible/jobs": {"post": {"responses": {"202": {"description": "Ansible job accepted"}}}},
     "/api/v1/ansible/jobs/{job_id}": {"get": {"responses": {"200": {"description": "Ansible job status"}}}},
     "/api/v1/ansible/jobs/{job_id}/events": {"get": {"responses": {"200": {"description": "Audit-safe Ansible job events"}}}},
+    "/api/v1/admin/support-diagnostics": {"get": {"description": "Admin-only, bounded local support diagnostics; excludes secrets and raw worker output", "parameters": [{"name": "days", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7}}], "responses": {"200": {"description": "Locally downloadable support diagnostics"}, "403": {"description": "Admin role required"}}}},
+    "/api/v1/admin/backups": {"get": {"description": "Admin-only list of retained encrypted database and secret-store backups"}, "post": {"description": "Create an explicitly confirmed age passphrase-encrypted backup, retain it in the configured backup volume, and return its metadata", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["confirmed", "passphrase"], "properties": {"confirmed": {"type": "boolean"}, "passphrase": {"type": "string", "minLength": 12, "maxLength": 1024, "description": "Human-selected age encryption passphrase; never stored"}}}}}}, "responses": {"200": {"description": "Encrypted backup created"}, "400": {"description": "Confirmation or passphrase is invalid"}, "403": {"description": "Admin role required"}, "502": {"description": "Backup tools or configuration unavailable"}}}},
+    "/api/v1/admin/backups/{backup_id}": {"get": {"description": "Admin-only streaming download of a retained encrypted backup"}},
     "/api/v1/secrets": {"get": {}, "post": {"description": "Create or list secret metadata; values are never returned"}},
     "/api/v1/secrets/{secret_id}": {"get": {}, "delete": {}},
     "/api/v1/secrets/{secret_id}/rotate": {"post": {}},
@@ -692,7 +751,7 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/api/v1/containers/{container_id}/docker/discovery": {"get": {"responses": {"200": {"description": "Latest Docker discovery workflow"}}}},
     "/api/v1/containers/{container_id}/docker/discover": {"post": {"responses": {"200": {"description": "Discover Docker workloads"}}}},
     "/api/v1/targets/{target_id}/docker/discovery": {"get": {"responses": {"200": {"description": "Latest successful Docker inventory for target"}}}, "post": {"responses": {"200": {"description": "Discover and persist Docker workloads"}}}},
-    "/api/v1/schedules": {"get": {}, "post": {}},
+    "/api/v1/schedules": {"get": {"description": "List configured recurring schedules; secret values and secret references are omitted"}, "post": {"description": "Create a recurring registered operation. Admin-only create_backup schedules require an active global backup-passphrase Secret reference, run hourly to weekly in UTC, and emit status-only activity events", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["id", "operation", "timezone", "target_ids", "every_minutes"], "properties": {"id": {"type": "string", "maxLength": 128}, "operation": {"type": "string", "enum": ["health_check", "collect_package_inventory", "update_packages", "docker_discovery", "create_backup"]}, "timezone": {"type": "string"}, "target_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}}, "every_minutes": {"type": "integer", "minimum": 1, "maximum": 10080}, "backup_secret_ref": {"type": "string", "format": "uuid", "description": "Required for create_backup; secret value is never returned"}}}}}}, "responses": {"201": {"description": "Schedule created"}, "403": {"description": "Admin role required for backup schedules"}}}},
     "/api/v1/schedules/{schedule_id}": {"patch": {"description": "Enable or pause a recurring schedule"}},
     "/api/v1/update-policies": {"get": {}, "post": {}},
     "/api/v1/update-policies/{policy_id}": {"delete": {"description": "Delete a confirmed non-system update policy"}},
@@ -709,16 +768,23 @@ async fn openapi_document() -> impl IntoResponse {
 
 async fn stream_events(
     State(state): State<ApiState>,
+    axum::Extension(actor_role): axum::Extension<ActorRole>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let receiver = state.events.subscribe();
-    let stream = BroadcastStream::new(receiver).filter_map(|result| match result {
-        Ok(event) => Some(Ok(Event::default()
+    let stream = BroadcastStream::new(receiver).filter_map(move |result| match result {
+        Ok(event) if event_visible_to_role(&event, actor_role) => Some(Ok(Event::default()
             .event(event.kind())
             .json_data(&event)
             .unwrap_or_else(|_| Event::default()))),
+        Ok(_) => None,
         Err(_) => None,
     });
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+fn event_visible_to_role(event: &ApiEvent, role: ActorRole) -> bool {
+    role == ActorRole::Admin
+        || !matches!(event, ApiEvent::Status { resource, .. } if resource == "backup")
 }
 
 fn envelope<T>(data: T) -> ApiEnvelope<T> {

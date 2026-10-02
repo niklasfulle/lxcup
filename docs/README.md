@@ -6,6 +6,7 @@ detail changes; update the relevant documentation alongside that change.
 
 ## Core guides
 
+- The user-facing function wiki is available inside lxcup from the **Hilfe → Wiki** navigation entry.
 - [Product requirements](PRD.md) — product goals, users, scope, and non-goals.
 - [Security](SECURITY.md) — trust boundaries, credentials, authorization, and
   safe operations.

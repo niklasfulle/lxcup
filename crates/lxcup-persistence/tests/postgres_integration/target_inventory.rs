@@ -655,6 +655,7 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
             value: 8_000,
         }),
         policy_id: None,
+        backup_secret_ref: None,
         last_run_at: None,
         next_run_at: now + chrono::Duration::hours(1),
         last_error: None,
@@ -685,6 +686,29 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
             .unwrap()
             .iter()
             .any(|persisted| persisted == &updated_schedule)
+    );
+    let backup_schedule = JobSchedule {
+        id: format!("backup-{suffix}"),
+        operation: "create_backup".to_owned(),
+        timezone: "UTC".to_owned(),
+        target_ids: Vec::new(),
+        frequency: ScheduleFrequency::EveryMinutes(1440),
+        enabled: true,
+        threshold: None,
+        policy_id: None,
+        backup_secret_ref: Some(lxcup_core::SecretId::new()),
+        last_run_at: None,
+        next_run_at: now,
+        last_error: None,
+    };
+    repositories.schedules.save(&backup_schedule).await.unwrap();
+    assert!(
+        repositories
+            .schedules
+            .list()
+            .await
+            .unwrap()
+            .contains(&backup_schedule)
     );
     let invalid_schedule = JobSchedule {
         id: format!("invalid-{suffix}"),

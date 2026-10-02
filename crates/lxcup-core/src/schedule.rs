@@ -5,7 +5,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::TargetId;
+use crate::{SecretId, TargetId};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +33,8 @@ pub struct JobSchedule {
     pub threshold: Option<ThresholdRule>,
     #[serde(default)]
     pub policy_id: Option<String>,
+    #[serde(default)]
+    pub backup_secret_ref: Option<SecretId>,
     pub last_run_at: Option<DateTime<Utc>>,
     pub next_run_at: DateTime<Utc>,
     pub last_error: Option<String>,
@@ -108,6 +110,7 @@ mod tests {
             enabled: true,
             threshold: None,
             policy_id: None,
+            backup_secret_ref: None,
             last_run_at: None,
             next_run_at: now,
             last_error: None,

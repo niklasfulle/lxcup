@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+age.workspace = true
 axum.workspace = true
 chrono.workspace = true
 lxcup-agent = { path = "../lxcup-agent" }
@@ -28,6 +29,9 @@ ring.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 uuid.workspace = true
+url.workspace = true
+percent-encoding = "2.3"
+tokio-util = { version = "0.7", features = ["io"] }
 
 [dev-dependencies]
 sqlx.workspace = true

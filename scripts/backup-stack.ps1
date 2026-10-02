@@ -26,17 +26,30 @@ $stagingRoot = Resolve-Path (New-Item -ItemType Directory -Force -Path $StagingD
 $staging = Join-Path $stagingRoot ("lxcup-backup-" + [guid]::NewGuid())
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $output = Join-Path (Resolve-Path (New-Item -ItemType Directory -Force -Path $BackupDirectory)) "lxcup-$timestamp.tar.age"
+$serverStopped = $false
 try {
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
     Protect-PrivateDirectory $staging
     $archive = Join-Path $staging "backup.tar"
+    # Stop the only service that can mutate the secret store while both the
+    # database and encrypted files are captured. Preserve its prior state.
+    $runningServices = @(docker compose ps --status running --services lxcup-server)
+    if ($LASTEXITCODE -ne 0) { throw "Could not determine controller state before backup." }
+    if ($runningServices -contains "lxcup-server") {
+        docker compose stop lxcup-server | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Could not pause the controller for a consistent backup." }
+        $serverStopped = $true
+    }
     # pg_dump receives credentials through the Compose container environment;
     # no URL or password is written to PowerShell output.
     docker compose exec -T postgres sh -lc 'pg_dump --username="$POSTGRES_USER" --format=custom "$POSTGRES_DB"' > (Join-Path $staging "postgres.dump")
     if ($LASTEXITCODE -ne 0) { throw "PostgreSQL backup failed." }
     docker compose cp "lxcup-server:/var/lib/lxcup/secrets" (Join-Path $staging "secrets")
     if ($LASTEXITCODE -ne 0) { throw "Encrypted secret-store export failed." }
-    tar -cf $archive -C $staging postgres.dump secrets
+    New-Item -ItemType Directory -Path (Join-Path $staging "config") | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "..\compose.yaml") -Destination (Join-Path $staging "config\compose.yaml")
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "..\.env.example") -Destination (Join-Path $staging "config\.env.example")
+    tar -cf $archive -C $staging postgres.dump secrets config
     if ($LASTEXITCODE -ne 0) { throw "Backup archive creation failed." }
     age --encrypt --recipient $AgeRecipient --output $output $archive
     if ($LASTEXITCODE -ne 0) { throw "Encrypted backup creation failed." }
@@ -48,5 +61,13 @@ try {
 }
 
 finally {
-    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    try {
+        if ($serverStopped) {
+            docker compose start lxcup-server | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Backup finished but the controller did not restart; start lxcup-server manually." }
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    }
 }

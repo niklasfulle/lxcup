@@ -27,6 +27,7 @@ fn schedule(operation: &str, target_id: TargetId) -> JobSchedule {
         enabled: true,
         threshold: None,
         policy_id: None,
+        backup_secret_ref: None,
         last_run_at: None,
         next_run_at: chrono::Utc::now(),
         last_error: None,

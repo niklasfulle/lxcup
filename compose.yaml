@@ -30,6 +30,8 @@ services:
       LXCUP_DEV_SEED: ${LXCUP_DEV_SEED:-true}
       LXCUP_SECRET_STORE_DIR: /var/lib/lxcup/secrets
       LXCUP_SECRET_MASTER_KEY: ${LXCUP_SECRET_MASTER_KEY:-}
+      LXCUP_BACKUP_DIR: /var/lib/lxcup/backups
+      LXCUP_BACKUP_RETENTION_DAYS: ${LXCUP_BACKUP_RETENTION_DAYS:-30}
     depends_on:
       postgres:
         condition: service_healthy
@@ -39,6 +41,7 @@ services:
         host_ip: "${LXCUP_SERVER_HOST_IP:-0.0.0.0}"
     volumes:
       - lxcup-secrets:/var/lib/lxcup/secrets
+      - lxcup-backups:/var/lib/lxcup/backups
     healthcheck:
       test: ["CMD-SHELL", "wget --spider --quiet http://127.0.0.1:8080/health/ready"]
       interval: 10s
@@ -165,3 +168,4 @@ volumes:
   lxcup-postgres-test:
   lxcup-frontend-node-modules:
   lxcup-secrets:
+  lxcup-backups:

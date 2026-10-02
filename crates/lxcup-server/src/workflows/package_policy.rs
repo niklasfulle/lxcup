@@ -319,17 +319,12 @@ pub(super) async fn find_existing_job(
     target: ResourceTarget,
     idempotency_key: &str,
 ) -> Result<Option<AnsibleJob>, ApiError> {
+    if let Some(existing) = find_idempotent_job(state, target, idempotency_key).await? {
+        return Ok(Some(existing));
+    }
     let Some(repositories) = state.repositories.clone() else {
         return Ok(None);
     };
-    if let Some(existing) = repositories
-        .ansible_jobs
-        .find_by_idempotency_key(target, idempotency_key)
-        .await
-        .map_err(|_| ApiError::storage())?
-    {
-        return Ok(Some(existing));
-    }
     if repositories
         .ansible_jobs
         .has_active_target(target)
@@ -342,6 +337,21 @@ pub(super) async fn find_existing_job(
         ));
     }
     Ok(None)
+}
+
+pub(super) async fn find_idempotent_job(
+    state: &ApiState,
+    target: ResourceTarget,
+    idempotency_key: &str,
+) -> Result<Option<AnsibleJob>, ApiError> {
+    let Some(repositories) = state.repositories.clone() else {
+        return Ok(None);
+    };
+    repositories
+        .ansible_jobs
+        .find_by_idempotency_key(target, idempotency_key)
+        .await
+        .map_err(|_| ApiError::storage())
 }
 
 #[cfg(test)]

@@ -26,11 +26,11 @@ impl ScheduleRepository {
             .map(|target_id| target_id.as_uuid())
             .collect::<Vec<Uuid>>();
         sqlx::query(
-            "INSERT INTO schedules (id, operation, timezone, target_ids, every_minutes, enabled, threshold, policy_id, last_run_at, next_run_at, last_error, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+            "INSERT INTO schedules (id, operation, timezone, target_ids, every_minutes, enabled, threshold, policy_id, backup_secret_ref, last_run_at, next_run_at, last_error, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
              ON CONFLICT (id) DO UPDATE SET operation = EXCLUDED.operation, timezone = EXCLUDED.timezone,
                target_ids = EXCLUDED.target_ids, every_minutes = EXCLUDED.every_minutes,
-               enabled = EXCLUDED.enabled, threshold = EXCLUDED.threshold, policy_id = EXCLUDED.policy_id, last_run_at = EXCLUDED.last_run_at,
+               enabled = EXCLUDED.enabled, threshold = EXCLUDED.threshold, policy_id = EXCLUDED.policy_id, backup_secret_ref = EXCLUDED.backup_secret_ref, last_run_at = EXCLUDED.last_run_at,
                next_run_at = EXCLUDED.next_run_at, last_error = EXCLUDED.last_error, updated_at = NOW()",
         )
         .bind(&schedule.id)
@@ -47,6 +47,7 @@ impl ScheduleRepository {
                 .map_err(RepositoryError::Serialization)?,
         )
         .bind(&schedule.policy_id)
+        .bind(schedule.backup_secret_ref.map(|secret| secret.as_uuid()))
         .bind(schedule.last_run_at)
         .bind(schedule.next_run_at)
         .bind(&schedule.last_error)
@@ -57,7 +58,7 @@ impl ScheduleRepository {
 
     pub async fn list(&self) -> Result<Vec<JobSchedule>, RepositoryError> {
         let rows = sqlx::query(
-            "SELECT id, operation, timezone, target_ids, every_minutes, enabled, threshold, policy_id, last_run_at, next_run_at, last_error
+            "SELECT id, operation, timezone, target_ids, every_minutes, enabled, threshold, policy_id, backup_secret_ref, last_run_at, next_run_at, last_error
              FROM schedules ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -95,6 +96,9 @@ fn schedule_from_row(row: sqlx::postgres::PgRow) -> Result<JobSchedule, Reposito
         enabled: row.try_get("enabled")?,
         threshold: deserialize_threshold(row.try_get("threshold")?)?,
         policy_id: row.try_get("policy_id")?,
+        backup_secret_ref: row
+            .try_get::<Option<Uuid>, _>("backup_secret_ref")?
+            .map(lxcup_core::SecretId::from_uuid),
         last_run_at: row.try_get::<Option<DateTime<Utc>>, _>("last_run_at")?,
         next_run_at: row.try_get("next_run_at")?,
         last_error: row.try_get("last_error")?,

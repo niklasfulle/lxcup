@@ -1,4 +1,15 @@
 use super::*;
+
+#[test]
+fn backup_activity_is_only_dispatched_to_admin_event_streams() {
+    let backup = ApiEvent::status("backup", "backup-1".to_owned(), "created");
+    let workflow = ApiEvent::status("ansible_job", "job-1".to_owned(), "completed");
+
+    assert!(event_visible_to_role(&backup, ActorRole::Admin));
+    assert!(!event_visible_to_role(&backup, ActorRole::Operator));
+    assert!(!event_visible_to_role(&backup, ActorRole::Viewer));
+    assert!(event_visible_to_role(&workflow, ActorRole::Operator));
+}
 use crate::scheduled_jobs::threshold_value;
 use lxcup_agent::AgentInfo;
 use lxcup_core::{ThresholdMetric, ThresholdRule};
@@ -60,6 +71,7 @@ async fn schedule_dispatch_records_a_skipped_target_and_moves_to_the_next_slot()
         enabled: true,
         threshold: None,
         policy_id: None,
+        backup_secret_ref: None,
         last_run_at: None,
         next_run_at: now - chrono::Duration::minutes(1),
         last_error: None,
@@ -246,6 +258,7 @@ async fn database_backed_state_restores_core_data_and_runs_retention_checks() {
         enabled: true,
         threshold: None,
         policy_id: None,
+        backup_secret_ref: None,
         last_run_at: None,
         next_run_at: chrono::Utc::now() + chrono::Duration::hours(1),
         last_error: None,

@@ -2,8 +2,16 @@
 set -Eeuo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
-  echo "Dieses Skript muss als root ausgeführt werden." >&2
-  exit 1
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "Root-Rechte erforderlich, aber sudo ist nicht installiert. Melde dich als root an und starte dieses Skript erneut mit bash." >&2
+    exit 1
+  fi
+  if [[ ! -f "$0" ]]; then
+    echo "Speichere dieses Skript zuerst als Datei und starte es mit bash, damit es per sudo ausgeführt werden kann." >&2
+    exit 1
+  fi
+  echo "Dieses Skript benötigt Root-Rechte und wird per sudo neu gestartet."
+  exec sudo -- bash "$0" "$@"
 fi
 
 install_package() {
@@ -78,4 +86,24 @@ echo
 echo "Fertig. Ziel im lxcup-Frontend mit folgenden SSH-Daten registrieren:"
 echo "  SSH-Benutzer: ${username}"
 echo "  Deployment-Secret: das Passwort des SSH-Benutzers"
-echo "  Known-Hosts-Secret: Ausgabe von scripts/get-ssh-known-hosts.ps1"
+echo "  Known-Hosts-Secret: die folgenden SSH-Hostschlüssel"
+echo "  Verwende bei der Registrierung einen der unten aufgeführten Hostnamen oder eine IP-Adresse."
+echo
+
+hostnames="$(hostname)"
+read -r -a host_addresses <<< "$(hostname -I 2>/dev/null || true)"
+for address in "${host_addresses[@]}"; do
+  hostnames+=",${address}"
+done
+
+host_keys_found=false
+for public_key in /etc/ssh/ssh_host_*_key.pub; do
+  [[ -f "${public_key}" ]] || continue
+  read -r key_type key_value _ < "${public_key}"
+  [[ -n "${key_type}" && -n "${key_value}" ]] || continue
+  printf '%s %s %s\n' "${hostnames}" "${key_type}" "${key_value}"
+  host_keys_found=true
+done
+if [[ "${host_keys_found}" == false ]]; then
+  echo "Keine öffentlichen SSH-Hostschlüssel gefunden. Prüfe, ob der SSH-Server installiert und eingerichtet ist." >&2
+fi

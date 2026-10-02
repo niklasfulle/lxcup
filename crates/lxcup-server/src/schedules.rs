@@ -4,7 +4,9 @@ use axum::{
     extract::{Json as JsonBody, State},
 };
 use chrono::Utc;
-use lxcup_core::{ActorRole, JobSchedule, Permission, ScheduleFrequency, TargetId, ThresholdRule};
+use lxcup_core::{
+    ActorRole, JobSchedule, Permission, ScheduleFrequency, SecretId, TargetId, ThresholdRule,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -20,6 +22,8 @@ pub(crate) struct CreateScheduleRequest {
     pub threshold: Option<ThresholdRule>,
     #[serde(default)]
     pub policy_id: Option<String>,
+    #[serde(default)]
+    pub backup_secret_ref: Option<SecretId>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -88,7 +92,22 @@ pub(super) async fn create_schedule(
     JsonBody(request): JsonBody<CreateScheduleRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ApiEnvelope<ScheduleDto>>), ApiError> {
     require_permission(actor_role, Permission::Configure)?;
+    if request.operation == "create_backup" && actor_role != ActorRole::Admin {
+        return Err(ApiError::forbidden(
+            "admin_required",
+            "administrator access is required to schedule backups",
+        ));
+    }
     validate_schedule_fields(&request)?;
+    if request.operation == "create_backup" {
+        let secret_ref = request.backup_secret_ref.ok_or_else(|| {
+            ApiError::bad_request(
+                "backup_secret_required",
+                "select a backup-passphrase secret",
+            )
+        })?;
+        super::backups::read_backup_passphrase(&state, secret_ref)?;
+    }
     let mut store = state.store.write().await;
     validate_schedule_resources(&request, &store)?;
     let schedule = JobSchedule {
@@ -100,6 +119,7 @@ pub(super) async fn create_schedule(
         enabled: request.enabled,
         threshold: request.threshold,
         policy_id: request.policy_id,
+        backup_secret_ref: request.backup_secret_ref,
         last_run_at: None,
         next_run_at: Utc::now() + ScheduleFrequency::EveryMinutes(request.every_minutes).interval(),
         last_error: None,
@@ -159,6 +179,12 @@ pub(super) async fn set_schedule_enabled(
 }
 
 fn validate_schedule_fields(request: &CreateScheduleRequest) -> Result<(), ApiError> {
+    validate_schedule_identity(request)?;
+    validate_schedule_operation(request)?;
+    validate_backup_schedule(request)
+}
+
+fn validate_schedule_identity(request: &CreateScheduleRequest) -> Result<(), ApiError> {
     if request.id.trim().is_empty() || request.id.len() > 128 {
         return Err(ApiError::bad_request(
             "invalid_schedule",
@@ -177,9 +203,17 @@ fn validate_schedule_fields(request: &CreateScheduleRequest) -> Result<(), ApiEr
             "schedule interval must be between 1 minute and 7 days",
         ));
     }
+    Ok(())
+}
+
+fn validate_schedule_operation(request: &CreateScheduleRequest) -> Result<(), ApiError> {
     if !matches!(
         request.operation.as_str(),
-        "health_check" | "collect_package_inventory" | "update_packages" | "docker_discovery"
+        "health_check"
+            | "collect_package_inventory"
+            | "update_packages"
+            | "docker_discovery"
+            | "create_backup"
     ) {
         return Err(ApiError::bad_request(
             "invalid_operation",
@@ -198,6 +232,45 @@ fn validate_schedule_fields(request: &CreateScheduleRequest) -> Result<(), ApiEr
             "Docker discovery does not support telemetry thresholds",
         ));
     }
+    if request.operation != "create_backup" && request.backup_secret_ref.is_some() {
+        return Err(ApiError::bad_request(
+            "invalid_backup_secret",
+            "backup secrets are only valid for backup schedules",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_backup_schedule(request: &CreateScheduleRequest) -> Result<(), ApiError> {
+    if request.operation == "create_backup" {
+        if request.backup_secret_ref.is_none() {
+            return Err(ApiError::bad_request(
+                "backup_secret_required",
+                "scheduled backups require a global backup-passphrase secret",
+            ));
+        }
+        if !request.target_ids.is_empty()
+            || request.threshold.is_some()
+            || request.policy_id.is_some()
+        {
+            return Err(ApiError::bad_request(
+                "invalid_backup_schedule",
+                "backup schedules do not use targets, thresholds, or update policies",
+            ));
+        }
+        if request.timezone != "UTC" {
+            return Err(ApiError::bad_request(
+                "invalid_backup_schedule_timezone",
+                "backup schedules use UTC",
+            ));
+        }
+        if request.every_minutes < 60 {
+            return Err(ApiError::bad_request(
+                "backup_interval_too_short",
+                "scheduled backups must run at least 60 minutes apart",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -215,7 +288,7 @@ fn validate_schedule_resources(
             "schedule id already exists",
         ));
     }
-    if request.target_ids.is_empty() {
+    if request.target_ids.is_empty() && request.operation != "create_backup" {
         return Err(ApiError::bad_request(
             "target_required",
             "at least one target is required",
@@ -272,7 +345,11 @@ fn validate_schedule_policy_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lxcup_core::{SecretId, Target, TargetKind, TargetTransport, UpdatePolicy, UpdateRisk};
+    use lxcup_core::{
+        SecretId, SecretValue, Target, TargetKind, TargetTransport, UpdatePolicy, UpdateRisk,
+    };
+    use lxcup_secrets::{CreateSecret, InMemorySecretStore, SecretStore};
+    use std::sync::Arc;
 
     fn request(operation: &str) -> CreateScheduleRequest {
         CreateScheduleRequest {
@@ -284,6 +361,7 @@ mod tests {
             enabled: true,
             threshold: None,
             policy_id: None,
+            backup_secret_ref: None,
         }
     }
 
@@ -406,6 +484,7 @@ mod tests {
             enabled: true,
             threshold: None,
             policy_id: None,
+            backup_secret_ref: None,
             last_run_at: None,
             next_run_at: Utc::now(),
             last_error: None,
@@ -452,5 +531,67 @@ mod tests {
         );
         store.update_policies[0].allowed_targets.push(managed.id);
         assert!(validate_schedule_resources(&value, &store).is_ok());
+    }
+
+    #[tokio::test]
+    async fn backup_schedule_requires_admin_and_never_returns_the_secret_reference() {
+        let secrets = InMemorySecretStore::default();
+        let created = secrets
+            .create(CreateSecret {
+                name: "backup-passphrase".to_owned(),
+                kind: lxcup_core::SecretKind::BackupPassphrase,
+                scope: lxcup_core::SecretScope::Global,
+                value: SecretValue::new("correct horse battery staple".to_owned()).unwrap(),
+            })
+            .unwrap();
+        let state = ApiState::new().with_secret_store(Arc::new(secrets));
+        let mut backup = request("create_backup");
+        backup.timezone = "UTC".to_owned();
+        backup.target_ids.clear();
+        backup.backup_secret_ref = Some(created.metadata.id);
+
+        let denied = create_schedule(
+            State(state.clone()),
+            axum::Extension(ActorRole::Operator),
+            JsonBody(backup.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied.status, axum::http::StatusCode::FORBIDDEN);
+
+        let (status, Json(envelope)) = create_schedule(
+            State(state),
+            axum::Extension(ActorRole::Admin),
+            JsonBody(backup),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+        assert_eq!(envelope.data.operation, "create_backup");
+        assert_eq!(envelope.data.target_ids, Vec::<TargetId>::new());
+        assert!(
+            !serde_json::to_string(&envelope.data)
+                .unwrap()
+                .contains("backup_secret_ref")
+        );
+    }
+
+    #[test]
+    fn backup_schedules_reject_short_intervals_and_non_utc_timezones() {
+        let mut value = request("create_backup");
+        value.timezone = "UTC".to_owned();
+        value.target_ids.clear();
+        value.backup_secret_ref = Some(SecretId::new());
+        value.every_minutes = 59;
+        assert_eq!(
+            validate_schedule_fields(&value).unwrap_err().code,
+            "backup_interval_too_short"
+        );
+        value.every_minutes = 60;
+        value.timezone = "Europe/Berlin".to_owned();
+        assert_eq!(
+            validate_schedule_fields(&value).unwrap_err().code,
+            "invalid_backup_schedule_timezone"
+        );
     }
 }

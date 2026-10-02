@@ -261,6 +261,31 @@ impl AnsibleJobRepository {
             .collect()
     }
 
+    /// Loads only recent jobs for bounded operational exports.
+    pub async fn list_since(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<Vec<AnsibleJob>, RepositoryError> {
+        let limit = i64::from(limit.clamp(1, 500));
+        let rows = sqlx::query(
+            "SELECT payload FROM ansible_jobs WHERE created_at >= $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(since)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                serde_json::from_value(row.try_get("payload")?).map_err(|_| {
+                    RepositoryError::InvalidValue {
+                        field: "ansible job payload",
+                    }
+                })
+            })
+            .collect()
+    }
+
     pub async fn find_by_idempotency_key(
         &self,
         target: lxcup_core::ResourceTarget,
@@ -362,6 +387,34 @@ impl AnsibleJobRepository {
             "SELECT payload FROM ansible_job_events WHERE job_id = $1 ORDER BY sequence",
         )
         .bind(id.as_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                serde_json::from_value(row.try_get("payload")?).map_err(|_| {
+                    RepositoryError::InvalidValue {
+                        field: "ansible job event payload",
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Loads at most the newest `limit` events in a time window for a support
+    /// export, preserving event order without materializing unbounded history.
+    pub async fn events_since(
+        &self,
+        id: lxcup_core::AnsibleJobId,
+        since: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<Vec<JobEvent>, RepositoryError> {
+        let limit = i64::from(limit.clamp(1, 500));
+        let rows = sqlx::query(
+            "SELECT payload FROM (SELECT payload, sequence FROM ansible_job_events WHERE job_id = $1 AND created_at >= $2 ORDER BY sequence DESC LIMIT $3) recent ORDER BY sequence",
+        )
+        .bind(id.as_uuid())
+        .bind(since)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()

@@ -726,6 +726,7 @@ async fn scheduled_docker_discovery_records_failures_and_later_recovers() {
             enabled: true,
             threshold: None,
             policy_id: None,
+            backup_secret_ref: None,
             last_run_at: None,
             next_run_at: chrono::Utc::now() - chrono::Duration::minutes(1),
             last_error: None,

@@ -27,7 +27,8 @@ level it stores:
   target, status, timestamps, idempotency information, and the ordered
   execution log used by the UI and audit trail.
 - **Agent registrations and worker heartbeats** — managed-agent enrollment,
-  worker availability, and the latest artifact-store health probe.
+  worker build version and availability, and the latest artifact-store health
+  probe.
 - **Local authentication** — password hashes, the Admin/User role, forced
   password-change state, revocable hashed sessions, and an Admin-only user
   activity audit. Sessions cascade when their account is removed; audit rows
@@ -40,8 +41,10 @@ level it stores:
   change history for each registered target. Failed discovery does not erase
   the last successful snapshot or its history.
 - **Schedules and update policies** — recurring registered work and package
-  update constraints. Non-system update policies can be deleted through the
-  repository; job/event history remains independent of the policy row.
+  update constraints. Backup schedules store an optional `backup_secret_ref`
+  UUID only; secret metadata and values remain in the external Secret Store.
+  Non-system update policies can be deleted through the repository; job/event
+  history remains independent of the policy row.
 - Removing a managed target is transactional: target-keyed inventory,
   telemetry, Docker snapshots, workflows, and workflow events are deleted by
   cascade; schedules lose that target (and are removed if empty); policies
@@ -62,6 +65,11 @@ IDs are stable UUIDs for targets, jobs, and agent registrations. Related rows
 use foreign keys and indexes declared by migrations. Repository methods define
 the supported query/update behavior; JSON payload columns do not justify
 bypassing domain validation.
+
+An unresolved Apply job blocks normal work for its target until reconciliation
+finishes. Its linked reconciliation job is the sole exception: the worker may
+claim that job while skipping other queued work for the locked target. The
+database index continues to enforce exclusivity for actively executing jobs.
 
 ## Migration rules
 

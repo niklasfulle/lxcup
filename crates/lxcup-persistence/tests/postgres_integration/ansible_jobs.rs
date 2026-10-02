@@ -174,6 +174,25 @@ async fn postgres_ansible_job_repository_claims_jobs_and_persists_events() {
             status: AnsibleJobStatus::Queued
         })
     ));
+    let recent_jobs = repositories
+        .ansible_jobs
+        .list_since(Utc::now() - chrono::Duration::minutes(1), 1)
+        .await
+        .unwrap();
+    assert_eq!(recent_jobs.len(), 1);
+    assert_eq!(recent_jobs[0].id, job_id);
+    let recent_events = repositories
+        .ansible_jobs
+        .events_since(job_id, Utc::now() - chrono::Duration::minutes(1), 1)
+        .await
+        .unwrap();
+    assert_eq!(recent_events.len(), 1);
+    assert!(matches!(
+        recent_events[0].event,
+        JobEventKind::StatusChanged {
+            status: AnsibleJobStatus::Queued
+        }
+    ));
     assert!(
         !repositories
             .ansible_jobs

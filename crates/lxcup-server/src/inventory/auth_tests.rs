@@ -10,6 +10,8 @@ fn administrative_routes_are_explicitly_allowlisted() {
         "/api/v1/secrets",
         "/api/v1/secrets/abc",
         "/api/v1/auth/audit",
+        "/api/v1/admin/backups",
+        "/api/v1/admin/backups/123",
     ] {
         assert!(is_admin_only_route(path), "{path}");
     }

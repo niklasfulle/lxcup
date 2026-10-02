@@ -2,7 +2,6 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$BackupFile,
-    [Parameter(Mandatory = $true)]
     [string]$AgeIdentity,
     [string]$RestoreDirectory = ".\restore-test",
     [Parameter(Mandatory = $true)]
@@ -36,7 +35,12 @@ try {
     New-Item -ItemType Directory -Force -Path $restore | Out-Null
     Protect-PrivateDirectory $restore
     $archive = Join-Path $restore "backup.tar"
-    age --decrypt --identity $AgeIdentity --output $archive $BackupFile
+    $ageArguments = @("--decrypt", "--output", $archive)
+    if (-not [string]::IsNullOrWhiteSpace($AgeIdentity)) {
+        $ageArguments += @("--identity", $AgeIdentity)
+    }
+    $ageArguments += $BackupFile
+    & age @ageArguments
     if ($LASTEXITCODE -ne 0) { throw "Backup decryption failed." }
     tar -xf $archive -C $restore
     if ($LASTEXITCODE -ne 0) { throw "Backup archive extraction failed." }
@@ -78,7 +82,7 @@ try {
     }
 
     $integritySql = @"
-WITH required_tables(name) AS (VALUES ('targets'), ('audit_events'), ('package_inventory_snapshots')),
+WITH required_tables(name) AS (VALUES ('targets'), ('auth_users'), ('audit_events'), ('user_audit_events'), ('package_inventory_snapshots')),
 missing_tables AS (
     SELECT name FROM required_tables
     WHERE to_regclass('public.' || name) IS NULL
@@ -94,14 +98,24 @@ missing_tables AS (
 )
 SELECT 'missing_tables=' || (SELECT count(*) FROM missing_tables)
 UNION ALL SELECT 'bad_secret_refs=' || (SELECT count(*) FROM bad_secret_refs)
+UNION ALL SELECT 'users=' || (SELECT count(*) FROM auth_users)
+UNION ALL SELECT 'targets=' || (SELECT count(*) FROM targets)
+UNION ALL SELECT 'inventory_snapshots=' || (SELECT count(*) FROM package_inventory_snapshots)
 UNION ALL SELECT 'audit_rows=' || (SELECT count(*) FROM audit_events)
-UNION ALL SELECT 'audit_data_invalid=' || (SELECT count(*) FROM audit_events WHERE event_type IS NULL OR jsonb_typeof(details) <> 'object' OR created_at IS NULL);
-"@
+UNION ALL SELECT 'audit_rows_user=' || (SELECT count(*) FROM user_audit_events)
+UNION ALL SELECT 'audit_data_invalid=' || (
+    (SELECT count(*) FROM audit_events WHERE event_type IS NULL OR jsonb_typeof(details) <> 'object' OR created_at IS NULL)
+    + (SELECT count(*) FROM user_audit_events WHERE action IS NULL OR jsonb_typeof(details) <> 'object' OR created_at IS NULL)
+);
+    "@
     $checks = Invoke-RestorePsql $integritySql
-    if ($checks -notcontains 'missing_tables=0' -or $checks -notcontains 'bad_secret_refs=0' -or $checks -notcontains 'audit_data_invalid=0') { throw "Restored database schema, secret-reference shape, or audit data validation failed." }
+    $userCountLine = $checks | Where-Object { $_ -match '^users=\d+$' } | Select-Object -First 1
+    $userCount = if ($userCountLine) { [int]($userCountLine -replace '^users=', '') } else { 0 }
+    if ($checks -notcontains 'missing_tables=0' -or $checks -notcontains 'bad_secret_refs=0' -or $checks -notcontains 'audit_data_invalid=0' -or $userCount -lt 1) { throw "Restored database schema, account data, secret-reference shape, or audit data validation failed." }
 
     $secretRoot = Join-Path $restore "secrets"
     if (-not (Test-Path -LiteralPath $secretRoot -PathType Container)) { throw "Encrypted secret-store payload is missing." }
+    if (-not (Test-Path -LiteralPath (Join-Path $restore "config\compose.yaml") -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $restore "config\.env.example") -PathType Leaf)) { throw "Deployment configuration template is missing from the backup." }
     $secretMetadata = @{}
     foreach ($metadataFile in Get-ChildItem -LiteralPath $secretRoot -Filter "*.json" -File) {
         $secretMetadata[$metadataFile.BaseName] = Get-Content -LiteralPath $metadataFile.FullName -Raw | ConvertFrom-Json
@@ -125,7 +139,7 @@ SELECT DISTINCT secret_ref FROM (
     $env:LXCUP_SECRET_STORE_DIR = $secretRoot
     cargo run --quiet -p lxcup-secrets --example verify_store
     if ($LASTEXITCODE -ne 0) { throw "Encrypted secret-store validation failed." }
-    Write-Host "Isolated restore test succeeded: migrations applied, target/secret references checked, and audit rows readable. Secret values were not printed."
+    Write-Host "Isolated restore test succeeded: migrations applied, $userCount account(s) restored, target/secret references checked, and audit rows readable. Secret values were not printed."
 }
 
 finally {

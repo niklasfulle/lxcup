@@ -91,6 +91,31 @@ For the implemented role behavior and production requirements, see
   secret values in job events, errors, metrics, audit metadata, or test output.
 - Prefer explicit allowlists of environment variables, secret kinds, and
   workflow parameters over pass-through configuration.
+- The Admin support-diagnostics export is locally initiated and bounded. It
+  includes resource addresses and operational status, but excludes secret
+  material, raw worker stdout/stderr, process environments, and private keys;
+  only allowlisted workflow summaries are exported. The central filter drops
+  credential-labelled lines, URL user-info, common provider token formats,
+  JWTs, and complete PEM blocks before bounding each summary. Treat downloaded
+  bundles as operationally sensitive and share them only through an approved
+  channel.
+- Admins can create encrypted database and secret-store backups in the
+  application. The controller coordinates mutating HTTP requests while taking
+  the cross-store snapshot, encrypts it in the standard age passphrase format
+  with a password entered for that backup, and retains only the encrypted
+  archive in a dedicated persistent backup volume. The password is not stored;
+  losing it makes that backup unrecoverable. `LXCUP_SECRET_MASTER_KEY` and the
+  live `.env` are excluded; Compose files and `.env.example` are bundled only
+  as versioned templates. Keep both the backup password and master key
+  protected and copy downloads off-host; the local volume alone is not a
+  disaster recovery strategy.
+- A recurring backup schedule may reference an active, global
+  `backup_passphrase` Secret. PostgreSQL stores only the Secret ID alongside
+  the schedule; neither the Secret value nor that reference is returned in
+  schedule responses or activity events. The controller resolves the current
+  value from the encrypted Secret Store only when starting the backup. Rotating
+  or revoking the Secret changes or disables future runs; older archives still
+  require the passphrase that encrypted them.
 
 ## Inputs, database, and errors
 
@@ -131,6 +156,11 @@ For the implemented role behavior and production requirements, see
   can inspect the local Docker daemon. This access is effectively root-level on
   the managed host; operators must understand the consequence before running
   the host preparation script or deploying the agent on Docker hosts.
+  The standalone host preparation script runs directly as root or re-executes
+  its saved file through sudo. Without root or sudo it exits before making
+  changes. It prints local public SSH host keys in known-hosts format; no
+  additional helper script is required. Register the resource using a hostname
+  or address present in that output (custom aliases require a matching entry).
 - Docker image updates are destructive and require explicit confirmation plus
   the destructive/admin permission. Only a Compose-managed Linux service with
   one replica and a single in-project config file may be recreated. The agent

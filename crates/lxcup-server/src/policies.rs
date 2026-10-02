@@ -618,6 +618,7 @@ mod tests {
                 enabled: true,
                 threshold: None,
                 policy_id: Some("nightly-patches".to_owned()),
+                backup_secret_ref: None,
                 last_run_at: None,
                 next_run_at: chrono::Utc::now(),
                 last_error: None,

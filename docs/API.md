@@ -42,8 +42,15 @@ schemas and route availability.
   `limit` (1–100), `offset`, `actor_username`, `action`, `resource`, `since`,
   and `until` (RFC 3339 timestamps; `until` is exclusive). Results are ordered
   newest first; string filters use case-insensitive substring matching.
+- `GET /api/v1/admin/support-diagnostics` is Admin-only. It returns a bounded
+  JSON support bundle with controller/agent/worker versions, worker and
+  artifact-store availability, target agent platform/heartbeat state, and the
+  50 newest workflow summaries in the selected `days` window (1–30, default
+  7). It includes only allowlisted mode summaries;
+  raw stdout/stderr, secret values, credentials, and environment variables are
+  excluded. The UI downloads it locally and does not upload it anywhere.
 - The agent heartbeat authenticates separately using the target's agent token.
-- Target responses include `agent_version` from the last authenticated heartbeat and `latest_agent_version` from the running controller build. The UI warns when they differ; onboarding and update workflows use the controller-reported version rather than a frontend constant.
+- Target responses include `agent_version` and `agent_last_seen_at` from the last authenticated heartbeat and `latest_agent_version` from the running controller build. The UI warns when versions differ and uses the real heartbeat timestamp for stale-connection warnings; onboarding and update workflows use the controller-reported version rather than a frontend constant.
 - Telemetry sample times are interpreted relative to the authenticated heartbeat's `sent_at` and normalized to controller time. This preserves the rolling window when an agent and controller have modest clock skew; samples outside that window remain rejected.
 - Linux agents collect telemetry every five seconds and include the rolling last 60 seconds with each 30-second heartbeat. The overlap lets the controller recover samples when a heartbeat is delayed or lost; duplicate normalized timestamps are ignored by persistence. The controller persists samples for 30 days and returns only the last 10 minutes for charts (about 120 samples at the normal interval). A daily cleanup removes expired records. Heartbeats include `missing_samples` for detected gaps and `partial: true` when samples are missing, rejected, or lack metrics, so operators can distinguish gaps from a quiet system.
 - `GET /api/v1/telemetry-alerts` evaluates those stored samples. CPU warns above 90% for 5 minutes and becomes critical above 98% for 2 minutes; RAM warns above 90% for 5 minutes and becomes critical above 95% for 2 minutes; storage warns above 85% for 10 minutes and becomes critical above 95% for 5 minutes. A gap greater than 7 seconds breaks a sustained-load streak. A managed target also reports stale telemetry after 2 minutes without a fresh metric sample. Alerts include target identity, current value, threshold, firing time, and observation time; the UI polls every 15 seconds and retains observed recovery notices in browser storage.
@@ -51,7 +58,7 @@ schemas and route availability.
 - Docker inventory lifecycle events are retained for 180 days (subject to the per-target 200-event cap) and pruned daily. The current container inventory is not subject to this event-history retention.
 - `POST /api/v1/targets/{target_id}/docker/containers/{container_id}/action` accepts only `start`, `stop`, or `restart`, requires `confirmed: true` and the destructive/admin permission, verifies the container against a fresh agent inventory, and sends a fixed Docker subcommand plus a validated hexadecimal ID. It then best-effort refreshes the stored inventory so lifecycle changes are captured.
 - `POST /api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-check` is a read-only registry check. It compares the running image's local config digest with the matching remote platform manifest and returns `current`, `update_available`, `pinned`, or `unknown`. It does not pull an image or recreate a container; registry authentication/errors yield `unknown` with a stable reason.
-- `POST /api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-apply` requires the destructive/admin permission and `{ "confirmed": true, "expected_remote_image_id": "sha256:…" }`. The controller performs a fresh successful registry check and requires the digest to match the supplied value. It is Linux-agent-only and only supports a single-replica Compose service with one config file inside its declared project directory. The agent verifies the Compose config hash and registry digest again, pulls the service image, then recreates only that service with `--no-deps`; plain Docker containers and changed/ambiguous Compose configurations are rejected. Updates are not automatically rolled back; see [`docker-image-update-recovery.md`](docker-image-update-recovery.md).
+- `POST /api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-apply` requires the destructive/admin permission and `{ "confirmed": true, "expected_remote_image_id": "sha256:…" }`. The controller performs a fresh successful registry check and requires the digest to match the supplied value. It is Linux-agent-only and only supports a single-replica Compose service with one config file inside its declared project directory. The agent verifies the Compose config hash and registry digest again, pulls the service image, then recreates only that service with `--no-deps --wait`; it verifies the resulting service is running and returns its observed health status (`null` means the Compose service has no healthcheck). Plain Docker containers and changed/ambiguous Compose configurations are rejected. An unsuccessful post-update state check is reported as a failure and does not imply rollback; see [`docker-image-update-recovery.md`](docker-image-update-recovery.md).
 - The event stream at `GET /api/v1/events` uses the authenticated stream
   request; do not put tokens in the URL.
 - Health endpoints and metrics have their own exposure rules; production Caddy
@@ -81,14 +88,47 @@ Consult OpenAPI for exact payloads and response codes.
 | Health and metrics | `GET /health/live`, `GET /health/ready`, `GET /metrics` |
 | Authentication | `GET /api/v1/auth/status`, `POST /api/v1/auth/login`, `GET /api/v1/auth/session`, `POST /api/v1/auth/logout`, `POST /api/v1/auth/password` |
 | Admin | Admin-only user management under `/api/v1/users`, user activity under `GET /api/v1/auth/audit` |
-| Targets | `GET/POST /api/v1/targets`, `GET /api/v1/targets/{target_id}`, confirmed Admin-only `DELETE /api/v1/targets/{target_id}`, package inventory and host/Docker telemetry reads, active telemetry alerts at `GET /api/v1/telemetry-alerts`, Docker inventory read and confirmed discovery via a connected LXC agent at `/api/v1/targets/{target_id}/docker/discovery`, confirmed Docker lifecycle actions at `/api/v1/targets/{target_id}/docker/containers/{container_id}/action`, read-only registry checks at `/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-check` |
+| Targets | `GET/POST /api/v1/targets`, `GET /api/v1/targets/{target_id}`, confirmed Admin-only `DELETE /api/v1/targets/{target_id}`, package inventory and host/Docker telemetry reads, active telemetry alerts at `GET /api/v1/telemetry-alerts`, Docker inventory read and confirmed discovery via a connected LXC or Linux-server agent at `/api/v1/targets/{target_id}/docker/discovery`, confirmed Docker lifecycle actions at `/api/v1/targets/{target_id}/docker/containers/{container_id}/action`, read-only registry checks at `/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-check` |
 | Enrollment and agents | `POST /api/v1/enrollments`, `GET /api/v1/enrollments/{enrollment_id}`, `POST /api/v1/agents/heartbeat` |
 | Secrets | list/create, audit, metadata read, rotate, and revoke under `/api/v1/secrets` |
 | Ansible workflows | enqueue, read, retry, and event reads under `/api/v1/ansible/jobs`; worker availability under `/api/v1/ansible/worker-availability` |
 | Scheduling | list/create `/api/v1/schedules`; list/create `/api/v1/update-policies`; confirmed deletion of non-system policies at `DELETE /api/v1/update-policies/{policy_id}` |
 | Planner and execution | scans, plans, confirmations, executions, results, abort, reconciliation, and safety reads under `/api/v1/containers`, `/api/v1/scans`, `/api/v1/plans`, and `/api/v1/executions` |
-| Agent/container inventory | agent health/metrics/revoke, legacy Docker inventory and workload management under `/api/v1/containers/{container_id}`; manually registered LXC targets can discover Docker directly through their private-network agent endpoint |
-| Discovery/documentation/events | `GET /api/v1/openapi.json`, authenticated `GET /api/v1/events` |
+| Agent/container inventory | agent health/metrics/revoke, legacy Docker inventory and workload management under `/api/v1/containers/{container_id}`; registered LXC and Linux-server targets can discover Docker directly through their private-network agent endpoint |
+| Discovery/documentation/events | `GET /api/v1/openapi.json`, authenticated `GET /api/v1/events`, Admin-only `GET /api/v1/admin/support-diagnostics` |
+
+Admins can list encrypted backups with `GET /api/v1/admin/backups`, explicitly
+create one using `POST` with `{ "confirmed": true, "passphrase": "…" }`, and
+stream a retained archive from `GET /api/v1/admin/backups/{backup_id}`. The
+passphrase must have at least 12 characters and is used with age's standard
+passphrase encryption; it is never stored by lxcup. Creation requires `pg_dump`,
+a configured PostgreSQL `DATABASE_URL`, and the encrypted secret-store
+directory. The encrypted archive is kept in the dedicated backup volume; the
+passphrase, secret master key, and live `.env` are excluded. Compose files and
+`.env.example` are included only as versioned deployment templates. Downloads
+can be decrypted with `age --decrypt --output backup.tar <backup-file>`; age
+prompts for the passphrase.
+
+Admins can also schedule `create_backup` through `POST /api/v1/schedules`.
+The request must include `backup_secret_ref` pointing to an active, global
+`backup_passphrase` Secret. Backup schedules have no targets or telemetry
+thresholds, use UTC, and run no more frequently than hourly. Secret values and
+their reference are not returned in schedule responses; the controller
+resolves the current secret value when each run starts. The encrypted result
+stays in the same retained backup list for manual download. Successful and
+failed runs publish a `backup` status event to the Admin activity feed; event
+payloads contain only the backup/schedule ID and state.
+
+`GET /api/v1/admin/support-diagnostics?days=7` returns a versioned JSON
+document with `schema_version`, generation/period timestamps, controller/agent/
+worker/artifact versions, worker/artifact availability, bounded `resources`,
+bounded `workflows`, and a `privacy` declaration. Each workflow contains its
+registered operation, target identifier, mode/status/timestamps, failure
+codes, and up to 10 sanitized summaries (500 characters each); the response
+contains at most 250 resources, 50 workflows, and at most 100 recent source
+events per workflow when reading PostgreSQL. The requested period is 1–30
+days. It never includes raw worker stdout/stderr, secret values, process
+environments, or key material, and the endpoint does not upload data.
 
 Linux package updates are limited to registered Debian/Ubuntu targets and
 require an enabled update policy. In an `update_packages` request, the package
@@ -102,19 +142,27 @@ The endpoint group names reflect the current router and do not imply that a
 route is available to every role. Do not add routes to this list until the
 router and OpenAPI document expose them.
 
+When a workflow request or reconciliation is rejected because another job
+owns the target lock, the `409 ansible_target_busy` error includes an optional
+`error.blocking_job` object with that job's `id` and current `status`. The UI
+links directly to the blocking workflow. A `reconcile_required` job keeps the
+target locked until its explicit reconciliation finishes; the controller never
+marks an interrupted Apply as complete just to release the lock.
+
 Deleting an update policy requires explicit confirmation and destructive
 permission. The system-wide standard policy is protected, and a policy used by
 an enabled recurring schedule cannot be deleted until that schedule is paused.
 Deletion invalidates future applies for plans that reference that policy; the
 workflow/job history remains available.
 
-`GET /api/v1/ansible/worker-availability` reports heartbeat freshness and the
-latest artifact-manifest probe (`artifact_store_available` and
+`GET /api/v1/ansible/worker-availability` reports heartbeat freshness, the
+worker's reported build version, and the latest artifact-manifest probe (`artifact_store_available` and
 `artifact_store_checked_at`). A `false` artifact value means the worker is
 running but its configured versioned manifest endpoint did not return a
 successful HTTP response on the last probe.
 
-For registered LXC targets, `POST /api/v1/targets/{target_id}/docker/discovery`
+For registered LXC and Linux-server targets with a connected Linux agent,
+`POST /api/v1/targets/{target_id}/docker/discovery`
 persists each successful Docker inventory snapshot when PostgreSQL is enabled.
 `GET` on the same path returns the latest successful snapshot after reload; a
 failed later probe does not erase previously discovered containers. In

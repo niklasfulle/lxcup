@@ -227,6 +227,11 @@ pub(crate) async fn request_middleware(
             Err(response) => return response,
         };
     let method = request.method().clone();
+    let _backup_read_guard = if is_write_method(&method) && path != "/api/v1/admin/backups" {
+        Some(state.backup_gate.read().await)
+    } else {
+        None
+    };
     request.extensions_mut().insert(request_id);
     let audit_id = match reserve_request_audit(
         &state,
@@ -585,6 +590,7 @@ fn audit_action(method: &Method, path: &str) -> String {
     match (method.as_str(), parts.as_slice()) {
         ("POST", ["api", "v1", "auth", "logout"]) => "auth.logout".to_owned(),
         ("POST", ["api", "v1", "auth", "password"]) => "auth.password_changed".to_owned(),
+        ("POST", ["api", "v1", "admin", "backups"]) => "admin.backup_created".to_owned(),
         ("POST", ["api", "v1", "targets"]) => "target.created".to_owned(),
         ("DELETE", ["api", "v1", "targets", _]) => "target.deleted".to_owned(),
         ("POST", ["api", "v1", "targets", _, "docker", "discovery"]) => {
@@ -753,6 +759,14 @@ fn is_admin_only_route(path: &str) -> bool {
     path.starts_with("/api/v1/users")
         || path.starts_with("/api/v1/secrets")
         || path == "/api/v1/auth/audit"
+        || path.starts_with("/api/v1/admin/")
+}
+
+fn is_write_method(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    )
 }
 
 #[path = "health.rs"]

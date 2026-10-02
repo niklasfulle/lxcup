@@ -210,6 +210,7 @@ async fn scheduler_dispatches_due_inventory_once_and_advances_slot() {
         enabled: true,
         threshold: None,
         policy_id: None,
+        backup_secret_ref: None,
         last_run_at: None,
         next_run_at: chrono::Utc::now() - chrono::Duration::minutes(1),
         last_error: None,

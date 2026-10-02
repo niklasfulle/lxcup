@@ -12,6 +12,7 @@ pub enum SecretKind {
     SshPassword,
     SshKnownHosts,
     AgentToken,
+    BackupPassphrase,
     Generic,
 }
 

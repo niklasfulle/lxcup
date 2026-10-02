@@ -103,8 +103,8 @@ Agents initiate authenticated heartbeats; the controller does not poll agents
 to establish presence. Heartbeat freshness is computed from persisted agent
 signals. Telemetry samples are associated with their target and exposed through
 the target API; current UI depicts a rolling recent window. Docker containers
-are workloads discovered by an agent on a managed host, not standalone
-connections. For registered LXC targets, the controller persists the latest
+are workloads discovered by an agent on a managed Linux host, not standalone
+connections. For registered LXC and Linux-server targets, the controller persists the latest
 successful Docker inventory snapshot so it remains visible after a page reload
 or controller restart. Successful snapshots also retain a bounded history of
 container additions/removals, image/state/health transitions, restarts, and
@@ -141,6 +141,12 @@ secret-store records are retained because they may be shared.
   inventory is accepted only after server-side identity and input checks.
 - The artifact service serves versioned agent artifacts and manifests. It is
   not an arbitrary job input channel.
+
+For the current Linux agent release, the manifest lists separate `linux-amd64`
+and `linux-arm64` binaries. The worker verifies each SHA-256 digest before
+passing their local paths to Ansible; the target's gathered architecture selects
+the binary. Older manifests without ARM64 remain usable on x86-64, but an ARM64
+target is rejected before installation when its artifact is absent.
 
 The worker probes its configured versioned manifest at startup and every
 15 seconds thereafter. It records artifact availability with its two-second

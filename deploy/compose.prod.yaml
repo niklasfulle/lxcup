@@ -6,10 +6,13 @@ services:
     env_file: ../.env
     environment:
       LXCUP_ENV: production
+      LXCUP_BACKUP_DIR: /var/lib/lxcup/backups
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"
     read_only: true
+    volumes:
+      - lxcup-backups:/var/lib/lxcup/backups
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -52,5 +55,6 @@ services:
       - caddy-config:/config
 
 volumes:
+  lxcup-backups:
   caddy-data:
   caddy-config:

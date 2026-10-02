@@ -25,6 +25,9 @@ implementation rather than a separate design-token framework.
 - Reuse CSS custom properties from `frontend/src/styles.css` for semantic
   surfaces, lines, text, primary color, and status colors. `data-theme` selects
   the active theme.
+- Text inputs and dropdowns share a 40px control height, border, surface, and
+  padding through the global form-control defaults. Checkboxes keep their
+  compact, purpose-specific sizing.
 - Keep global CSS limited to reset/base behavior, theme variables, and cases
   that are awkward or impossible to express with the current Tailwind setup.
 - Prefer the existing square-edged, compact operational-console language.
