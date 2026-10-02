@@ -1,4 +1,4 @@
-export type ActivityIconName = "workflow" | "deploy" | "health" | "inventory" | "packages" | "configure" | "lxc" | "server" | "task" | "log" | "error";
+export type ActivityIconName = "workflow" | "deploy" | "health" | "inventory" | "packages" | "backup" | "configure" | "lxc" | "server" | "task" | "log" | "error";
 
 const operationIcons: Record<string, ActivityIconName> = {
   deploy_agent: "deploy",
@@ -23,6 +23,7 @@ const statusTones: Record<string, string> = {
   planned: "border-[var(--warning)]/40 bg-[var(--warning-soft)] text-[var(--warning)]",
   applying: "border-[var(--primary)]/40 bg-[var(--primary-soft)] text-lxcup-primary",
   succeeded: "border-[var(--success)]/40 bg-[var(--success-soft)] text-[var(--success)]",
+  created: "border-[var(--success)]/40 bg-[var(--success-soft)] text-[var(--success)]",
   completed: "border-[var(--success)]/40 bg-[var(--success-soft)] text-[var(--success)]",
   failed: "border-[var(--error)]/40 bg-[var(--error-soft)] text-[var(--error)]",
   aborted: "border-[var(--error)]/40 bg-[var(--error-soft)] text-[var(--error)]",
@@ -45,6 +46,7 @@ export function ActivityIcon({ name, className = "h-[18px] w-[18px]" }: Readonly
     health: <><path d="M10 2.5 16.5 5v4.5c0 4-2.7 6.7-6.5 9-3.8-2.3-6.5-5-6.5-9V5L10 2.5Z" /><path d="M4.5 10h3l1.4-2.5 2.2 5 1.2-2.5h3.2" /></>,
     inventory: <><path d="m10 2.5 6.5 3.7v7.6L10 17.5l-6.5-3.7V6.2L10 2.5Z" /><path d="m3.7 6.4 6.3 3.7 6.3-3.7M10 10.1v7" /></>,
     packages: <><path d="M3.5 6 10 2.5 16.5 6 10 9.6 3.5 6Z" /><path d="M3.5 6v8L10 17.5l6.5-3.5V6M10 9.6v7.9" /><path d="M7 4.2 13.5 7.8" /></>,
+    backup: <><path d="M4 3h10l3 3v11H4z" /><path d="M7 3v5h7V3M7 17v-5h7v5" /></>,
     configure: <><circle cx="10" cy="10" r="2.4" /><path d="M10 2.5v2m0 11v2m7.5-7.5h-2m-11 0h-2m12.8-5.3-1.4 1.4m-7.8 7.8-1.4 1.4m10.6 0-1.4-1.4m-7.8-7.8L5.7 4.7" /><circle cx="10" cy="10" r="6.5" /></>,
     lxc: <><path d="m10 2.7 6.5 3.7v7.2L10 17.3l-6.5-3.7V6.4L10 2.7Z" /><path d="m3.8 6.5 6.2 3.6 6.2-3.6M10 10.1v6.7" /></>,
     server: <><rect x="3" y="3" width="14" height="5.5" rx="1" /><rect x="3" y="11.5" width="14" height="5.5" rx="1" /><path d="M6 5.75h.01M9 5.75h5M6 14.25h.01M9 14.25h5" /></>,

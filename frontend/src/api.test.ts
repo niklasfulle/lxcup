@@ -6,6 +6,7 @@ import {
   createAnsibleJob,
   createContainerAction,
   createEnrollment,
+  createAdminBackup,
   createSecret,
   createTarget,
   deleteSecret,
@@ -92,6 +93,34 @@ describe("ApiClient", () => {
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer opaque-test-token");
     await expect(client.post("/api/v1/targets", {})).rejects.toMatchObject({ status: 403, code: "permission_denied" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("streams encrypted admin backups and blocks non-admin downloads locally", async () => {
+    const backupBlob = new Blob(["ciphertext"]);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, blob: async () => backupBlob } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient();
+    client.setCredentials("admin-token", "admin");
+    const backup = await client.getBlob("/api/v1/admin/backups/backup-1");
+    expect(backup).toBe(backupBlob);
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("accept")).toBe("application/octet-stream");
+
+    client.setCredentials("user-token", "user");
+    await expect(client.getBlob("/api/v1/admin/backups/backup-1")).rejects.toMatchObject({ status: 403, code: "permission_denied" });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("sends the one-time backup passphrase only with the create request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { id: "backup-1", created_at: "2026-10-02T10:00:00Z", size_bytes: 2048 }, request_id: "req-backup" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    apiClient.setCredentials("admin-token", "admin");
+
+    await createAdminBackup("correct horse battery staple");
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({ confirmed: true, passphrase: "correct horse battery staple" });
+    expect(String(init.headers)).not.toContain("correct horse battery staple");
+    apiClient.setCredentials(null, null);
   });
 
   it("sends same-origin cookies and mirrors the CSRF cookie on state-changing requests", async () => {

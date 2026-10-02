@@ -85,7 +85,7 @@ function stepMarker(status: ReturnType<typeof stepStatus>, index: number) {
 
 function lifecycleCallout(target: TargetDto, isManaged: boolean, isDisabled: boolean) {
   if (isManaged) {
-    return <div className={cn("border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-[var(--ink)]", "border-[#b7e7d0] bg-[var(--success-soft)]")}><strong>Der LXC ist bereit.</strong><p>Der Agent{target.agent_version ? ` v${target.agent_version}` : ""} ist verbunden. Healthchecks und Workflows können jetzt ausgeführt werden.</p><Link className="mt-3 inline-block text-xs font-semibold text-lxcup-primary hover:underline" to="/workflows">Workflows öffnen →</Link></div>;
+    return <div className={cn("border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-[var(--ink)]", "border-[#b7e7d0] bg-[var(--success-soft)]")}><strong>Der LXC ist bereit.</strong><p>Der Agent{target.agent_version ? ` v${target.agent_version}` : ""} ist verbunden. Healthchecks und Workflows können jetzt ausgeführt werden.</p><Link aria-label="Workflows öffnen →" className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-lxcup-primary hover:underline" to="/workflows">Workflows öffnen <span className="text-base leading-none" aria-hidden="true">→</span></Link></div>;
   }
   if (isDisabled) {
     return <div className="border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-[var(--ink)]"><strong>Das Ziel ist deaktiviert.</strong><p>Es werden keine Agenten- oder Workflow-Aktionen ausgeführt.</p></div>;

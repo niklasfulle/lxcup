@@ -19,6 +19,8 @@ export const queryKeys = {
   schedules: ["schedules"] as const,
   updatePolicies: ["update-policies"] as const,
   users: ["users"] as const,
+  secrets: ["secrets"] as const,
+  adminBackups: ["admin-backups"] as const,
   userAudit: ["user-audit"] as const,
 };
 
@@ -104,7 +106,7 @@ export function useAnsibleJobEvents(jobId: string | undefined, active: boolean) 
     queryKey: jobId ? queryKeys.ansibleJobEvents(jobId) : ["ansible-jobs", "none", "events"],
     queryFn: ({ signal }) => getAnsibleJobEvents(jobId!, signal),
     enabled: Boolean(jobId),
-    refetchInterval: active ? 2_000 : false,
+    refetchInterval: active ? 1_000 : false,
   });
 }
 

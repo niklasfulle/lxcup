@@ -84,7 +84,7 @@ export function UpdatePoliciesPage() {
         {mutation.error ? <p className="m-0 font-semibold text-[var(--error)]" role="alert">{mutation.error.message}</p> : null}
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line)] pt-4">
           <p className="m-0 text-xs text-[var(--muted)]">{targetList.length ? `${targetList.length} Ziele verfügbar` : "Lege zuerst ein Ziel an, für das du Updates freigeben möchtest."}</p>
-          <button className={primaryButtonClass} type="submit" disabled={!id.trim() || !targetId || mutation.isPending || !targetList.length}>{mutation.isPending ? "Wird gespeichert…" : "Policy speichern"}<span aria-hidden="true">→</span></button>
+           <button className={primaryButtonClass} type="submit" disabled={!id.trim() || !targetId || mutation.isPending || !targetList.length}>{mutation.isPending ? "Wird gespeichert…" : "Policy speichern"}<span className="text-base leading-none" aria-hidden="true">→</span></button>
         </div>
       </form>
     </section>
@@ -96,7 +96,7 @@ export function UpdatePoliciesPage() {
       </div>
       {deleteMutation.error ? <p className="mb-3 font-semibold text-[var(--error)]" role="alert">Policy konnte nicht gelöscht werden: {deleteMutation.error.message}</p> : null}
       <PolicyContent policies={policies} targets={targetList} onDeletePolicy={confirmPolicyDeletion} deletingPolicyId={deleteMutation.isPending ? deleteMutation.variables : undefined} />
-      <div className="mt-4 border-t border-[var(--line)] pt-4"><Link className="text-sm font-semibold text-lxcup-primary hover:underline" to="/schedules">← Zu den Zeitplänen</Link></div>
+       <div className="mt-4 border-t border-[var(--line)] pt-4"><Link className="inline-flex items-center gap-1 text-sm font-semibold text-lxcup-primary hover:underline" to="/schedules"><span className="text-lg leading-none" aria-hidden="true">←</span>Zu den Zeitplänen</Link></div>
     </section>
   </div>;
 }

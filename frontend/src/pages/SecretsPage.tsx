@@ -17,6 +17,7 @@ const secretKinds: Array<{ value: SecretKind; label: string }> = [
   { value: "ssh_private_key", label: "SSH Private Key" },
   { value: "ssh_password", label: "SSH Passwort" },
   { value: "ssh_known_hosts", label: "SSH Known Hosts" },
+  { value: "backup_passphrase", label: "Backup-Passphrase" },
   { value: "generic", label: "Allgemein" },
 ];
 
@@ -98,7 +99,7 @@ export function SecretsPage() {
         {queryContent(audit.isLoading, Boolean(audit.error), "Lade Audit-Ereignisse…", `Audit konnte nicht geladen werden: ${formatSecretError(audit.error)}`, <ul className="m-0 grid list-none gap-2 p-0">
           {(audit.data ?? []).map((event, index) => <li className="grid gap-2 border border-[var(--line)] bg-[var(--paper-muted)] p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center" key={`${event.secret_id}-${event.occurred_at}-${index}`}>
             <div className="min-w-0"><strong className="block">{secretAuditActionLabel(event.action)}</strong><span className="mt-1 block break-all text-xs text-[var(--muted)]">Secret-ID: {event.secret_id}</span><span className="mt-1 block text-xs text-[var(--muted)]">{new Date(event.occurred_at).toLocaleString()} · durch {event.role}</span></div>
-            {event.related_job_id ? <Link className={secondaryButton} to={`/workflows/${event.related_job_id}`}>Workflow öffnen <span className="ml-2" aria-hidden="true">→</span></Link> : null}
+             {event.related_job_id ? <Link className={secondaryButton} to={`/workflows/${event.related_job_id}`}>Workflow öffnen <span className="ml-2 text-base leading-none" aria-hidden="true">→</span></Link> : null}
           </li>)}
           {audit.data?.length === 0 ? <li className="grid min-h-20 place-items-center border border-dashed border-[var(--line)] bg-[var(--paper-muted)] px-4 text-center text-sm text-[var(--muted)]">Noch keine Secret-Lebenszyklus-Ereignisse vorhanden.</li> : null}
         </ul>)}

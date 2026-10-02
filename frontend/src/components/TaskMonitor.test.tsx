@@ -40,6 +40,18 @@ describe("TaskMonitor", () => {
     expect(screen.getAllByRole("link", { name: "Öffnen" })[1]).toHaveAttribute("href", "/workflows/job-1");
   });
 
+  it("shows encrypted backup creation in the activity feed with a safe link", () => {
+    render(<MemoryRouter><TaskMonitor events={[
+      { id: "backup-created", receivedAt: "2026-10-02T12:00:00Z", event: { type: "Status", payload: { resource: "backup", resource_id: "backup-1", state: "created" } } },
+      { id: "backup-failed", receivedAt: "2026-10-02T12:01:00Z", event: { type: "Status", payload: { resource: "backup", resource_id: "nightly-backup", state: "failed" } } },
+    ]} onClear={() => undefined} collapsed={false} onToggle={() => undefined} /></MemoryRouter>);
+
+    expect(screen.getByText("Backup erstellt")).toBeInTheDocument();
+    expect(screen.getByText("Backup fehlgeschlagen")).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "Backups" })).toHaveLength(2);
+    expect(screen.getAllByRole("link", { name: "Backups" })[0]).toHaveAttribute("href", "/admin/backups");
+  });
+
   it("renders empty state and all non-navigation event kinds", () => {
     const onClear = vi.fn();
     const { rerender } = render(<MemoryRouter><TaskMonitor events={[]} onClear={onClear} collapsed={false} onToggle={() => undefined} /></MemoryRouter>);

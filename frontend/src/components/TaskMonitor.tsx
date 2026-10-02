@@ -74,6 +74,9 @@ function activityAppearance(item: GlobalEvent): Readonly<{ icon: ActivityIconNam
   } else if (event.payload.resource === "container_action") {
     icon = "lxc";
     label = "LXC-Aktion";
+  } else if (event.payload.resource === "backup") {
+    icon = "backup";
+    label = "Backup";
   } else {
     icon = "server";
     label = `Status ${event.payload.resource}`;
@@ -85,6 +88,9 @@ function eventTitle(item: GlobalEvent): string {
   const { event } = item;
   if (event.type === "Status" && event.payload.resource === "ansible_job") {
     return item.jobDetails ? `${item.jobDetails.operationLabel} · ${item.jobDetails.resourceName}` : "Ansible-Job";
+  }
+  if (event.type === "Status" && event.payload.resource === "backup") {
+    return event.payload.state === "created" ? "Backup erstellt" : "Backup fehlgeschlagen";
   }
   if (event.type === "Status") return `${event.payload.resource} · ${event.payload.state}`;
   if (event.type === "Task") return `Task · ${event.payload.state}`;
@@ -103,5 +109,6 @@ function JobStatus({ event }: Readonly<{ event: ApiEvent }>) {
 function EventLink({ event }: Readonly<{ event: ApiEvent }>) {
   if (event.type === "Status" && event.payload.resource === "container_action") return <Link className="self-center text-[10px] font-semibold text-lxcup-primary hover:underline" to={`/containers/${event.payload.resource_id}`}>Öffnen</Link>;
   if (event.type === "Status" && event.payload.resource === "ansible_job") return <Link className="self-center text-[10px] font-semibold text-lxcup-primary hover:underline" to={`/workflows/${event.payload.resource_id}`}>Öffnen</Link>;
+  if (event.type === "Status" && event.payload.resource === "backup") return <Link className="self-center text-[10px] font-semibold text-lxcup-primary hover:underline" to="/admin/backups">Backups</Link>;
   return null;
 }

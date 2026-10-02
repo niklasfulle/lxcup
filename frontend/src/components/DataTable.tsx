@@ -33,7 +33,7 @@ function sortAriaValue(sorted: false | "asc" | "desc") {
 }
 
 function sortIndicator(sorted: false | "asc" | "desc") {
-  if (sorted === "asc") return " ↑";
-  if (sorted === "desc") return " ↓";
+  if (sorted === "asc") return <span className="ml-1 text-base leading-none" aria-hidden="true">↑</span>;
+  if (sorted === "desc") return <span className="ml-1 text-base leading-none" aria-hidden="true">↓</span>;
   return "";
 }

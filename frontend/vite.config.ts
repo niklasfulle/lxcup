@@ -16,6 +16,7 @@ const staticClientRoutes = new Set([
   "/account/password",
   "/admin/users",
   "/admin/audit",
+  "/wiki",
 ]);
 
 export function isKnownClientRoute(pathname: string) {

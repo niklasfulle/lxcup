@@ -163,6 +163,7 @@ export type TelemetryDto = { target_id: string; collected_at: string | null; par
 export type TelemetryAlertDto = { id: string; target_id: string; target_name: string; target_kind: TargetKind; target_address: string; metric: string; severity: "warning" | "critical"; value_basis_points: number | null; threshold_basis_points: number | null; age_seconds: number | null; triggered_at: string; observed_at: string };
 export type ThresholdRuleDto = { metric: "cpu_basis_points" | "memory_basis_points" | "storage_basis_points" | "heartbeat_age_seconds"; operator: "greater_than_or_equal" | "less_than_or_equal"; value: number };
 export type ScheduleDto = { id: string; operation: string; timezone: string; target_ids: string[]; every_minutes: number; enabled: boolean; threshold: ThresholdRuleDto | null; policy_id: string | null; last_run_at: string | null; next_run_at: string; last_error: string | null };
+export type CreateScheduleRequest = Omit<ScheduleDto, "last_run_at" | "next_run_at" | "last_error"> & { backup_secret_ref?: string | null };
 export type UpdatePolicyDto = { id: string; allowed_targets: string[]; allowed_packages: string[]; maintenance_start_minute: number; maintenance_end_minute: number; timezone: string; maximum_risk: "low" | "medium" | "high"; enabled: boolean };
 
 export type CreateAnsibleJobRequest = {
@@ -178,7 +179,7 @@ export type CreateAnsibleJobRequest = {
   approved_plan_job_id?: string;
 };
 
-export type SecretKind = "ssh_private_key" | "ssh_password" | "ssh_known_hosts" | "agent_token" | "generic";
+export type SecretKind = "ssh_private_key" | "ssh_password" | "ssh_known_hosts" | "agent_token" | "backup_passphrase" | "generic";
 export type SecretScope = { type: "global" } | { type: "node"; id: string } | { type: "container"; id: number };
 export type SecretMetadata = {
   metadata: {
@@ -508,7 +509,7 @@ export function listUserAudit(filters: UserAuditFilters, signal?: AbortSignal) {
 }
 export function changePassword(newPassword: string, currentPassword?: string, signal?: AbortSignal) { return apiClient.changePassword(newPassword, currentPassword, signal); }
 export function listSchedules(signal?: AbortSignal) { return apiClient.get<ScheduleDto[]>("/api/v1/schedules", signal); }
-export function createSchedule(request: Omit<ScheduleDto, "last_run_at" | "next_run_at" | "last_error">, signal?: AbortSignal) { return apiClient.post<ScheduleDto>("/api/v1/schedules", request, signal); }
+export function createSchedule(request: CreateScheduleRequest, signal?: AbortSignal) { return apiClient.post<ScheduleDto>("/api/v1/schedules", request, signal); }
 export function setScheduleEnabled(id: string, enabled: boolean, signal?: AbortSignal) { return apiClient.patch<ScheduleDto>(`/api/v1/schedules/${encodeURIComponent(id)}`, { enabled }, signal); }
 export function listUpdatePolicies(signal?: AbortSignal) { return apiClient.get<UpdatePolicyDto[]>("/api/v1/update-policies", signal); }
 export function createUpdatePolicy(request: Omit<UpdatePolicyDto, "enabled"> & { enabled?: boolean }, signal?: AbortSignal) { return apiClient.post<UpdatePolicyDto>("/api/v1/update-policies", request, signal); }
@@ -522,7 +523,7 @@ export function listAnsibleJobs(signal?: AbortSignal) { return apiClient.get<Ans
 export function getWorkerAvailability(signal?: AbortSignal) { return apiClient.get<WorkerAvailabilityDto>("/api/v1/ansible/worker-availability", signal); }
 export function getSupportDiagnostics(days = 7, signal?: AbortSignal) { return apiClient.get<SupportDiagnosticsDto>(`/api/v1/admin/support-diagnostics?days=${days}`, signal); }
 export function listAdminBackups(signal?: AbortSignal) { return apiClient.get<AdminBackupDto[]>("/api/v1/admin/backups", signal); }
-export function createAdminBackup(signal?: AbortSignal) { return apiClient.post<AdminBackupDto>("/api/v1/admin/backups", { confirmed: true }, signal); }
+export function createAdminBackup(passphrase: string, signal?: AbortSignal) { return apiClient.post<AdminBackupDto>("/api/v1/admin/backups", { confirmed: true, passphrase }, signal); }
 export function downloadAdminBackup(id: string, signal?: AbortSignal) { return apiClient.getBlob(`/api/v1/admin/backups/${encodeURIComponent(id)}`, signal); }
 export function getAnsibleJob(id: string, signal?: AbortSignal) { return apiClient.get<AnsibleJobDto>(`/api/v1/ansible/jobs/${id}`, signal); }
 export function getAnsibleJobEvents(id: string, signal?: AbortSignal) { return apiClient.get<AnsibleJobEvent[]>(`/api/v1/ansible/jobs/${id}/events`, signal); }

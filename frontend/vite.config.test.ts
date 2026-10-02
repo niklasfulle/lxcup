@@ -22,6 +22,7 @@ describe("frontend document status", () => {
   it("recognizes registered static and parameterized client routes", () => {
     expect(isKnownClientRoute("/" )).toBe(true);
     expect(isKnownClientRoute("/admin/users/")).toBe(true);
+    expect(isKnownClientRoute("/wiki")).toBe(true);
     expect(isKnownClientRoute("/targets/target-1/packages")).toBe(true);
     expect(isKnownClientRoute("/workflows/job-1")).toBe(true);
     expect(isKnownClientRoute("/missing-route")).toBe(false);
@@ -39,6 +40,7 @@ describe("frontend document status", () => {
 
     expect(invoke("/missing-route?from=direct-link")).toBe(404);
     expect(invoke("/admin/users")).toBe(200);
+    expect(invoke("/wiki")).toBe(200);
     expect(invoke("/api/v1/unknown")).toBe(200);
     expect(invoke("/missing.js", "*/*")).toBe(200);
     expect(invoke("/missing-route", "text/html", "POST")).toBe(200);

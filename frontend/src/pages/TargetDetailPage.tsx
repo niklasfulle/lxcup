@@ -99,8 +99,8 @@ export function TargetDetailPage() {
       <article className="grid min-h-24 content-between gap-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><span className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">Agent-Version</span><strong className="text-lg">{target.agent_version ?? <span className="text-sm font-normal text-[var(--muted)]">Noch nicht gemeldet</span>}</strong></article>
       <article className="grid min-h-24 content-between gap-3 border border-[var(--line)] bg-[var(--panel)] p-4 text-[var(--ink)]"><span className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">Letzter Heartbeat</span><div><strong className="block">{target.agent_last_seen_at ? new Date(target.agent_last_seen_at).toLocaleString() : "Noch nicht gemeldet"}</strong><span className={cn("mt-2 inline-flex items-center px-2 py-1 text-xs font-bold", stale ? "bg-[var(--warning-soft)] text-[var(--warning)]" : "bg-[var(--success-soft)] text-[var(--success)]")}>{stale ? "Veraltet" : "Aktuell"}</span></div></article>
     </section>
-    {target.agent_version && target.latest_agent_version && target.agent_version !== target.latest_agent_version ? <output className="border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--ink)]"><strong className="block">Agent-Update verfügbar</strong><span>Installiert: v{target.agent_version} · Verfügbar: v{target.latest_agent_version}. Starte „Agent aktualisieren“ über Workflows.</span></output> : null}
-    {stale ? <output className="flex items-start gap-3 border border-[var(--warning)] bg-[var(--warning-soft)] p-4 text-sm text-[var(--ink)]"><span className="grid h-6 w-6 shrink-0 place-items-center border border-[var(--warning)] text-xs font-bold text-[var(--warning)]" aria-hidden="true">!</span><span><strong className="block">Heartbeat veraltet</strong><span>Der letzte Heartbeat liegt mehr als 2 Minuten zurück. Telemetrie und Agentstatus können veraltet sein.</span></span></output> : null}
+    <TargetAgentVersionWarning target={target} />
+    <TargetHeartbeatWarning stale={stale} />
     <section className="grid grid-cols-1 gap-4 xl:grid-cols-2" aria-label="Ressourcenstatus">
       <TargetPackageInventory target={target} inventory={inventory} stale={inventoryStale} />
       <TargetDockerInventory target={target} host={hostContainer} workloads={dockerWorkloads} discovery={dockerDiscovery} targetInventory={targetDockerInventory} stale={dockerStale} discovering={target.kind === "linux_server" ? discoverServerDocker.isPending : discoverDocker.isPending} discoveryError={target.kind === "linux_server" ? discoverServerDocker.error : discoverDocker.error} onDiscover={() => target.kind === "linux_server" ? discoverServerDocker.mutate() : discoverDocker.mutate()} />
@@ -108,6 +108,16 @@ export function TargetDetailPage() {
     </section>
     <TargetWorkflowList targetId={target.id} jobs={jobs} targetJobs={targetJobs} />
   </div>;
+}
+
+function TargetAgentVersionWarning({ target }: Readonly<{ target: Target }>) {
+  if (!target.agent_version || !target.latest_agent_version || target.agent_version === target.latest_agent_version) return null;
+  return <output className="border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--ink)]"><strong className="block">Agent-Update verfügbar</strong><span>Installiert: v{target.agent_version} · Verfügbar: v{target.latest_agent_version}. Starte „Agent aktualisieren“ über Workflows.</span></output>;
+}
+
+function TargetHeartbeatWarning({ stale }: Readonly<{ stale: boolean }>) {
+  if (!stale) return null;
+  return <output className="flex items-start gap-3 border border-[var(--warning)] bg-[var(--warning-soft)] p-4 text-sm text-[var(--ink)]"><span className="grid h-6 w-6 shrink-0 place-items-center border border-[var(--warning)] text-xs font-bold text-[var(--warning)]" aria-hidden="true">!</span><span><strong className="block">Heartbeat veraltet</strong><span>Der letzte Heartbeat liegt mehr als 2 Minuten zurück. Telemetrie und Agentstatus können veraltet sein.</span></span></output>;
 }
 
 function TargetPackageInventory({ target, inventory, stale }: Readonly<{ target: Target; inventory: InventoryQuery; stale: boolean }>) {

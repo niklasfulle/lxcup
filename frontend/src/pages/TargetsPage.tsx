@@ -1,7 +1,7 @@
 import { cn } from "../classnames";
 import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
 import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createAnsibleJob, createSecret, createTarget, deleteTarget, listSecrets, type AnsibleJobDto, type SecretKind, type SecretMetadata, type TargetDto, type TargetKind, type TargetTransport } from "../api";
@@ -247,7 +247,7 @@ function BootstrapCard({ copied, onCopy }: Readonly<{ copied: boolean; onCopy: (
   return <aside className="grid content-start gap-3" aria-labelledby="bootstrap-card-title">
     <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Host vorbereiten</p>
     <h3 id="bootstrap-card-title">lxcup-Benutzer anlegen</h3>
-    <p className="text-[var(--muted)]">Kopiere das vollständige Bash-Skript, speichere es auf dem Zielhost und führe es dort als root aus. Es installiert bei Bedarf curl und sudo und legt danach den eingeschränkten SSH-Benutzer an.</p>
+    <p className="text-[var(--muted)]">Kopiere das vollständige Bash-Skript und speichere es auf dem Zielhost. Starte es mit bash: Als root läuft es direkt, andernfalls nutzt es sudo. Es installiert bei Bedarf curl und sudo, richtet den SSH-Benutzer ein und gibt die SSH-Hostschlüssel für das Known-Hosts-Secret aus. Weitere Skripte sind nicht nötig.</p>
     <ol className="m-0 grid list-none gap-3 border-y border-[var(--line)] py-4 pl-0">
       <li className="flex items-center gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center bg-[var(--panel)] text-[10px] font-bold text-lxcup-primary">1</span><span>Auf dem Zielhost anmelden</span></li>
       <li className="flex items-center gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center bg-[var(--panel)] text-[10px] font-bold text-lxcup-primary">2</span><span>Skript als Datei speichern und ausführen</span></li>
@@ -275,11 +275,11 @@ function WindowsSetupCard() {
 
 function ResourceRelationshipMap() {
   return <section className="mb-3 grid items-stretch gap-3 lg:grid-cols-[1fr_auto_1fr_auto_1fr] max-[720px]:grid-cols-1" aria-label="Zusammenspiel von Inventar und Automatisierung">
-    <article><span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-lxcup-primary text-xs font-bold text-white">1</span><div><strong>Infrastrukturinventar</strong><p>Nodes, LXC- &amp; Docker-Container werden entdeckt und bleiben in ihren eigenen Bereichen.</p><Link to="/containers">LXC-Inventar öffnen →</Link></div></article>
+     <article><span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-lxcup-primary text-xs font-bold text-white">1</span><div><strong>Infrastrukturinventar</strong><p>Nodes, LXC- &amp; Docker-Container werden entdeckt und bleiben in ihren eigenen Bereichen.</p><Link className="inline-flex items-center gap-1" to="/containers">LXC-Inventar öffnen <span className="text-lg leading-none" aria-hidden="true">→</span></Link></div></article>
     <span className="hidden self-center text-lg font-bold text-[var(--primary)] lg:block" aria-hidden="true">→</span>
     <article><span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-lxcup-primary text-xs font-bold text-white">2</span><div><strong>Zugangsprofil</strong><p>Adresse, Secret-Referenzen und Agent-Token beschreiben die Verbindung – nicht den Container selbst.</p></div></article>
     <span className="hidden self-center text-lg font-bold text-[var(--primary)] lg:block" aria-hidden="true">→</span>
-    <article><span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-lxcup-primary text-xs font-bold text-white">3</span><div><strong>LXC-Onboarding</strong><p>Verknüpft einen entdeckten LXC mit seinem Zugangsprofil und startet den Agenten.</p><Link to="/enrollments/new">LXC aufnehmen →</Link></div></article>
+     <article><span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-lxcup-primary text-xs font-bold text-white">3</span><div><strong>LXC-Onboarding</strong><p>Verknüpft einen entdeckten LXC mit seinem Zugangsprofil und startet den Agenten.</p><Link className="inline-flex items-center gap-1" to="/enrollments/new">LXC aufnehmen <span className="text-lg leading-none" aria-hidden="true">→</span></Link></div></article>
   </section>;
 }
 
@@ -335,7 +335,7 @@ function TargetForm(props: TargetFormProps) {
       <label><span className="inline-flex items-center gap-1" title="Verbindungsprotokoll, das automatisch aus dem Zieltyp abgeleitet wird.">Transport</span><input name="transport" value={selectedKind.transport.toUpperCase()} readOnly /></label>
     </div>
     {newSecretFor && <div className="col-span-full"><InlineSecretEditor newSecretFor={newSecretFor} name={newSecretName} kind={newSecretKind} value={newSecretValue} pending={inlineSecretPending} error={inlineSecretError} onCancel={() => props.onSecretForChange(null)} onNameChange={props.onSecretNameChange} onKindChange={props.onSecretKindChange} onValueChange={props.onSecretValueChange} onGenerate={() => props.onSecretValueChange(generateSecretValue())} onCreate={props.onCreateSecret} /></div>}
-    {props.onboardingAvailable ? <label className="col-span-full flex items-start gap-2 border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-sm font-medium"><input className="mt-0.5 shrink-0" type="checkbox" aria-label="Onboarding direkt starten" checked={props.startOnboarding} onChange={(event) => props.onStartOnboardingChange(event.target.checked)} /><span><strong className="block">Onboarding direkt starten</strong><span className="text-xs font-normal text-[var(--muted)]">Agent installieren und nach erfolgreichem Heartbeat einen Healthcheck ausführen.</span></span></label> : null}
+    {props.onboardingAvailable ? <label className="col-span-full flex min-w-0 items-start gap-3 border border-[var(--line)] bg-[var(--paper-muted)] p-4 text-sm font-medium"><input className="mt-0.5 h-4 w-4 shrink-0 p-0" type="checkbox" aria-label="Onboarding direkt starten" checked={props.startOnboarding} onChange={(event) => props.onStartOnboardingChange(event.target.checked)} /><span className="min-w-0 flex-1 break-words"><strong className="block">Onboarding direkt starten</strong><span className="block text-xs font-normal leading-relaxed text-[var(--muted)]">Agent installieren und nach erfolgreichem Heartbeat einen Healthcheck ausführen.</span></span></label> : null}
     <div className="col-span-full grid gap-2 border-t border-[var(--line)] pt-4">
       <button className="mx-auto inline-flex min-h-10 w-full max-w-[15rem] items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={createPending || props.credentialSecret === "" || props.agentSecret === "" || (selectedKind.transport === "ssh" && props.knownHostsSecret === "")}>{createPending ? "Wird angelegt…" : props.submitLabel}</button>
       {createError && <p className="text-center font-semibold text-[var(--error)]" role="alert">{createError}</p>}
@@ -344,7 +344,8 @@ function TargetForm(props: TargetFormProps) {
 }
 
 function SecretSelect({ label, title, value, options, onChange, onNew, emptyLabel = "Secret auswählen" }: Readonly<{ label: string; title: string; value: string; options: SecretMetadata[]; onChange: (value: string) => void; onNew: () => void; emptyLabel?: string }>) {
-  return <label><span className="inline-flex items-center gap-1" title={title}>{label}</span><div className="flex items-stretch gap-2"><select value={value} onChange={(event) => onChange(event.target.value)} required><option value="">{emptyLabel}</option>{options.map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select><button className="inline-flex min-h-9 shrink-0 items-center justify-center gap-1 border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" type="button" onClick={onNew}>＋ Neu</button></div></label>;
+  const selectId = useId();
+  return <div className="grid min-w-0 gap-1.5"><label className="truncate text-xs font-semibold text-[var(--muted)]" htmlFor={selectId} title={title}>{label}</label><div className="flex min-w-0 items-stretch gap-2"><select className="min-w-0 flex-1" id={selectId} value={value} onChange={(event) => onChange(event.target.value)} required><option value="">{emptyLabel}</option>{options.map((item) => <option key={item.metadata.metadata.id} value={item.metadata.metadata.id}>{item.metadata.metadata.name}</option>)}</select><button className="inline-flex min-h-10 shrink-0 items-center justify-center gap-1 border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" type="button" onClick={onNew}>＋ Neu</button></div></div>;
 }
 
 function InlineSecretEditor({ newSecretFor, name, kind, value, pending, error, onCancel, onNameChange, onKindChange, onValueChange, onGenerate, onCreate }: Readonly<{ newSecretFor: "credential" | "known_hosts" | "agent"; name: string; kind: SecretKind; value: string; pending: boolean; error?: string; onCancel: () => void; onNameChange: (value: string) => void; onKindChange: (value: SecretKind) => void; onValueChange: (value: string) => void; onGenerate: () => void; onCreate: () => void }>) {
@@ -365,7 +366,9 @@ function OnboardingActivities({ deployment, health, inventory }: Readonly<{ depl
 
 function jobActivity(job: JobMutationView, pendingLabel: string, idleLabel?: string) {
   if (job.isPending) return <span className="text-[var(--muted)]"> {pendingLabel}</span>;
-  if (job.data) return <Link className="mt-3 inline-block text-xs font-semibold text-lxcup-primary hover:underline" to={`/workflows/${job.data.id}`}>Protokoll öffnen →</Link>;
+  if (job.data) {
+    return <Link className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-lxcup-primary hover:underline" to={`/workflows/${job.data.id}`}>Protokoll öffnen <span className="text-base leading-none" aria-hidden="true">→</span></Link>;
+  }
   return idleLabel ? <p className="text-[var(--muted)]">{idleLabel}</p> : null;
 }
 
