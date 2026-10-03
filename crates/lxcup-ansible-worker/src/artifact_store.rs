@@ -32,6 +32,21 @@ pub(crate) async fn is_available(client: &reqwest::Client, base_url: &str) -> bo
     supports_manifest(&manifest)
 }
 
+pub(crate) async fn probe_and_persist(
+    repository: &WorkerHeartbeatRepository,
+    worker_name: &str,
+    worker_version: &str,
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<(bool, chrono::DateTime<Utc>), lxcup_persistence::RepositoryError> {
+    let available = is_available(client, base_url).await;
+    let checked_at = Utc::now();
+    repository
+        .record(worker_name, worker_version, available, checked_at)
+        .await?;
+    Ok((available, checked_at))
+}
+
 fn supports_manifest(manifest: &serde_json::Value) -> bool {
     manifest.get("version").and_then(serde_json::Value::as_str) == Some(lxcup_core::VERSION)
         && manifest
@@ -69,20 +84,35 @@ pub(crate) async fn report_availability(
     let mut next_probe = tokio::time::Instant::now();
     let mut previous_status = None;
     loop {
-        if tokio::time::Instant::now() >= next_probe {
-            available = is_available(&client, &base_url).await;
-            checked_at = Utc::now();
-            match (previous_status, available) {
-                (None, false) | (Some(true), false) => tracing::warn!(
-                    "artifact store is unavailable; the worker will retry its health check"
-                ),
-                (Some(false), true) => tracing::info!("artifact store is available again"),
-                _ => {}
+        let probe_due = tokio::time::Instant::now() >= next_probe;
+        if probe_due {
+            match probe_and_persist(
+                &repository,
+                &worker_name,
+                &worker_version,
+                &client,
+                &base_url,
+            )
+            .await
+            {
+                Ok((probe_status, probe_checked_at)) => {
+                    available = probe_status;
+                    checked_at = probe_checked_at;
+                    match (previous_status, available) {
+                        (None, false) | (Some(true), false) => tracing::warn!(
+                            "artifact store is unavailable; the worker will retry its health check"
+                        ),
+                        (Some(false), true) => {
+                            tracing::info!("artifact store is available again")
+                        }
+                        _ => {}
+                    }
+                    previous_status = Some(available);
+                }
+                Err(error) => tracing::error!(?error, "worker heartbeat failed"),
             }
-            previous_status = Some(available);
             next_probe = tokio::time::Instant::now() + PROBE_INTERVAL;
-        }
-        if let Err(error) = repository
+        } else if let Err(error) = repository
             .record(&worker_name, &worker_version, available, checked_at)
             .await
         {
