@@ -127,7 +127,12 @@ pub(crate) async fn list_backups(
     Extension(role): Extension<ActorRole>,
 ) -> Result<Json<ApiEnvelope<Vec<BackupInfo>>>, ApiError> {
     require_admin(role)?;
-    let directory = backup_directory()?;
+    list_backups_from(backup_directory()?).await
+}
+
+async fn list_backups_from(
+    directory: PathBuf,
+) -> Result<Json<ApiEnvelope<Vec<BackupInfo>>>, ApiError> {
     let backups = tokio::task::spawn_blocking(move || list_backup_files(&directory))
         .await
         .map_err(|_| backup_unavailable())??;
@@ -227,8 +232,15 @@ pub(crate) async fn download_backup(
     Path(backup_id): Path<String>,
 ) -> Result<Response<Body>, ApiError> {
     require_admin(role)?;
+    download_backup_from(backup_id, backup_directory()?).await
+}
+
+async fn download_backup_from(
+    backup_id: String,
+    directory: PathBuf,
+) -> Result<Response<Body>, ApiError> {
     let id = Uuid::parse_str(&backup_id).map_err(|_| ApiError::not_found("backup not found"))?;
-    let path = backup_file_path(&backup_directory()?, id);
+    let path = backup_file_path(&directory, id);
     let file = File::open(&path)
         .await
         .map_err(|_| ApiError::not_found("backup not found"))?;

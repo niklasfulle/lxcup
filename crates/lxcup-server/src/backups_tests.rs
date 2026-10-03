@@ -1,8 +1,12 @@
 use super::*;
-use age::{Decryptor, secrecy::SecretString};
-use axum::{Extension, Json, extract::State};
-use lxcup_core::ActorRole;
-use std::io::Read;
+use age::{
+    Decryptor,
+    secrecy::{ExposeSecret, SecretString},
+};
+use axum::{Extension, Json, body::to_bytes, extract::State};
+use lxcup_core::{ActorRole, ContainerId, SecretValue};
+use lxcup_secrets::{CreateSecret, InMemorySecretStore, SecretStore};
+use std::{io::Read, sync::Arc};
 
 struct FakeToolchain {
     fail_at: Option<&'static str>,
@@ -105,6 +109,31 @@ fn backup_configuration_requires_supported_database_and_bounded_retention() {
 }
 
 #[test]
+fn backup_configuration_accepts_custom_paths_and_retention_boundaries() {
+    let directory = PathBuf::from("/tmp/lxcup-backups");
+    let secrets = PathBuf::from("/tmp/lxcup-secrets");
+    for retention in ["1", "3650"] {
+        let paths = configured_backup_paths(
+            Some("postgres://backup:pw@db.example/lxcup".to_owned()),
+            Some(retention.to_owned()),
+            Some(directory.clone()),
+            Some(secrets.clone()),
+        )
+        .unwrap();
+        assert_eq!(paths.directory, directory);
+        assert_eq!(paths.secrets, secrets);
+        assert_eq!(paths.retention_days, retention.parse::<u32>().unwrap());
+    }
+    assert_eq!(
+        configured_backup_paths(None, None, None, None)
+            .err()
+            .unwrap()
+            .code,
+        "backup_not_configured"
+    );
+}
+
+#[test]
 fn database_dump_command_keeps_credentials_out_of_arguments_and_inherited_environment() {
     let mut database_url = url::Url::parse(
         "postgresql://db.example:5434/lxcup?sslmode=verify-full&sslrootcert=%2Fca.crt",
@@ -189,6 +218,38 @@ fn backup_command_does_not_inherit_secret_environment_values() {
         .collect::<Vec<_>>();
     assert!(!inherited.iter().any(|key| key.contains("SECRET")));
     assert!(!inherited.iter().any(|key| key == "DATABASE_URL"));
+}
+
+#[test]
+fn system_toolchain_sanitizes_archive_and_encryption_failures() {
+    let root = env::temp_dir().join(format!("lxcup-system-toolchain-test-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let tools = SystemBackupToolchain;
+
+    let archive_error = tools
+        .create_archive(&root.join("missing-workspace"), &root.join("backup.tar"))
+        .unwrap_err();
+    assert_eq!(archive_error.code, "backup_archive_failed");
+    assert!(
+        !archive_error
+            .message
+            .contains(root.to_string_lossy().as_ref())
+    );
+
+    let encryption_error = tools
+        .encrypt(
+            &root.join("missing-archive.tar"),
+            &root.join("backup.tar.age"),
+            test_passphrase(),
+        )
+        .unwrap_err();
+    assert_eq!(encryption_error.code, "backup_encryption_failed");
+    assert!(
+        !encryption_error
+            .message
+            .contains(root.to_string_lossy().as_ref())
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -279,6 +340,220 @@ fn backup_listing_includes_only_generated_regular_files() {
 }
 
 #[test]
+fn backup_listing_handles_missing_directory_and_caps_newest_results() {
+    let root = env::temp_dir().join(format!("lxcup-backup-list-limit-{}", Uuid::new_v4()));
+    let absent = root.join("not-created");
+    assert!(list_backup_files(&absent).unwrap().is_empty());
+    fs::create_dir_all(&root).unwrap();
+
+    for index in 0..(MAX_LISTED_BACKUPS + 1) {
+        let path = backup_file_path(&root, Uuid::new_v4());
+        fs::write(&path, index.to_string()).unwrap();
+        let modified =
+            SystemTime::now() - std::time::Duration::from_secs((MAX_LISTED_BACKUPS - index) as u64);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+    fs::create_dir(root.join(format!("lxcup-{}.tar.age", Uuid::new_v4()))).unwrap();
+
+    let listed = list_backup_files(&root).unwrap();
+    assert_eq!(listed.len(), MAX_LISTED_BACKUPS);
+    assert!(
+        listed
+            .windows(2)
+            .all(|pair| pair[0].created_at >= pair[1].created_at)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn backup_file_info_rejects_missing_paths_and_directories() {
+    let root = env::temp_dir().join(format!("lxcup-backup-info-test-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let missing = info_for_file(Uuid::new_v4(), &root.join("missing.tar.age"))
+        .err()
+        .unwrap();
+    assert_eq!(missing.status, axum::http::StatusCode::NOT_FOUND);
+
+    let directory = root.join("not-a-backup-file");
+    fs::create_dir(&directory).unwrap();
+    let non_file = info_for_file(Uuid::new_v4(), &directory).err().unwrap();
+    assert_eq!(non_file.status, axum::http::StatusCode::NOT_FOUND);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn backup_listing_endpoint_authorizes_admin_and_returns_sorted_files() {
+    let root = env::temp_dir().join(format!("lxcup-backups-endpoint-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let older = Uuid::new_v4();
+    let newer = Uuid::new_v4();
+    let older_path = backup_file_path(&root, older);
+    let newer_path = backup_file_path(&root, newer);
+    fs::write(&older_path, b"older backup").unwrap();
+    fs::write(&newer_path, b"newer backup").unwrap();
+    let old_time = SystemTime::now() - std::time::Duration::from_secs(60);
+    fs::File::options()
+        .write(true)
+        .open(&older_path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(old_time))
+        .unwrap();
+
+    let listed = list_backups_from(root.clone()).await.unwrap();
+    assert_eq!(listed.0.data.len(), 2);
+    assert_eq!(listed.0.data[0].id, newer);
+    assert_eq!(listed.0.data[1].id, older);
+
+    let forbidden = list_backups(Extension(ActorRole::Operator))
+        .await
+        .unwrap_err();
+    assert_eq!(forbidden.status, axum::http::StatusCode::FORBIDDEN);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn backup_download_authorizes_before_lookup_and_streams_named_archive() {
+    let root = env::temp_dir().join(format!("lxcup-backup-download-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let id = Uuid::new_v4();
+    let filename = format!("lxcup-backup-{id}.tar.age");
+    let path = backup_file_path(&root, id);
+    fs::write(&path, b"encrypted archive bytes").unwrap();
+
+    let forbidden = download_backup(Extension(ActorRole::Operator), Path(id.to_string()))
+        .await
+        .unwrap_err();
+    assert_eq!(forbidden.status, axum::http::StatusCode::FORBIDDEN);
+
+    let invalid = download_backup_from("../secrets".to_owned(), root.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.status, axum::http::StatusCode::NOT_FOUND);
+    let missing = download_backup_from(Uuid::new_v4().to_string(), root.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(missing.status, axum::http::StatusCode::NOT_FOUND);
+
+    let response = download_backup_from(id.to_string(), root.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap(),
+        "application/octet-stream"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_DISPOSITION)
+            .unwrap(),
+        &HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")).unwrap()
+    );
+    assert_eq!(
+        to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        b"encrypted archive bytes".as_slice()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn scheduled_backup_secret_must_be_active_global_backup_passphrase() {
+    let store = InMemorySecretStore::default();
+    let valid = store
+        .create(CreateSecret {
+            name: "scheduled backup".to_owned(),
+            kind: SecretKind::BackupPassphrase,
+            scope: SecretScope::Global,
+            value: SecretValue::new("correct horse battery staple").unwrap(),
+        })
+        .unwrap();
+    let generic = store
+        .create(CreateSecret {
+            name: "generic".to_owned(),
+            kind: SecretKind::Generic,
+            scope: SecretScope::Global,
+            value: SecretValue::new("correct horse battery staple").unwrap(),
+        })
+        .unwrap();
+    let scoped = store
+        .create(CreateSecret {
+            name: "target backup".to_owned(),
+            kind: SecretKind::BackupPassphrase,
+            scope: SecretScope::Container(ContainerId::new(1)),
+            value: SecretValue::new("correct horse battery staple").unwrap(),
+        })
+        .unwrap();
+    let weak = store
+        .create(CreateSecret {
+            name: "weak backup".to_owned(),
+            kind: SecretKind::BackupPassphrase,
+            scope: SecretScope::Global,
+            value: SecretValue::new("too short").unwrap(),
+        })
+        .unwrap();
+    let state = ApiState::new().with_secret_store(Arc::new(store.clone()));
+
+    assert_eq!(
+        read_backup_passphrase(&state, valid.metadata.id)
+            .unwrap()
+            .expose_secret(),
+        "correct horse battery staple"
+    );
+    for id in [generic.metadata.id, scoped.metadata.id, SecretId::new()] {
+        assert_eq!(
+            read_backup_passphrase(&state, id).unwrap_err().code,
+            "invalid_backup_secret"
+        );
+    }
+    assert_eq!(
+        read_backup_passphrase(&state, weak.metadata.id)
+            .unwrap_err()
+            .code,
+        "backup_passphrase_invalid"
+    );
+    store.revoke(valid.metadata.id).unwrap();
+    assert_eq!(
+        read_backup_passphrase(&state, valid.metadata.id)
+            .unwrap_err()
+            .code,
+        "invalid_backup_secret"
+    );
+}
+
+#[test]
+fn scheduled_backup_secret_errors_are_mapped_to_safe_api_errors() {
+    let cases = [
+        (SecretStoreError::Missing, "invalid_backup_secret", false),
+        (SecretStoreError::Invalid, "invalid_backup_secret", false),
+        (SecretStoreError::Denied, "invalid_backup_secret", false),
+        (
+            SecretStoreError::Unavailable,
+            "backup_secret_unavailable",
+            true,
+        ),
+    ];
+    for (error, expected_code, dependency) in cases {
+        let mapped = map_backup_secret_error(error);
+        assert_eq!(mapped.code, expected_code);
+        assert_eq!(
+            mapped.status,
+            if dependency {
+                axum::http::StatusCode::BAD_GATEWAY
+            } else {
+                axum::http::StatusCode::BAD_REQUEST
+            }
+        );
+    }
+}
+
+#[test]
 fn retention_pruning_removes_only_expired_generated_backups() {
     let directory = env::temp_dir().join(format!("lxcup-retention-test-{}", Uuid::new_v4()));
     fs::create_dir_all(&directory).unwrap();
@@ -356,6 +631,21 @@ fn secret_export_refuses_partial_pairs_and_unexpected_files() {
     let copied = root.join("copied");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join(format!("{}.json", Uuid::new_v4())), b"metadata").unwrap();
+    assert!(copy_encrypted_secrets(&root, &copied).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn secret_export_rejects_ciphertext_only_pairs_and_nested_entries() {
+    let root = env::temp_dir().join(format!("lxcup-secret-export-errors-{}", Uuid::new_v4()));
+    let copied = root.join("copied");
+    fs::create_dir_all(&root).unwrap();
+    let secret_id = Uuid::new_v4();
+    let ciphertext = root.join(format!("{secret_id}.enc"));
+    fs::write(&ciphertext, b"ciphertext").unwrap();
+    assert!(copy_encrypted_secrets(&root, &copied).is_err());
+    fs::remove_file(ciphertext).unwrap();
+    fs::create_dir(root.join("nested")).unwrap();
     assert!(copy_encrypted_secrets(&root, &copied).is_err());
     fs::remove_dir_all(root).unwrap();
 }
