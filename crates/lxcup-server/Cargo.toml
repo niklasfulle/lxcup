@@ -9,6 +9,7 @@ license.workspace = true
 age.workspace = true
 axum.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 lxcup-agent = { path = "../lxcup-agent" }
 lxcup-ansible = { path = "../lxcup-ansible" }
 lxcup-apt = { path = "../lxcup-apt" }
@@ -26,12 +27,16 @@ lxcup-secrets = { path = "../lxcup-secrets" }
 serde.workspace = true
 serde_json.workspace = true
 ring.workspace = true
+russh.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 uuid.workspace = true
 url.workspace = true
 percent-encoding = "2.3"
 tokio-util = { version = "0.7", features = ["io"] }
+tempfile = "3"
 
 [dev-dependencies]
 sqlx.workspace = true
+tokio-tungstenite = "0.29"
+rand = "0.10"

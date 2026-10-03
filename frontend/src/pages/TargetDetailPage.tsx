@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { discoverDockerWorkloads, discoverTargetDocker } from "../api";
@@ -9,6 +9,8 @@ import { isTelemetryStale, telemetryAgeLabel } from "../telemetryFreshness";
 import { jobStatusBadgeClass, jobStatusLabel } from "../jobStatus";
 import { TELEMETRY_WINDOW_MS, telemetryXPosition } from "../telemetryChart";
 import { queryKeys, useAnsibleJobs, useContainers, useDockerDiscovery, useDockerWorkloads, usePackageInventory, useTargetDockerInventory, useTargetTelemetry, useTargets } from "../queries";
+
+const TerminalPanel = lazy(() => import("../components/TerminalPanel").then(({ TerminalPanel: panel }) => ({ default: panel })));
 
 type Target = NonNullable<ReturnType<typeof useTargets>["data"]>[number];
 type InventoryQuery = ReturnType<typeof usePackageInventory>;
@@ -40,7 +42,7 @@ function targetStateClass(state: string) {
   return "bg-[var(--warning-soft)] text-[var(--warning)]";
 }
 
-export function TargetDetailPage() {
+export function TargetDetailPage({ isAdmin = false }: Readonly<{ isAdmin?: boolean }>) {
   const { targetId } = useParams();
   const [now, setNow] = useState(() => Date.now());
   const targets = useTargets();
@@ -101,6 +103,7 @@ export function TargetDetailPage() {
     </section>
     <TargetAgentVersionWarning target={target} />
     <TargetHeartbeatWarning stale={stale} />
+    {isAdmin && target.state === "managed" && target.transport === "ssh" && (target.kind === "lxc" || target.kind === "linux_server") ? <Suspense fallback={<p className="border border-[var(--line)] bg-[var(--panel)] p-3 text-sm text-[var(--muted)]">Terminal wird geladen…</p>}><TerminalPanel targetId={target.id} /></Suspense> : null}
     <section className="grid grid-cols-1 gap-4 xl:grid-cols-2" aria-label="Ressourcenstatus">
       <TargetPackageInventory target={target} inventory={inventory} stale={inventoryStale} />
       <TargetDockerInventory target={target} host={hostContainer} workloads={dockerWorkloads} discovery={dockerDiscovery} targetInventory={targetDockerInventory} stale={dockerStale} discovering={target.kind === "linux_server" ? discoverServerDocker.isPending : discoverDocker.isPending} discoveryError={target.kind === "linux_server" ? discoverServerDocker.error : discoverDocker.error} onDiscover={() => target.kind === "linux_server" ? discoverServerDocker.mutate() : discoverDocker.mutate()} />

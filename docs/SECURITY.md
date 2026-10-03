@@ -59,6 +59,16 @@ to the target, and builds a temporary Ansible inventory and variables file.
   destructive actions require the corresponding server-side role. Update
   policy deletion requires destructive permission and explicit confirmation;
   the system-wide standard policy cannot be deleted.
+- Browser terminal access is an Admin-only WebSocket for managed SSH Linux and
+  LXC targets. The controller resolves credentials and the pinned host key
+  only from that target's active secret references; browser-supplied SSH
+  destinations, usernames, and arbitrary execution requests are not accepted.
+  A strict same-origin check, per-Admin/per-target concurrency limits, bounded
+  frames, session revalidation, idle/maximum lifetimes, and fail-closed start
+  auditing constrain the channel. Audit records deliberately exclude terminal
+  input and output. Access is a real remote shell, so Admins must treat it as a
+  privileged control-plane capability. The browser terminal buffer is kept in
+  memory only and is not restored after route changes or reloads.
 - Use TLS for browser access in production. Do not expose session or bearer
   tokens over plaintext HTTP or place them in URLs.
 - Removing a registered target is an Admin-only destructive action that

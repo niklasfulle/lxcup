@@ -276,7 +276,7 @@ function AuthenticatedApp({ session, onLogout }: Readonly<{ session: AuthSession
                 <Route path="/windows" element={<TargetsPage area="windows_server" />} />
                 <Route path="/containers" element={<TargetsPage area="lxc" />} />
                 <Route path="/targets" element={<TargetsPage />} />
-                <Route path="/targets/:targetId" element={<TargetDetailPage />} />
+                <Route path="/targets/:targetId" element={<TargetDetailPage isAdmin={session.role === "admin"} />} />
                 <Route path="/targets/:targetId/packages" element={<PackageInventoryPage />} />
                 <Route path="/containers/:containerId" element={<ContainerDetailPage />} />
                 <Route path="/docker" element={<DockerPage />} />

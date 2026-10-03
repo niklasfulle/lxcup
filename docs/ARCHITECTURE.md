@@ -15,6 +15,7 @@ Browser
                                       ├─ registered workflow jobs ──> Ansible worker
                                       │                              ├─ approved artifacts
                                       │                              └─ existing Linux/Windows targets
+                                      ├─ Admin WebSocket terminal ──> SSH PTY on existing Linux/LXC target
                                       └─ authenticated agent API <── Linux/Windows agents
                                                                      └─ Docker discovery on managed hosts
 ```

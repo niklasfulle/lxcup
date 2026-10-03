@@ -96,6 +96,29 @@ docker compose restart lxcup-worker
 4. Manifest-Version und SHA-256 niemals manuell überschreiben; das Artefakt
    muss erneut freigegeben werden.
 
+### SSH-Terminal nicht erreichbar
+
+Das Browser-Terminal wird vom Controller aus per SSH zum registrierten Linux-
+oder LXC-Ziel aufgebaut. Der Controller benötigt ausgehenden Netzwerkzugriff
+auf Zielport 22; ein offener SSH-Port vom Browser zum Ziel ist nicht nötig.
+Zielprofil, SSH-Credential und Known-Hosts-Secret müssen aktiv und passend sein.
+Hostschlüssel werden geprüft; bei einem legitimen Schlüsselwechsel muss das
+Known-Hosts-Secret über den vorgesehenen Secret-/Onboarding-Ablauf aktualisiert
+werden. Die Prüfung nicht durch Deaktivieren der Host-Key-Prüfung umgehen.
+
+Nur Admins mit vollständig eingerichteter Sitzung dürfen das Terminal öffnen.
+Pro Ziel wird eine Sitzung zugelassen, pro Admin höchstens zwei. Sitzungen
+enden nach 10 Minuten Inaktivität oder spätestens nach 60 Minuten. Das
+Aktivitätsprotokoll erfasst Start und Ende samt Ergebnis, aber niemals
+Terminaleingaben oder -ausgaben. Ein Fehler beim Aufbau wird zusätzlich im
+Controller-Log mit einer begrenzten Fehlerkennung protokolliert; dort dürfen
+keine Secret-Werte oder Shell-Inhalte erscheinen.
+
+Bei Fehlern zuerst die Ressourcendetailseite und den dortigen Verbindungsstatus
+prüfen, danach Controller-Egress, SSH-Dienst und Secret-Referenzen verifizieren.
+Eine noch aktive Sitzung muss beendet oder bis zum Sitzungs-Timeout abgewartet
+werden, bevor für dasselbe Ziel eine neue geöffnet werden kann.
+
 ## Nachbearbeitung eines fehlgeschlagenen Jobs
 
 Die Workflow-Detailseite zeigt Status, Fehlercode, Worker-Ausgabe und den

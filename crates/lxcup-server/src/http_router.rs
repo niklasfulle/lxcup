@@ -15,7 +15,8 @@ use super::{
     operate_target_docker_container, ready_health, receive_agent_heartbeat, reconcile_ansible_job,
     reconcile_execution, register_agent, remove_docker_container, request_middleware,
     reset_user_password, retry_ansible_job, revoke_agent, revoke_secret, rotate_secret,
-    run_execution, run_scan, set_schedule_enabled, start_scan, stream_events, update_user,
+    run_execution, run_scan, set_schedule_enabled, start_scan, stream_events, terminal_session,
+    update_user,
 };
 use axum::{
     Router,
@@ -46,6 +47,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/v1/targets/{target_id}/package-inventory",
             get(get_package_inventory),
+        )
+        .route(
+            "/api/v1/targets/{target_id}/terminal",
+            get(terminal_session),
         )
         .route(
             "/api/v1/targets/{target_id}/telemetry",
