@@ -145,8 +145,8 @@ For the implemented role behavior and production requirements, see
   maintenance-window restrictions. Apply still requires the matching
   successful plan and explicit confirmation.
 - Agent deployment/update artifacts require an approved manifest, matching
-  version, and validated SHA-256 before execution. Do not bypass verification
-  to make a deployment succeed.
+  version, and validated SHA-256 plus platform executable format/architecture
+  before execution. Do not bypass verification to make a deployment succeed.
 - SSH host keys must be verified using the registered known-hosts secret. Do
   not disable host-key checking as a general workaround.
 - Keep the worker least-privileged and its secret-store mount read-only. Avoid

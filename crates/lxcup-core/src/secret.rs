@@ -11,6 +11,7 @@ pub enum SecretKind {
     SshPrivateKey,
     SshPassword,
     SshKnownHosts,
+    WinrmPassword,
     AgentToken,
     BackupPassphrase,
     Generic,

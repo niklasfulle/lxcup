@@ -179,7 +179,7 @@ export type CreateAnsibleJobRequest = {
   approved_plan_job_id?: string;
 };
 
-export type SecretKind = "ssh_private_key" | "ssh_password" | "ssh_known_hosts" | "agent_token" | "backup_passphrase" | "generic";
+export type SecretKind = "ssh_private_key" | "ssh_password" | "ssh_known_hosts" | "winrm_password" | "agent_token" | "backup_passphrase" | "generic";
 export type SecretScope = { type: "global" } | { type: "node"; id: string } | { type: "container"; id: number };
 export type SecretMetadata = {
   metadata: {

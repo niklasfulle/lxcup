@@ -4,8 +4,10 @@ COPY . .
 RUN cargo build --release -p lxcup-ansible-worker
 
 FROM debian:bookworm-slim
+COPY ansible/requirements.yml /tmp/ansible-requirements.yml
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes ansible-core ca-certificates curl openssh-client sshpass \
+    && apt-get install --no-install-recommends --yes ansible-core ca-certificates curl openssh-client sshpass python3-winrm python3-requests-ntlm \
+    && ansible-galaxy collection install --collections-path /usr/share/ansible/collections -r /tmp/ansible-requirements.yml \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home --home-dir /home/lxcup lxcup
 COPY --from=build /src/target/release/lxcup-ansible-worker /usr/local/bin/lxcup-ansible-worker

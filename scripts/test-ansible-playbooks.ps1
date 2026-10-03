@@ -21,7 +21,8 @@ $playbooks = @(
     "ansible/playbooks/agent-linux-rollback.yml",
     "ansible/playbooks/packages-linux.yml",
     "ansible/playbooks/agent-windows.yml",
-    "ansible/playbooks/packages-windows.yml"
+    "ansible/playbooks/health-check-windows.yml",
+    "ansible/playbooks/package-inventory-windows.yml"
 )
 
 foreach ($playbook in $playbooks) {
@@ -31,4 +32,4 @@ foreach ($playbook in $playbooks) {
     }
 }
 
-Write-Host "Alle Linux-Agent-Playbooks sind syntaktisch gültig."
+Write-Host "Alle registrierten Linux- und Windows-Agent-Playbooks sind syntaktisch gültig."

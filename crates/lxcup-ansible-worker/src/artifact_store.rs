@@ -38,20 +38,22 @@ fn supports_manifest(manifest: &serde_json::Value) -> bool {
             .get("artifacts")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|artifacts| {
-                ["linux-amd64", "linux-arm64"].iter().all(|platform| {
-                    artifacts.iter().any(|artifact| {
-                        artifact.get("platform").and_then(serde_json::Value::as_str)
-                            == Some(*platform)
-                            && artifact
-                                .get("file")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some()
-                            && artifact
-                                .get("sha256")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some()
+                ["linux-amd64", "linux-arm64", "windows-amd64"]
+                    .iter()
+                    .all(|platform| {
+                        artifacts.iter().any(|artifact| {
+                            artifact.get("platform").and_then(serde_json::Value::as_str)
+                                == Some(*platform)
+                                && artifact
+                                    .get("file")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some()
+                                && artifact
+                                    .get("sha256")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some()
+                        })
                     })
-                })
             })
 }
 
@@ -95,12 +97,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_probe_requires_current_version_and_linux_artifact_metadata() {
+    fn manifest_probe_requires_current_version_and_all_supported_artifacts() {
         let manifest = serde_json::json!({
             "version": lxcup_core::VERSION,
             "artifacts": [
                 { "platform": "linux-amd64", "file": "agent-amd64", "sha256": "digest" },
-                { "platform": "linux-arm64", "file": "agent-arm64", "sha256": "digest" }
+                { "platform": "linux-arm64", "file": "agent-arm64", "sha256": "digest" },
+                { "platform": "windows-amd64", "file": "agent.exe", "sha256": "digest" }
             ]
         });
         assert!(supports_manifest(&manifest));
@@ -109,7 +112,8 @@ mod tests {
             "version": "0.0.0",
             "artifacts": [
                 { "platform": "linux-amd64", "file": "agent-amd64", "sha256": "digest" },
-                { "platform": "linux-arm64", "file": "agent-arm64", "sha256": "digest" }
+                { "platform": "linux-arm64", "file": "agent-arm64", "sha256": "digest" },
+                { "platform": "windows-amd64", "file": "agent.exe", "sha256": "digest" }
             ]
         });
         assert!(!supports_manifest(&wrong_version));
@@ -125,5 +129,14 @@ mod tests {
             "artifacts": [{ "platform": "linux-amd64", "file": "agent-amd64", "sha256": "digest" }]
         });
         assert!(!supports_manifest(&missing_arm64_artifact));
+
+        let missing_windows_artifact = serde_json::json!({
+            "version": lxcup_core::VERSION,
+            "artifacts": [
+                { "platform": "linux-amd64", "file": "agent-amd64", "sha256": "digest" },
+                { "platform": "linux-arm64", "file": "agent-arm64", "sha256": "digest" }
+            ]
+        });
+        assert!(!supports_manifest(&missing_windows_artifact));
     }
 }

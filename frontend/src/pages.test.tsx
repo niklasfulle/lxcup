@@ -63,7 +63,7 @@ const userEvent = {
 
 const target: TargetDto = { id: "target-1", name: "test-target", kind: "lxc", address: "192.0.2.10", transport: "ssh", ssh_user: "lxcup", credential_secret_ref: "cred", ssh_known_hosts_secret_ref: "known", agent_secret_ref: "agent", state: "managed", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" };
 const container: ContainerDto = { id: 101, node_id: "node-1", name: "web-lxc", operating_system: "Debian", status: "running", management_state: "managed", discovered_at: "2026-01-01T00:00:00Z" };
-const secret = (id: string, name: string, kind: "ssh_password" | "ssh_known_hosts" | "agent_token" | "backup_passphrase" = "ssh_password") => ({ metadata: { metadata: { id, name, kind, scope: { type: "global" as const }, created_at: "2026-01-01", updated_at: "2026-01-01" }, status: "active" as const } });
+const secret = (id: string, name: string, kind: "ssh_password" | "ssh_known_hosts" | "winrm_password" | "agent_token" | "backup_passphrase" = "ssh_password") => ({ metadata: { metadata: { id, name, kind, scope: { type: "global" as const }, created_at: "2026-01-01", updated_at: "2026-01-01" }, status: "active" as const } });
 
 vi.mock("./queries", () => ({
   queryKeys: { targets: ["targets"], nodes: ["nodes"], ansibleJobs: ["ansible-jobs"], containers: ["containers"], dockerWorkloads: (id: number) => ["docker", id], dockerDiscovery: (id: number) => ["docker-discovery", id], targetDockerInventory: (id: string) => ["targets", id, "docker-discovery"], targetDockerTelemetry: (id: string) => ["targets", id, "docker-telemetry"], packageInventory: (id: string) => ["targets", id, "package-inventory"], telemetry: (id: string) => ["targets", id, "telemetry"], telemetryAlerts: ["telemetry-alerts"], schedules: ["schedules"], updatePolicies: ["update-policies"], secrets: ["secrets"] },
@@ -982,6 +982,37 @@ describe("onboarding and secret pages", () => {
     await userEvent.click(screen.getByRole("button", { name: "Wert erzeugen" }));
     await userEvent.click(screen.getByRole("button", { name: "Secret erstellen und auswählen" }));
     await waitFor(() => expect(mocks.createSecret).toHaveBeenCalled());
+  });
+
+  it("registers Windows targets with a WinRM credential and username", async () => {
+    mocks.targets.data = [];
+    mocks.listSecrets.mockResolvedValue([
+      secret("winrm", "windows-password", "winrm_password"),
+      secret("ssh", "ssh-password", "ssh_password"),
+      secret("agent", "agent-token", "agent_token"),
+    ] as any);
+    renderPage(<TargetsPage area="windows_server" />);
+    await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
+
+    expect(screen.getByLabelText("WinRM-Benutzer")).toHaveValue("Administrator");
+    const credential = screen.getByLabelText("Deployment-Secret");
+    expect(await within(credential).findByRole("option", { name: "windows-password" })).toBeInTheDocument();
+    expect(within(credential).queryByRole("option", { name: "ssh-password" })).not.toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("Name"), "windows-test");
+    await userEvent.type(screen.getByPlaceholderText("IP oder DNS-Name …"), "192.0.2.30");
+    await userEvent.selectOptions(credential, "winrm");
+    await userEvent.selectOptions(screen.getByLabelText("Agent-Token"), "agent");
+    await userEvent.click(screen.getByRole("checkbox", { name: "Onboarding direkt starten" }));
+    fireEvent.submit(screen.getByRole("button", { name: "Hinzufügen" }).closest("form")!);
+
+    await waitFor(() => expect(mocks.createTarget).toHaveBeenCalledWith(expect.objectContaining({
+      name: "windows-test",
+      kind: "windows_server",
+      transport: "winrm",
+      ssh_user: "Administrator",
+      credential_secret_ref: "winrm",
+      ssh_known_hosts_secret_ref: null,
+    })));
   });
 
   it("copies the complete target host preparation script including curl installation", async () => {

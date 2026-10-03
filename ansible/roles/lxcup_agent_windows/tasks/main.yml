@@ -32,12 +32,30 @@
     path: "{{ lxcup_agent_install_dir }}\\lxcup-agent.exe"
   register: lxcup_active_agent
 
+- name: Check active Windows agent configuration
+  ansible.windows.win_stat:
+    path: "{{ lxcup_agent_config_dir }}\\agent.env"
+  register: lxcup_active_agent_configuration
+
+- name: Check Windows agent service
+  ansible.windows.win_service_info:
+    name: "{{ lxcup_agent_service_name }}"
+  register: lxcup_agent_service_info
+
 - name: Preserve active Windows agent for rollback
   ansible.windows.win_copy:
     src: "{{ lxcup_agent_install_dir }}\\lxcup-agent.exe"
     dest: "{{ lxcup_agent_install_dir }}\\lxcup-agent.previous.exe"
     remote_src: true
   when: lxcup_active_agent.stat.exists
+
+- name: Preserve active Windows agent configuration for rollback
+  ansible.windows.win_copy:
+    src: "{{ lxcup_agent_config_dir }}\\agent.env"
+    dest: "{{ lxcup_agent_config_dir }}\\agent.previous.env"
+    remote_src: true
+  when: lxcup_active_agent_configuration.stat.exists
+  no_log: true
 
 - name: Install versioned Windows agent binary
   ansible.windows.win_copy:
@@ -46,6 +64,12 @@
     remote_src: "{{ lxcup_agent_binary_remote | default(false) }}"
   register: lxcup_agent_binary
 
+- name: Stop Windows service before replacing its executable
+  ansible.windows.win_service:
+    name: "{{ lxcup_agent_service_name }}"
+    state: stopped
+  when: lxcup_agent_service_info.services | length > 0
+
 - name: Activate validated Windows agent version
   ansible.windows.win_copy:
     src: "{{ lxcup_agent_install_dir }}\\lxcup-agent-{{ lxcup_agent_version }}.exe"
@@ -53,17 +77,35 @@
     remote_src: true
   register: lxcup_active_binary
 
-- name: Write Windows agent token file
-  ansible.windows.win_copy:
-    content: "{{ lxcup_agent_token }}"
-    dest: "{{ lxcup_agent_config_dir }}\\agent.token"
-  no_log: true
-
 - name: Write Windows agent environment file
   ansible.windows.win_template:
     src: agent.env.j2
     dest: "{{ lxcup_agent_config_dir }}\\agent.env"
+  register: lxcup_agent_configuration
   no_log: true
+
+- name: Remove obsolete standalone Windows agent token file
+  ansible.windows.win_file:
+    path: "{{ lxcup_agent_config_dir }}\\agent.token"
+    state: absent
+
+- name: Grant the restricted service account read access to the Windows agent
+  ansible.windows.win_acl:
+    path: "{{ lxcup_agent_install_dir }}"
+    user: 'NT AUTHORITY\LOCAL SERVICE'
+    rights: ReadAndExecute
+    type: allow
+    state: present
+    inherit: true
+
+- name: Grant the restricted service account read access to agent configuration
+  ansible.windows.win_acl:
+    path: "{{ lxcup_agent_config_dir }}"
+    user: 'NT AUTHORITY\LOCAL SERVICE'
+    rights: Read
+    type: allow
+    state: present
+    inherit: true
 
 - name: Install and start Windows service
   ansible.windows.win_service:
@@ -71,10 +113,10 @@
     display_name: "{{ lxcup_agent_service_display_name }}"
     description: lxcup health and metrics agent
     path: "{{ lxcup_agent_install_dir }}\\lxcup-agent.exe"
+    username: 'NT AUTHORITY\LocalService'
     start_mode: auto
     state: started
   register: lxcup_agent_service
-  when: lxcup_agent_binary.changed or lxcup_active_binary.changed or lxcup_agent_force_restart
 
 - name: Ensure Windows service remains enabled
   ansible.windows.win_service:
@@ -97,10 +139,50 @@
   failed_when: false
   no_log: true
 
+- name: Stop failed Windows agent before rollback
+  ansible.windows.win_service:
+    name: "{{ lxcup_agent_service_name }}"
+    state: stopped
+  when: lxcup_agent_health.status_code | default(0) != 200 and lxcup_active_agent.stat.exists
+  failed_when: false
+
+- name: Restore Windows agent binary after failed healthcheck
+  ansible.windows.win_copy:
+    src: "{{ lxcup_agent_install_dir }}\\lxcup-agent.previous.exe"
+    dest: "{{ lxcup_agent_install_dir }}\\lxcup-agent.exe"
+    remote_src: true
+  when: lxcup_agent_health.status_code | default(0) != 200 and lxcup_active_agent.stat.exists
+  failed_when: false
+
+- name: Restore Windows agent configuration after failed healthcheck
+  ansible.windows.win_copy:
+    src: "{{ lxcup_agent_config_dir }}\\agent.previous.env"
+    dest: "{{ lxcup_agent_config_dir }}\\agent.env"
+    remote_src: true
+  when: lxcup_agent_health.status_code | default(0) != 200 and lxcup_active_agent_configuration.stat.exists
+  failed_when: false
+  no_log: true
+
+- name: Remove failed Windows agent service after unsuccessful first install
+  ansible.windows.win_service:
+    name: "{{ lxcup_agent_service_name }}"
+    state: absent
+  when: lxcup_agent_health.status_code | default(0) != 200 and not lxcup_active_agent.stat.exists
+  failed_when: false
+
+- name: Restart previous Windows agent after failed healthcheck
+  ansible.windows.win_service:
+    name: "{{ lxcup_agent_service_name }}"
+    state: started
+  when: lxcup_agent_health.status_code | default(0) != 200 and lxcup_active_agent.stat.exists
+  failed_when: false
+  no_log: true
+
 - name: Report sanitized Windows agent health failure
   ansible.builtin.fail:
     msg: >-
       Agent healthcheck failed after 5 attempts
-      (status={{ lxcup_agent_health.status_code | default('unreachable') }},
-      message={{ lxcup_agent_health.msg | default('no response') }}).
+      (status={{ lxcup_agent_health.status_code | default('unreachable') }}).
+      The previous release was restored when one was available; review the
+      Windows service logs for sanitized diagnostic details.
   when: lxcup_agent_health.status_code | default(0) != 200

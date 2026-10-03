@@ -233,9 +233,23 @@ fn package_inventory_parsers_normalize_linux_and_windows_fixtures() {
     assert_eq!(linux.len(), 1);
     assert_eq!(linux[0].source.as_deref(), Some("dpkg"));
     let windows =
-        parse_windows_packages(r#"[{"Name":"7zip","Version":"24.0","ProviderName":"Programs"}]"#);
+        parse_windows_packages(r#"[{"Name":"7zip","Version":"24.0","ProviderName":"Programs"}]"#)
+            .unwrap();
     assert_eq!(windows[0].name, "7zip");
     assert_eq!(windows[0].source.as_deref(), Some("Programs"));
+}
+
+#[test]
+fn windows_package_parser_accepts_empty_and_rejects_bad_or_excessive_output() {
+    assert!(parse_windows_packages("[]").unwrap().is_empty());
+    assert!(parse_windows_packages("").is_err());
+    assert!(parse_windows_packages("null").is_err());
+    assert!(parse_windows_packages(r#"[{"Name":"","Version":"1"}]"#).is_err());
+    let excessive = format!(
+        "[{}]",
+        (0..=50_000).map(|_| "{}").collect::<Vec<_>>().join(",")
+    );
+    assert!(parse_windows_packages(&excessive).is_err());
 }
 
 #[test]

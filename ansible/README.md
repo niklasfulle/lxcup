@@ -10,7 +10,9 @@ Erwartete Worker-Variablen:
 - `lxcup_agent_binary_src_arm64`: zusätzlich verifizierte ARM64-Binary-Quelle
 - `lxcup_agent_token`: zur Laufzeit aus dem Secret Store aufgelöst
 - `lxcup_agent_id`: persistierte Agent-ID
-- `lxcup_agent_bind_address`: standardmäßig `0.0.0.0:8090`
+- `lxcup_agent_bind_address`: standardmäßig `127.0.0.1:8090`; der Agent
+  sendet Heartbeats ausgehend an den Controller und benötigt keinen offenen
+  Inbound-Port.
 
 Die Rolle wählt das verifizierte Artefakt für x86-64 oder ARM64 anhand der
 ermittelten Zielarchitektur. Fehlt das passende Artefakt, stoppt sie vor der
@@ -41,9 +43,10 @@ Reboot-Anforderung.
 ## Windows-Testpfad
 
 Windows-Ziele werden über WinRM in einer separaten Inventory-Gruppe
-`lxcup_windows_targets` angesprochen. Für einen sicheren Test werden nur
-`ansible_connection=winrm`, TLS beziehungsweise Kerberos und Secret-Store-
-Referenzen verwendet. Das Playbook `agent-windows.yml` installiert den
-Windows-Service idempotent; `packages-windows.yml` erlaubt ausschließlich die
-Kategorien `SecurityUpdates`, `CriticalUpdates` und `Updates`. Der erste
-dedizierte Test muss auf einer isolierten Windows-11-Testmaschine erfolgen.
+`lxcup_windows_targets` angesprochen. Der Worker verwendet HTTPS mit
+Zertifikatsprüfung, NTLM und typisierte WinRM-Passwort-Secrets. Das Playbook
+`agent-windows.yml` installiert den Windows-Service idempotent. Paketupdates
+auf Windows sind deaktiviert, bis Plan, Policy, explizite Bestätigung und die
+konkrete Paket-Auswahl dieselben Sicherheitsgarantien wie der Linux-Pfad
+erfüllen. Der erste dedizierte Test muss manuell auf einer isolierten
+Windows-11-Testmaschine erfolgen.

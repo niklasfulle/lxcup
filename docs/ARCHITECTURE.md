@@ -142,11 +142,11 @@ secret-store records are retained because they may be shared.
 - The artifact service serves versioned agent artifacts and manifests. It is
   not an arbitrary job input channel.
 
-For the current Linux agent release, the manifest lists separate `linux-amd64`
-and `linux-arm64` binaries. The worker verifies each SHA-256 digest before
-passing their local paths to Ansible; the target's gathered architecture selects
-the binary. Older manifests without ARM64 remain usable on x86-64, but an ARM64
-target is rejected before installation when its artifact is absent.
+The release manifest lists `linux-amd64`, `linux-arm64`, and `windows-amd64`
+agent binaries. The worker verifies SHA-256 and executable format/architecture
+(ELF for Linux; PE32+ x64 for Windows) before passing the matching artifact to
+Ansible. A missing or mismatched target artifact fails closed before
+installation.
 
 The worker probes its configured versioned manifest at startup and every
 15 seconds thereafter. It records artifact availability with its two-second

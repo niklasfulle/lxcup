@@ -50,7 +50,12 @@ async fn agent_package_inventory(
     }
     let mut command = if state.info.platform == AgentPlatform::Windows {
         let mut command = Command::new("powershell.exe");
-        command.args(["-NoProfile", "-NonInteractive", "-Command", "Get-Package | Select-Object -Property Name,Version,ProviderName | ConvertTo-Json -Compress"]);
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ErrorActionPreference='Stop'; $items=@(Get-Package | Select-Object -Property Name,Version,ProviderName); if ($items.Count -gt 50000) { throw 'package inventory limit exceeded' }; ConvertTo-Json -InputObject $items -Compress",
+        ]);
         command
     } else {
         let mut command = Command::new("dpkg-query");
@@ -60,8 +65,18 @@ async fn agent_package_inventory(
         ]);
         command
     };
+    const MAX_INVENTORY_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
     let output = match tokio::time::timeout(Duration::from_secs(30), command.output()).await {
-        Ok(Ok(output)) if output.status.success() => output.stdout,
+        Ok(Ok(output)) if output.status.success() => {
+            if output.stdout.len() > MAX_INVENTORY_OUTPUT_BYTES {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(serde_json::json!({"error":"package_inventory_too_large"})),
+                )
+                    .into_response();
+            }
+            output.stdout
+        }
         Ok(Ok(_)) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -85,7 +100,16 @@ async fn agent_package_inventory(
         }
     };
     let packages = if state.info.platform == AgentPlatform::Windows {
-        parse_windows_packages(&String::from_utf8_lossy(&output))
+        match parse_windows_packages(&String::from_utf8_lossy(&output)) {
+            Ok(packages) => packages,
+            Err(()) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error":"package_inventory_invalid"})),
+                )
+                    .into_response();
+            }
+        }
     } else {
         parse_dpkg_packages(&String::from_utf8_lossy(&output))
     };
@@ -145,6 +169,15 @@ async fn agent_command(
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error":"unauthorized"})),
+        )
+            .into_response();
+    }
+    if state.info.platform == AgentPlatform::Windows && request.action == AgentAction::Apply {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "windows_apply_requires_approved_workflow"
+            })),
         )
             .into_response();
     }
@@ -273,6 +306,7 @@ async fn run_local_command(
 mod tests {
     use super::run_local_command;
     use crate::{AgentAction, AgentPlatform};
+    use tower::ServiceExt;
 
     #[tokio::test]
     async fn linux_apply_requires_at_least_one_package() {
@@ -282,6 +316,48 @@ mod tests {
         assert_eq!(exit_code, 2);
         assert!(stdout.is_empty());
         assert_eq!(stderr, "apply requires at least one package");
+    }
+
+    #[tokio::test]
+    async fn windows_direct_apply_is_rejected_before_running_a_command() {
+        let state = crate::LocalAgentState::new(
+            crate::AgentInfo {
+                agent_id: "windows-agent".to_owned(),
+                platform: AgentPlatform::Windows,
+                hostname: "windows-host".to_owned(),
+                version: "0.4.0".to_owned(),
+                protocol_version: crate::PROTOCOL_VERSION.to_owned(),
+            },
+            "windows-token",
+        );
+        let response = crate::agent_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/command")
+                    .header("authorization", "Bearer windows-token")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "action": "apply",
+                            "packages": ["security update"],
+                            "idempotency_key": "windows-direct-apply"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"],
+            "windows_apply_requires_approved_workflow"
+        );
     }
 
     #[tokio::test]

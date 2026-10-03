@@ -137,26 +137,40 @@ pub(super) fn parse_dpkg_packages(output: &str) -> Vec<AgentInstalledPackage> {
         .collect()
 }
 
-pub(super) fn parse_windows_packages(output: &str) -> Vec<AgentInstalledPackage> {
-    let value: serde_json::Value = match serde_json::from_str(output) {
-        Ok(value) => value,
-        Err(_) => return Vec::new(),
-    };
+pub(super) fn parse_windows_packages(output: &str) -> Result<Vec<AgentInstalledPackage>, ()> {
+    let value: serde_json::Value = serde_json::from_str(output).map_err(|_| ())?;
     let entries = match value {
         serde_json::Value::Array(entries) => entries,
-        entry => vec![entry],
+        serde_json::Value::Object(_) => vec![value],
+        _ => return Err(()),
     };
+    if entries.len() > 50_000 {
+        return Err(());
+    }
     entries
         .into_iter()
-        .filter_map(|entry| {
-            Some(AgentInstalledPackage {
-                name: entry.get("Name")?.as_str()?.to_owned(),
-                installed_version: entry.get("Version")?.as_str()?.to_owned(),
+        .map(|entry| {
+            let name = entry
+                .get("Name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty() && value.len() <= 256)
+                .ok_or(())?;
+            let version = entry
+                .get("Version")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty() && value.len() <= 256)
+                .ok_or(())?;
+            let source = entry
+                .get("ProviderName")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.len() <= 256)
+                .map(str::to_owned);
+            Ok(AgentInstalledPackage {
+                name: name.to_owned(),
+                installed_version: version.to_owned(),
                 architecture: None,
-                source: entry
-                    .get("ProviderName")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
+                source,
             })
         })
         .collect()

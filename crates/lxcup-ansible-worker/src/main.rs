@@ -10,7 +10,6 @@ use lxcup_core::{
 use lxcup_persistence::{Database, Repositories};
 use lxcup_secrets::{EncryptedFileSecretStore, SecretMasterKey, SecretStore};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -20,25 +19,12 @@ use tokio::{process::Command, time::timeout};
 use tracing::Instrument;
 use uuid::Uuid;
 
+mod agent_artifacts;
 mod artifact_store;
 mod execution_support;
-
-#[derive(Deserialize)]
-struct Manifest {
-    version: String,
-    artifacts: Vec<Artifact>,
-}
-#[derive(Deserialize)]
-struct Artifact {
-    platform: String,
-    file: String,
-    sha256: String,
-}
-#[derive(Debug, PartialEq, Eq)]
-struct AgentArtifactPaths {
-    amd64: String,
-    arm64: Option<String>,
-}
+use agent_artifacts::AgentArtifactPaths;
+#[cfg(test)]
+use agent_artifacts::{Manifest, agent_binary_matches_platform};
 struct Runtime {
     secrets: EncryptedFileSecretStore,
     artifacts: String,
@@ -385,21 +371,35 @@ async fn prepare_invocation(
         .map_err(|_| JobFailureCode::InvalidCredentials)?
         .metadata
         .kind;
-    let mut host = serde_json::json!({
-        "ansible_host": target.address,
-        "ansible_user": target.ssh_user.as_deref().unwrap_or(&r.user),
-        "ansible_remote_tmp": "/tmp/.ansible/tmp"
-    });
+    let mut host = serde_json::json!({ "ansible_host": target.address });
     let key = dir.join("credential");
     let known_hosts = prepare_known_hosts(r, target, dir)?;
     match (target.transport, kind) {
         (TargetTransport::Ssh, SecretKind::SshPrivateKey) => {
+            host["ansible_user"] = serde_json::json!(target.ssh_user.as_deref().unwrap_or(&r.user));
+            host["ansible_remote_tmp"] = serde_json::json!("/tmp/.ansible/tmp");
             private(&key, credential.expose()).map_err(|_| JobFailureCode::WorkerUnavailable)?;
             host["ansible_ssh_private_key_file"] = serde_json::json!(key);
         }
         (TargetTransport::Ssh, SecretKind::SshPassword) => {
+            host["ansible_user"] = serde_json::json!(target.ssh_user.as_deref().unwrap_or(&r.user));
+            host["ansible_remote_tmp"] = serde_json::json!("/tmp/.ansible/tmp");
             host["ansible_password"] = serde_json::json!(credential.expose());
             host["ansible_become_password"] = serde_json::json!(credential.expose());
+        }
+        (TargetTransport::Winrm, SecretKind::WinrmPassword) => {
+            let username = target
+                .ssh_user
+                .as_deref()
+                .filter(|username| !username.trim().is_empty())
+                .ok_or(JobFailureCode::InvalidCredentials)?;
+            host["ansible_user"] = serde_json::json!(username);
+            host["ansible_password"] = serde_json::json!(credential.expose());
+            host["ansible_connection"] = serde_json::json!("winrm");
+            host["ansible_port"] = serde_json::json!(5986);
+            host["ansible_winrm_scheme"] = serde_json::json!("https");
+            host["ansible_winrm_transport"] = serde_json::json!("ntlm");
+            host["ansible_winrm_server_cert_validation"] = serde_json::json!("validate");
         }
         _ => return Err(JobFailureCode::InvalidCredentials),
     }
@@ -436,11 +436,23 @@ async fn prepare_invocation(
     if let AnsibleParameters::DeployAgent { agent_version }
     | AnsibleParameters::UpdateAgent { agent_version } = &job.parameters
     {
-        let binaries = artifact(r, agent_version, dir).await?;
+        let binaries = artifact(r, agent_version, target.kind, dir).await?;
         vars["lxcup_agent_version"] = serde_json::json!(agent_version);
-        vars["lxcup_agent_binary_src"] = serde_json::json!(binaries.amd64);
-        if let Some(arm64) = binaries.arm64 {
-            vars["lxcup_agent_binary_src_arm64"] = serde_json::json!(arm64);
+        match target.kind {
+            TargetKind::WindowsServer => {
+                vars["lxcup_agent_binary_src"] = serde_json::json!(
+                    binaries
+                        .windows_amd64
+                        .ok_or(JobFailureCode::PlaybookFailed)?
+                );
+            }
+            _ => {
+                vars["lxcup_agent_binary_src"] =
+                    serde_json::json!(binaries.linux_amd64.ok_or(JobFailureCode::PlaybookFailed)?);
+                if let Some(arm64) = binaries.linux_arm64 {
+                    vars["lxcup_agent_binary_src_arm64"] = serde_json::json!(arm64);
+                }
+            }
         }
     }
     if let AnsibleParameters::UpdatePackages { packages } = &job.parameters {
@@ -534,75 +546,10 @@ fn redact_output(output: &str, secrets: &[Option<&str>]) -> String {
 async fn artifact(
     r: &Runtime,
     version: &str,
+    target_kind: TargetKind,
     dir: &Path,
 ) -> Result<AgentArtifactPaths, JobFailureCode> {
-    let base = format!("{}/agent/{version}", r.artifacts);
-    let m: Manifest = reqwest::get(format!("{base}/manifest.json"))
-        .await
-        .map_err(|_| JobFailureCode::WorkerUnavailable)?
-        .error_for_status()
-        .map_err(|_| JobFailureCode::WorkerUnavailable)?
-        .json()
-        .await
-        .map_err(|_| JobFailureCode::PlaybookFailed)?;
-    if m.version != version {
-        return Err(JobFailureCode::PlaybookFailed);
-    }
-    let amd64 = m
-        .artifacts
-        .iter()
-        .find(|a| a.platform == "linux-amd64")
-        .ok_or(JobFailureCode::PlaybookFailed)?;
-    let amd64_path = download_agent_artifact(&base, amd64, &dir.join("agent-amd64")).await?;
-    let arm64_path = if let Some(arm64) = m.artifacts.iter().find(|a| a.platform == "linux-arm64") {
-        Some(download_agent_artifact(&base, arm64, &dir.join("agent-arm64")).await?)
-    } else {
-        None
-    };
-    Ok(AgentArtifactPaths {
-        amd64: amd64_path,
-        arm64: arm64_path,
-    })
-}
-
-async fn download_agent_artifact(
-    base: &str,
-    artifact: &Artifact,
-    destination: &Path,
-) -> Result<String, JobFailureCode> {
-    if artifact.file.is_empty()
-        || !artifact.file.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
-        })
-    {
-        return Err(JobFailureCode::PlaybookFailed);
-    }
-    let binary = reqwest::get(format!("{base}/{}", artifact.file))
-        .await
-        .map_err(|_| JobFailureCode::WorkerUnavailable)?
-        .bytes()
-        .await
-        .map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    if format!("{:x}", Sha256::digest(&binary)) != artifact.sha256
-        || !matches!(artifact.platform.as_str(), "linux-amd64" | "linux-arm64")
-        || !agent_binary_matches_platform(&binary, &artifact.platform)
-    {
-        return Err(JobFailureCode::PlaybookFailed);
-    }
-    fs::write(destination, binary).map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    Ok(destination.display().to_string())
-}
-
-fn agent_binary_matches_platform(binary: &[u8], platform: &str) -> bool {
-    if binary.len() < 20 || binary.get(..4) != Some(b"\x7fELF") || binary[4] != 2 || binary[5] != 1
-    {
-        return false;
-    }
-    let machine = u16::from_le_bytes([binary[18], binary[19]]);
-    matches!(
-        (platform, machine),
-        ("linux-amd64", 62) | ("linux-arm64", 183)
-    )
+    agent_artifacts::resolve(&r.artifacts, version, target_kind, dir).await
 }
 
 fn playbook(o: AnsibleOperation, k: TargetKind) -> Option<&'static str> {
@@ -615,9 +562,7 @@ fn playbook(o: AnsibleOperation, k: TargetKind) -> Option<&'static str> {
             Some("playbooks/agent-linux.yml")
         }
         (AnsibleOperation::RepairAgent, _) => Some("playbooks/agent-linux-repair.yml"),
-        (AnsibleOperation::UpdatePackages, TargetKind::WindowsServer) => {
-            Some("playbooks/packages-windows.yml")
-        }
+        (AnsibleOperation::UpdatePackages, TargetKind::WindowsServer) => None,
         (AnsibleOperation::UpdatePackages, _) => Some("playbooks/packages-linux.yml"),
         (AnsibleOperation::HealthCheck, TargetKind::WindowsServer) => {
             Some("playbooks/health-check-windows.yml")

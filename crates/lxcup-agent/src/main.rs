@@ -1,6 +1,9 @@
 use std::sync::Arc;
 use tokio::process::Command;
 
+#[cfg(windows)]
+mod windows_service;
+
 use lxcup_agent::{
     AgentHeartbeat, AgentInfo, AgentPlatform, LocalAgentState, SystemTelemetrySample, agent_router,
     parse_docker_stats,
@@ -300,21 +303,73 @@ fn startup_config_from_values(
     })
 }
 
+fn startup_config_from_environment() -> Result<StartupConfig, &'static str> {
+    #[cfg(windows)]
+    let file_values = parse_agent_environment(
+        &std::fs::read_to_string(r"C:\ProgramData\lxcup\agent.env")
+            .map_err(|_| "agent service configuration is unavailable")?,
+    )?;
+    #[cfg(not(windows))]
+    let file_values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    let value = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .or_else(|| file_values.get(key).cloned())
+    };
+    startup_config_from_values(
+        value("LXCUP_AGENT_TOKEN"),
+        value("LXCUP_AGENT_ID"),
+        value("HOSTNAME").or_else(|| value("COMPUTERNAME")),
+        value("LXCUP_AGENT_BIND_ADDRESS"),
+        value("LXCUP_CONTROLLER_URL"),
+        value("LXCUP_TARGET_ID"),
+    )
+}
+
+#[cfg(any(windows, test))]
+fn parse_agent_environment(
+    contents: &str,
+) -> Result<std::collections::HashMap<String, String>, &'static str> {
+    let allowed = [
+        "LXCUP_AGENT_TOKEN",
+        "LXCUP_AGENT_ID",
+        "LXCUP_TARGET_ID",
+        "LXCUP_AGENT_BIND_ADDRESS",
+        "LXCUP_CONTROLLER_URL",
+        "LXCUP_TARGET_ID",
+    ];
+    let mut values = std::collections::HashMap::new();
+    for line in contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let (key, value) = line
+            .split_once('=')
+            .ok_or("agent service configuration is invalid")?;
+        if !allowed.contains(&key) || value.trim().is_empty() || values.contains_key(key) {
+            return Err("agent service configuration is invalid");
+        }
+        values.insert(key.to_owned(), value.to_owned());
+    }
+    Ok(values)
+}
+
+#[cfg(not(windows))]
 #[tokio::main]
 async fn main() {
     lxcup_observability::init("lxcup-agent");
-    let config = startup_config_from_values(
-        std::env::var("LXCUP_AGENT_TOKEN").ok(),
-        std::env::var("LXCUP_AGENT_ID").ok(),
-        std::env::var("HOSTNAME").ok(),
-        std::env::var("LXCUP_AGENT_BIND_ADDRESS").ok(),
-        std::env::var("LXCUP_CONTROLLER_URL").ok(),
-        std::env::var("LXCUP_TARGET_ID").ok(),
-    )
-    .expect("worker configuration");
+    let config = startup_config_from_environment().expect("agent configuration");
     run(config, std::future::pending())
         .await
         .expect("agent must run");
+}
+
+#[cfg(windows)]
+fn main() {
+    lxcup_observability::init("lxcup-agent");
+    windows_service::start().expect("agent service dispatcher must start");
 }
 
 async fn run(
@@ -343,9 +398,7 @@ async fn run(
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         }
     });
-    let listener = tokio::net::TcpListener::bind(&config.bind)
-        .await
-        .expect("agent bind address must be available");
+    let listener = tokio::net::TcpListener::bind(&config.bind).await?;
     tracing::info!(%config.bind, agent_id = %config.info.agent_id, "lxcup agent starting");
     if let Some((controller_url, target_id)) = config.heartbeat {
         let reporter = reqwest::Client::new();
@@ -401,8 +454,8 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::{
-        ProcTelemetryInput, heartbeat_endpoint, run, startup_config_from_values,
-        telemetry_from_proc, value_or_default,
+        ProcTelemetryInput, heartbeat_endpoint, parse_agent_environment, run,
+        startup_config_from_values, telemetry_from_proc, value_or_default,
     };
 
     #[test]
@@ -424,6 +477,22 @@ mod tests {
             "configured"
         );
         assert_eq!(value_or_default(None, "fallback"), "fallback");
+    }
+
+    #[test]
+    fn service_environment_accepts_only_unique_allowlisted_values() {
+        let parsed = parse_agent_environment(
+            "LXCUP_AGENT_TOKEN=secret\nLXCUP_AGENT_ID=target\nLXCUP_AGENT_BIND_ADDRESS=127.0.0.1:8090\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.get("LXCUP_AGENT_TOKEN").map(String::as_str),
+            Some("secret")
+        );
+        assert!(parse_agent_environment("PATH=C:\\Windows").is_err());
+        assert!(parse_agent_environment("LXCUP_AGENT_TOKEN=one\nLXCUP_AGENT_TOKEN=two").is_err());
+        assert!(parse_agent_environment("LXCUP_AGENT_TOKEN=").is_err());
+        assert!(parse_agent_environment("not-a-key-value").is_err());
     }
 
     #[test]

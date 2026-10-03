@@ -46,4 +46,4 @@ finally {
     Pop-Location
 }
 
-Write-Host "Workspace version set to $Version. Build the Linux agent artifact with the versioned artifact procedure in docs/worker-setup.md."
+Write-Host "Workspace version set to $Version. Build the Linux and Windows agent artifacts with the versioned artifact procedure in docs/worker-setup.md."

@@ -3,6 +3,7 @@ use crate::output::ReconciliationDecision;
 use lxcup_ansible::{AnsibleJobRequest, ExecutionMode};
 use lxcup_core::{ActorRole, ResourceLifecycle, SecretId, SecretScope};
 use lxcup_secrets::CreateSecret;
+use sha2::{Digest, Sha256};
 use std::{
     process::{ExitStatus, Output},
     time::Duration,
@@ -25,12 +26,42 @@ fn downloaded_agent_binary_must_match_its_manifest_architecture() {
     assert!(!agent_binary_matches_platform(&[], "linux-amd64"));
 }
 
+#[test]
+fn downloaded_windows_agent_must_be_an_amd64_pe32_plus_executable() {
+    let mut binary = vec![0; 96];
+    binary[..2].copy_from_slice(b"MZ");
+    binary[0x3c..0x40].copy_from_slice(&64_u32.to_le_bytes());
+    binary[64..68].copy_from_slice(b"PE\0\0");
+    binary[68..70].copy_from_slice(&0x8664_u16.to_le_bytes());
+    binary[88..90].copy_from_slice(&0x20b_u16.to_le_bytes());
+    assert!(agent_binary_matches_platform(&binary, "windows-amd64"));
+
+    binary[68..70].copy_from_slice(&0x14c_u16.to_le_bytes());
+    assert!(!agent_binary_matches_platform(&binary, "windows-amd64"));
+    binary[68..70].copy_from_slice(&0x8664_u16.to_le_bytes());
+    binary[88..90].copy_from_slice(&0x10b_u16.to_le_bytes());
+    assert!(!agent_binary_matches_platform(&binary, "windows-amd64"));
+    binary[88..90].copy_from_slice(&0x20b_u16.to_le_bytes());
+    binary[0x3c..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(!agent_binary_matches_platform(&binary, "windows-amd64"));
+}
+
 fn test_linux_agent_binary(machine: u16) -> Vec<u8> {
     let mut binary = vec![0; 64];
     binary[..4].copy_from_slice(b"\x7fELF");
     binary[4] = 2;
     binary[5] = 1;
     binary[18..20].copy_from_slice(&machine.to_le_bytes());
+    binary
+}
+
+fn test_windows_agent_binary() -> Vec<u8> {
+    let mut binary = vec![0; 96];
+    binary[..2].copy_from_slice(b"MZ");
+    binary[0x3c..0x40].copy_from_slice(&64_u32.to_le_bytes());
+    binary[64..68].copy_from_slice(b"PE\0\0");
+    binary[68..70].copy_from_slice(&0x8664_u16.to_le_bytes());
+    binary[88..90].copy_from_slice(&0x20b_u16.to_le_bytes());
     binary
 }
 
@@ -146,6 +177,8 @@ async fn artifact_server(
                 serde_json::to_vec(&manifest).unwrap()
             } else if request_path.contains("agent-arm64") {
                 test_linux_agent_binary(183)
+            } else if request_path.contains("agent.exe") {
+                test_windows_agent_binary()
             } else {
                 binary.clone()
             };
@@ -303,7 +336,7 @@ fn playbook_registry_is_explicit_for_supported_operations() {
     );
     assert_eq!(
         playbook(AnsibleOperation::UpdatePackages, TargetKind::WindowsServer),
-        Some("playbooks/packages-windows.yml")
+        None
     );
     assert_eq!(
         playbook(AnsibleOperation::UpdatePackages, TargetKind::Lxc),
@@ -864,6 +897,62 @@ async fn invocation_builds_apply_and_inventory_vars_with_private_key_credentials
 }
 
 #[tokio::test]
+async fn winrm_invocation_uses_https_with_certificate_validation_and_typed_secret() {
+    let root = std::env::temp_dir().join(format!("lxcup-worker-winrm-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let (runtime, _password_ref, _agent_ref, _known_hosts_ref) = runtime_with_secrets(&root);
+    let credential = runtime
+        .secrets
+        .create(CreateSecret {
+            name: "winrm-password".to_owned(),
+            kind: SecretKind::WinrmPassword,
+            scope: SecretScope::Global,
+            value: SecretValue::new("winrm-test-password").unwrap(),
+        })
+        .unwrap();
+    let mut target = Target::new(
+        "winrm-target",
+        TargetKind::WindowsServer,
+        "windows.example.test",
+        TargetTransport::Winrm,
+        credential.metadata.id,
+        SecretId::new(),
+    )
+    .unwrap();
+    target.ssh_user = Some("Administrator".to_owned());
+    let job = AnsibleJob::from_request(AnsibleJobRequest {
+        operation: AnsibleOperation::HealthCheck,
+        target: ResourceTarget::Target(target.id),
+        lifecycle: ResourceLifecycle::Managed,
+        mode: ExecutionMode::Check,
+        parameters: AnsibleParameters::HealthCheck,
+        secret_refs: Vec::new(),
+        idempotency_key: "worker-winrm-invocation".to_owned(),
+        confirmed: true,
+        actor_role: ActorRole::Operator,
+    })
+    .unwrap();
+
+    let context = prepare_invocation(&runtime, &job, &target, &root)
+        .await
+        .unwrap();
+    let inventory: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&context.inventory).unwrap()).unwrap();
+    let host = &inventory["lxcup_windows_targets"]["hosts"]["target"];
+    assert_eq!(host["ansible_user"], "Administrator");
+    assert_eq!(host["ansible_connection"], "winrm");
+    assert_eq!(host["ansible_port"], 5986);
+    assert_eq!(host["ansible_winrm_scheme"], "https");
+    assert_eq!(host["ansible_winrm_transport"], "ntlm");
+    assert_eq!(host["ansible_winrm_server_cert_validation"], "validate");
+    assert_eq!(host["ansible_password"], "winrm-test-password");
+    assert!(host.get("ansible_remote_tmp").is_none());
+    assert!(host.get("ansible_become_password").is_none());
+    assert_eq!(context.credential.expose(), "winrm-test-password");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn agent_update_invocation_uses_only_the_verified_artifact_for_its_requested_version() {
     let root = std::env::temp_dir().join(format!("lxcup-worker-agent-update-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
@@ -1354,22 +1443,27 @@ async fn artifact_download_checks_version_platform_and_sha256() {
     fs::create_dir_all(&root).unwrap();
     let amd64_binary = test_linux_agent_binary(62);
     let arm64_binary = test_linux_agent_binary(183);
+    let windows_binary = test_windows_agent_binary();
     let amd64_digest = format!("{:x}", Sha256::digest(&amd64_binary));
     let arm64_digest = format!("{:x}", Sha256::digest(&arm64_binary));
+    let windows_digest = format!("{:x}", Sha256::digest(&windows_binary));
     let base_manifest = serde_json::json!({
         "version": "0.3.1",
         "artifacts": [
             {"platform": "linux-amd64", "file": "agent-amd64", "sha256": amd64_digest},
-            {"platform": "linux-arm64", "file": "agent-arm64", "sha256": arm64_digest}
+            {"platform": "linux-arm64", "file": "agent-arm64", "sha256": arm64_digest},
+            {"platform": "windows-amd64", "file": "agent.exe", "sha256": windows_digest}
         ]
     });
 
     let (base, server) = artifact_server(base_manifest.clone(), amd64_binary.clone(), 3).await;
     let mut runtime = runtime_with_secrets(&root).0;
     runtime.artifacts = base;
-    let paths = artifact(&runtime, "0.3.1", &root).await.unwrap();
-    assert_eq!(fs::read(paths.amd64).unwrap(), amd64_binary);
-    assert_eq!(fs::read(paths.arm64.unwrap()).unwrap(), arm64_binary);
+    let paths = artifact(&runtime, "0.3.1", TargetKind::LinuxServer, &root)
+        .await
+        .unwrap();
+    assert_eq!(fs::read(paths.linux_amd64.unwrap()).unwrap(), amd64_binary);
+    assert_eq!(fs::read(paths.linux_arm64.unwrap()).unwrap(), arm64_binary);
     server.await.unwrap();
 
     let mut wrong_version = base_manifest.clone();
@@ -1377,7 +1471,7 @@ async fn artifact_download_checks_version_platform_and_sha256() {
     let (base, server) = artifact_server(wrong_version, Vec::new(), 1).await;
     runtime.artifacts = base;
     assert_eq!(
-        artifact(&runtime, "0.3.1", &root).await,
+        artifact(&runtime, "0.3.1", TargetKind::LinuxServer, &root).await,
         Err(JobFailureCode::PlaybookFailed)
     );
     server.await.unwrap();
@@ -1387,7 +1481,7 @@ async fn artifact_download_checks_version_platform_and_sha256() {
     let (base, server) = artifact_server(wrong_hash, amd64_binary.clone(), 2).await;
     runtime.artifacts = base;
     assert_eq!(
-        artifact(&runtime, "0.3.1", &root).await,
+        artifact(&runtime, "0.3.1", TargetKind::LinuxServer, &root).await,
         Err(JobFailureCode::PlaybookFailed)
     );
     server.await.unwrap();
@@ -1397,7 +1491,7 @@ async fn artifact_download_checks_version_platform_and_sha256() {
     let (base, server) = artifact_server(wrong_arm64_hash, amd64_binary, 3).await;
     runtime.artifacts = base;
     assert_eq!(
-        artifact(&runtime, "0.3.1", &root).await,
+        artifact(&runtime, "0.3.1", TargetKind::LinuxServer, &root).await,
         Err(JobFailureCode::PlaybookFailed)
     );
     server.await.unwrap();
@@ -1407,7 +1501,7 @@ async fn artifact_download_checks_version_platform_and_sha256() {
     let (base, server) = artifact_server(missing_platform, Vec::new(), 1).await;
     runtime.artifacts = base;
     assert_eq!(
-        artifact(&runtime, "0.3.1", &root).await,
+        artifact(&runtime, "0.3.1", TargetKind::LinuxServer, &root).await,
         Err(JobFailureCode::PlaybookFailed)
     );
     server.await.unwrap();
@@ -1415,16 +1509,48 @@ async fn artifact_download_checks_version_platform_and_sha256() {
     let (base, server) = artifact_server(serde_json::json!({"invalid": true}), Vec::new(), 1).await;
     runtime.artifacts = base;
     assert_eq!(
-        artifact(&runtime, "0.3.1", &root).await,
+        artifact(&runtime, "0.3.1", TargetKind::LinuxServer, &root).await,
         Err(JobFailureCode::PlaybookFailed)
     );
     server.await.unwrap();
 
     runtime.artifacts = "http://127.0.0.1:1".to_owned();
     assert_eq!(
-        artifact(&runtime, "0.3.1", &root).await,
+        artifact(&runtime, "0.3.1", TargetKind::LinuxServer, &root).await,
         Err(JobFailureCode::WorkerUnavailable)
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn artifact_download_selects_verified_windows_amd64_and_fails_closed_when_missing() {
+    let root =
+        std::env::temp_dir().join(format!("lxcup-worker-windows-artifact-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let binary = test_windows_agent_binary();
+    let digest = format!("{:x}", Sha256::digest(&binary));
+    let manifest = serde_json::json!({
+        "version": "0.3.1",
+        "artifacts": [{ "platform": "windows-amd64", "file": "agent.exe", "sha256": digest }]
+    });
+    let (base, server) = artifact_server(manifest, Vec::new(), 2).await;
+    let mut runtime = runtime_with_secrets(&root).0;
+    runtime.artifacts = base;
+    let paths = artifact(&runtime, "0.3.1", TargetKind::WindowsServer, &root)
+        .await
+        .unwrap();
+    assert!(paths.linux_amd64.is_none());
+    assert_eq!(fs::read(paths.windows_amd64.unwrap()).unwrap(), binary);
+    server.await.unwrap();
+
+    let manifest = serde_json::json!({ "version": "0.3.1", "artifacts": [] });
+    let (base, server) = artifact_server(manifest, Vec::new(), 1).await;
+    runtime.artifacts = base;
+    assert_eq!(
+        artifact(&runtime, "0.3.1", TargetKind::WindowsServer, &root).await,
+        Err(JobFailureCode::PlaybookFailed)
+    );
+    server.await.unwrap();
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1449,7 +1575,7 @@ async fn artifact_download_treats_server_error_status_as_unavailable() {
     runtime.artifacts = format!("http://{address}");
 
     assert_eq!(
-        artifact(&runtime, "0.3.1", &root).await,
+        artifact(&runtime, "0.3.1", TargetKind::LinuxServer, &root).await,
         Err(JobFailureCode::WorkerUnavailable)
     );
 

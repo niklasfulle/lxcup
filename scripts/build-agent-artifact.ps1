@@ -24,27 +24,35 @@ try {
             docker buildx build --platform "linux/$architecture" --file deploy/agent-artifact.Dockerfile --output "type=local,dest=$temporaryOutput" .
             if ($LASTEXITCODE -ne 0) { throw "Linux $architecture agent build failed." }
         }
+        docker buildx build --platform "linux/amd64" --file deploy/agent-windows-artifact.Dockerfile --output "type=local,dest=$temporaryOutput" .
+        if ($LASTEXITCODE -ne 0) { throw "Windows amd64 agent build failed." }
     }
     finally {
         Pop-Location
     }
 
+    $artifacts = @("amd64", "arm64") | ForEach-Object {
+        $file = "linux-$_"
+        $binary = Join-Path $temporaryOutput $file
+        if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Agent build did not produce $file." }
+        @{ platform = $file; file = $file; sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant() }
+    }
+    $windowsFile = "windows-amd64.exe"
+    $windowsBinary = Join-Path $temporaryOutput $windowsFile
+    if (-not (Test-Path -LiteralPath $windowsBinary -PathType Leaf)) { throw "Agent build did not produce $windowsFile." }
+    $artifacts += @{ platform = "windows-amd64"; file = $windowsFile; sha256 = (Get-FileHash -LiteralPath $windowsBinary -Algorithm SHA256).Hash.ToLowerInvariant() }
     $manifest = @{
         version = $Version
-        artifacts = @(("amd64", "arm64") | ForEach-Object {
-            $file = "linux-$_"
-            $binary = Join-Path $temporaryOutput $file
-            if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Agent build did not produce $file." }
-            @{ platform = $file; file = $file; sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant() }
-        })
+        artifacts = $artifacts
     } | ConvertTo-Json -Depth 4
     New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
     foreach ($architecture in @("amd64", "arm64")) {
         $file = "linux-$architecture"
         Copy-Item -LiteralPath (Join-Path $temporaryOutput $file) -Destination (Join-Path $artifactDirectory $file) -Force
     }
+    Copy-Item -LiteralPath (Join-Path $temporaryOutput "windows-amd64.exe") -Destination (Join-Path $artifactDirectory "windows-amd64.exe") -Force
     [System.IO.File]::WriteAllText((Join-Path $artifactDirectory "manifest.json"), "$manifest`n", [System.Text.UTF8Encoding]::new($false))
-    Write-Host "Created $artifactDirectory with verified amd64 and arm64 artifacts."
+    Write-Host "Created $artifactDirectory with verified Linux amd64/arm64 and Windows amd64 artifacts."
 }
 finally {
     Remove-Item -LiteralPath $temporaryOutput -Recurse -Force

@@ -17,6 +17,7 @@ const secretKinds: Array<{ value: SecretKind; label: string }> = [
   { value: "ssh_private_key", label: "SSH Private Key" },
   { value: "ssh_password", label: "SSH Passwort" },
   { value: "ssh_known_hosts", label: "SSH Known Hosts" },
+  { value: "winrm_password", label: "WinRM Passwort" },
   { value: "backup_passphrase", label: "Backup-Passphrase" },
   { value: "generic", label: "Allgemein" },
 ];
