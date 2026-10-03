@@ -193,25 +193,6 @@ async fn artifact_server(
     (format!("http://{address}"), server)
 }
 
-async fn wait_for_worker_status(
-    repository: &lxcup_persistence::WorkerHeartbeatRepository,
-    available: bool,
-) -> lxcup_persistence::WorkerHeartbeatStatus {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let status = repository.latest_status().await.unwrap();
-            if let Some(status) = status {
-                if status.artifact_store_available == Some(available) {
-                    break status;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("worker availability task should persist the requested artifact-store status")
-}
-
 #[tokio::test]
 async fn artifact_store_monitor_persists_unavailable_and_recovered_states() {
     let Some((database, admin, schema)) = isolated_repositories().await else {
@@ -228,16 +209,17 @@ async fn artifact_store_monitor_persists_unavailable_and_recovered_states() {
             .is_none()
     );
     let client = artifact_store::client().unwrap();
-    let task = tokio::spawn(artifact_store::report_availability(
-        repository.clone(),
-        "artifact-store-unavailable-test".to_owned(),
-        "0.4.0".to_owned(),
-        client.clone(),
-        "http://127.0.0.1:1".to_owned(),
-    ));
-    let unavailable = wait_for_worker_status(&repository, false).await;
-    task.abort();
-    let _ = task.await;
+    let (available, _) = artifact_store::probe_and_persist(
+        &repository,
+        "artifact-store-unavailable-test",
+        "0.4.0",
+        &client,
+        "http://127.0.0.1:1",
+    )
+    .await
+    .expect("worker availability probe should persist an unavailable heartbeat");
+    assert!(!available);
+    let unavailable = repository.latest_status().await.unwrap().unwrap();
     assert_eq!(unavailable.artifact_store_available, Some(false));
     assert_eq!(unavailable.worker_version.as_deref(), Some("0.4.0"));
 
@@ -250,14 +232,17 @@ async fn artifact_store_monitor_persists_unavailable_and_recovered_states() {
         ]
     });
     let (base_url, server) = artifact_server(manifest, Vec::new(), 1).await;
-    let task = tokio::spawn(artifact_store::report_availability(
-        repository.clone(),
-        "artifact-store-recovered-test".to_owned(),
-        "0.4.0".to_owned(),
-        client,
-        base_url,
-    ));
-    let recovered = wait_for_worker_status(&repository, true).await;
+    let (available, _) = artifact_store::probe_and_persist(
+        &repository,
+        "artifact-store-recovered-test",
+        "0.4.0",
+        &client,
+        &base_url,
+    )
+    .await
+    .expect("worker availability probe should persist a recovered heartbeat");
+    assert!(available);
+    let recovered = repository.latest_status().await.unwrap().unwrap();
     assert!(repository.latest().await.unwrap().is_some());
     assert!(
         repository
@@ -266,8 +251,6 @@ async fn artifact_store_monitor_persists_unavailable_and_recovered_states() {
             .unwrap()
             .is_some()
     );
-    task.abort();
-    let _ = task.await;
     server.await.unwrap();
     assert_eq!(recovered.artifact_store_available, Some(true));
 
