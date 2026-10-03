@@ -116,6 +116,8 @@ pub(crate) use target_credentials::{
 };
 mod scheduled_jobs;
 pub(crate) use scheduled_jobs::dispatch_scheduled_target;
+mod terminal;
+pub(crate) use terminal::terminal_session;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -133,6 +135,7 @@ pub struct ApiState {
     scheduler_lock: Arc<Mutex<()>>,
     docker_discovery_lock: Arc<Mutex<()>>,
     backup_gate: Arc<RwLock<()>>,
+    terminal_sessions: Arc<terminal::TerminalSessionRegistry>,
 }
 
 impl ApiState {
@@ -154,6 +157,7 @@ impl ApiState {
             scheduler_lock: Arc::new(Mutex::new(())),
             docker_discovery_lock: Arc::new(Mutex::new(())),
             backup_gate: Arc::new(RwLock::new(())),
+            terminal_sessions: Arc::new(terminal::TerminalSessionRegistry::default()),
         }
     }
 

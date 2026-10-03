@@ -121,7 +121,23 @@ schemas and route availability.
 | Read managed resources, telemetry, inventory, workflows, schedules, and policies | Denied | Allowed | Allowed |
 | Start permitted non-destructive workflows and configure schedules/policies | Denied | Allowed | Allowed |
 | Delete targets, destructive Docker actions, or destructive workflow operations | Denied | Denied | Allowed |
+| Open an SSH terminal to a managed Linux server or LXC | Denied | Denied | Allowed |
 | Manage users, secrets, or read user audit events | Denied | Denied | Allowed |
+
+`GET /api/v1/targets/{target_id}/terminal` upgrades to a WebSocket only for a
+signed-in Admin with a valid, non-forced-change session and a managed SSH
+Linux/LXC target. It uses the target's registered SSH credential and pinned
+known-hosts secret; clients cannot supply a host, username, credential, or
+one-shot command in the request. Interactive input travels only through the
+PTY data stream. The browser sends JSON `{ "type": "input", "data": "…" }`,
+`{ "type": "resize", "columns": 80, "rows": 24 }`, or `{ "type": "close" }`;
+remote terminal bytes are sent as binary frames, with JSON `ready`, `error`, and
+`closed` status messages. Sessions allow one connection per target and at most
+two per Admin, are revalidated against the database session, and end after ten
+minutes idle or sixty minutes total. Start/end audit events include the actor,
+target, and outcome, never terminal input or output. The frontend uses an
+in-memory xterm.js terminal emulator and does not persist its scrollback after
+the component unmounts or the page reloads.
 
 The forced-password-change session is limited to session status, logout, and
 password change. Every other application API is denied until rotation succeeds.

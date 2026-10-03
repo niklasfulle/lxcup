@@ -166,6 +166,24 @@ const articles: readonly WikiArticle[] = [
     ],
   },
   {
+    id: "terminal",
+    section: "Administration",
+    title: "SSH-Terminal für Linux und LXC",
+    summary: "Admins können aus der Ressourcendetailseite eine interaktive SSH-Sitzung öffnen.",
+    points: [
+      "Das Terminal steht nur Admins für aktivierte Linux-Server und LXC-Ziele mit SSH-Transport zur Verfügung. Benutzerkonten mit erzwungenem Passwortwechsel können es noch nicht öffnen.",
+      "lxcup verbindet sich mit Adresse, SSH-Benutzer, Zugangsdaten und bekanntem Hostschlüssel aus dem gespeicherten Zielprofil. Zugangsdaten werden nicht im Browser eingegeben; ein unbekannter oder geänderter Hostschlüssel wird abgelehnt.",
+      "Die Sitzung öffnet eine interaktive Shell auf dem Ziel. Eingaben und Ausgaben werden weder gespeichert noch ins Aktivitätsprotokoll geschrieben; dort erscheinen nur Sitzungsstart und -ende.",
+      "Pro Ziel ist eine Sitzung gleichzeitig möglich; ein Admin kann höchstens zwei Sitzungen parallel öffnen. Nach 10 Minuten ohne Aktivität oder spätestens nach 60 Minuten wird die Verbindung beendet.",
+      "Der Controller benötigt ausgehenden SSH-Zugriff auf das Ziel. Prüfe bei Verbindungsfehlern Zieladresse, SSH-Erreichbarkeit, aktive Credential- und Known-Hosts-Secrets sowie den registrierten Benutzer.",
+    ],
+    links: [
+      { label: "Linux-Server", to: "/servers" },
+      { label: "LXC-Container", to: "/containers" },
+      { label: "Aktivitätsprotokoll", to: "/admin/audit" },
+    ],
+  },
+  {
     id: "hilfe",
     section: "Hilfe und Fehlerbehebung",
     title: "Häufige Statusmeldungen verstehen",

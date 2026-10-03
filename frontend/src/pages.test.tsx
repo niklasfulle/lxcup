@@ -90,6 +90,9 @@ vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
   return { ...actual, listSecrets: mocks.listSecrets, listSecretAudit: mocks.listSecretAudit, createSecret: mocks.createSecret, createTarget: mocks.createTarget, deleteTarget: mocks.deleteTarget, createAnsibleJob: mocks.createAnsibleJob, retryAnsibleJob: mocks.retryAnsibleJob, createEnrollment: mocks.createEnrollment, createContainerAction: mocks.createContainerAction, createSchedule: mocks.createSchedule, createUpdatePolicy: mocks.createUpdatePolicy, deleteUpdatePolicy: mocks.deleteUpdatePolicy, getPackageInventory: mocks.getPackageInventory, getAgentHealth: mocks.getAgentHealth, getAgentMetrics: mocks.getAgentMetrics, discoverDockerWorkloads: mocks.discoverDockerWorkloads, discoverTargetDocker: mocks.discoverTargetDocker, operateTargetDockerContainer: mocks.operateTargetDockerContainer, checkTargetDockerImageUpdate: mocks.checkTargetDockerImageUpdate, applyTargetDockerImageUpdate: mocks.applyTargetDockerImageUpdate, adoptDockerWorkload: mocks.adoptDockerWorkload, removeDockerWorkload: mocks.removeDockerWorkload, apiClient: { subscribe: mocks.subscribe, setCredentials: mocks.setCredentials, setUnauthorizedHandler: mocks.setUnauthorizedHandler, getSession: mocks.getSession, getAuthStatus: mocks.getAuthStatus, login: mocks.login, changePassword: mocks.changePassword, logout: mocks.logout } };
 });
+vi.mock("./components/TerminalPanel", () => ({
+  TerminalPanel: ({ targetId }: { targetId: string }) => <section aria-label="Terminal">{targetId}</section>,
+}));
 
 import { Dashboard } from "./pages/Dashboard";
 import { ContainerDetailPage } from "./pages/ContainerDetailPage";
@@ -269,6 +272,18 @@ describe("inventory pages", () => {
     expect(mocks.discoverDockerWorkloads).toHaveBeenCalledWith(101);
     expect(screen.getByRole("link", { name: /Alle Workflows/ })).toHaveAttribute("href", "/workflows?target=target-1");
     expect(screen.getByText("web")).toBeInTheDocument();
+  });
+
+  it("shows the SSH terminal only to administrators for managed Linux and LXC resources", async () => {
+    mocks.targets.data = [target];
+    renderPage(<TargetDetailPage isAdmin />, "/targets/target-1");
+    expect(await screen.findByRole("region", { name: "Terminal" })).toBeInTheDocument();
+  });
+
+  it("does not render the SSH terminal for regular users", () => {
+    mocks.targets.data = [target];
+    renderPage(<TargetDetailPage />, "/targets/target-1");
+    expect(screen.queryByRole("region", { name: "Terminal" })).not.toBeInTheDocument();
   });
 
   it("plots telemetry against the rolling time window and gives telemetry the full row", () => {
