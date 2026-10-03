@@ -16,6 +16,7 @@ Browser
                                       │                              ├─ approved artifacts
                                       │                              └─ existing Linux/Windows targets
                                       └─ authenticated agent API <── Linux/Windows agents
+                                                                     ├─ local package/update inventory
                                                                      └─ Docker discovery on managed hosts
 ```
 

@@ -8,8 +8,10 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::{Duration, Timelike, Utc};
-use lxcup_agent::AgentHeartbeat;
-use lxcup_core::ActorRole;
+use lxcup_agent::{AgentHeartbeat, AgentPlatform};
+use lxcup_core::{
+    ActorRole, InstalledPackage, PackageInventorySnapshot, PackageName, PackageVersion,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -280,8 +282,10 @@ pub(super) async fn receive_agent_heartbeat(
     if expected.expose() != token {
         return Err(ApiError::unauthorized());
     }
+    let package_inventory = sanitize_agent_package_inventory(&heartbeat, target.kind)?;
     let telemetry_summary = sanitize_telemetry_window(&mut heartbeat);
     sanitize_docker_telemetry_window(&mut heartbeat);
+    heartbeat.package_inventory = None;
     if telemetry_summary.rejected() > 0 || telemetry_summary.missing_samples > 0 {
         tracing::warn!(
             target: "lxcup_server::telemetry",
@@ -301,6 +305,11 @@ pub(super) async fn receive_agent_heartbeat(
     let persisted = target.clone();
     store.agent_reports.insert(persisted.id, heartbeat);
     let heartbeat_for_persistence = store.agent_reports.get(&persisted.id).cloned();
+    if let Some(snapshot) = package_inventory.as_ref() {
+        store
+            .package_inventories
+            .insert(persisted.id, snapshot.clone());
+    }
     drop(store);
     if let Some(repositories) = state.repositories.clone() {
         repositories
@@ -324,8 +333,100 @@ pub(super) async fn receive_agent_heartbeat(
                 return Err(ApiError::storage());
             }
         }
+        if let Some(snapshot) = package_inventory.as_ref() {
+            let latest = repositories
+                .package_inventory
+                .find_latest(persisted.id)
+                .await
+                .map_err(|_| ApiError::storage())?;
+            if latest.is_none_or(|current| current.snapshot.collected_at < snapshot.collected_at) {
+                repositories
+                    .package_inventory
+                    .replace(snapshot)
+                    .await
+                    .map_err(|_| ApiError::storage())?;
+            }
+        }
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn sanitize_agent_package_inventory(
+    heartbeat: &AgentHeartbeat,
+    target_kind: TargetKind,
+) -> Result<Option<PackageInventorySnapshot>, ApiError> {
+    let Some(inventory) = heartbeat.package_inventory.as_ref() else {
+        return Ok(None);
+    };
+    if target_kind != TargetKind::WindowsServer || heartbeat.info.platform != AgentPlatform::Windows
+    {
+        return Err(ApiError::bad_request(
+            "agent_inventory_platform_mismatch",
+            "package inventory does not match the registered Windows target",
+        ));
+    }
+    let now = Utc::now();
+    if inventory.packages.len() > 50_000
+        || inventory.collected_at > now + Duration::seconds(5)
+        || inventory.collected_at < now - Duration::hours(1)
+    {
+        return Err(ApiError::bad_request(
+            "agent_inventory_invalid",
+            "Windows package inventory is invalid or too old",
+        ));
+    }
+    let mut names = std::collections::HashSet::new();
+    let mut packages = Vec::with_capacity(inventory.packages.len());
+    for package in &inventory.packages {
+        if !lxcup_agent::safe_winget_id(&package.name)
+            || package.name.len() > 128
+            || package.installed_version.trim().is_empty()
+            || package.installed_version.len() > 128
+            || package
+                .candidate_version
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty() || value.len() > 128)
+            || package.source.as_deref() != Some("winget")
+            || !names.insert(package.name.to_ascii_lowercase())
+        {
+            return Err(ApiError::bad_request(
+                "agent_inventory_invalid",
+                "Windows package inventory contains an invalid package entry",
+            ));
+        }
+        packages.push(InstalledPackage {
+            name: PackageName::new(package.name.clone()).map_err(|_| {
+                ApiError::bad_request(
+                    "agent_inventory_invalid",
+                    "Windows package inventory contains an invalid package name",
+                )
+            })?,
+            version: PackageVersion::new(package.installed_version.clone()).map_err(|_| {
+                ApiError::bad_request(
+                    "agent_inventory_invalid",
+                    "Windows package inventory contains an invalid installed version",
+                )
+            })?,
+            candidate_version: package
+                .candidate_version
+                .as_ref()
+                .map(|value| PackageVersion::new(value.clone()))
+                .transpose()
+                .map_err(|_| {
+                    ApiError::bad_request(
+                        "agent_inventory_invalid",
+                        "Windows package inventory contains an invalid candidate version",
+                    )
+                })?,
+            architecture: package.architecture.clone(),
+            source: package.source.clone(),
+        });
+    }
+    Ok(Some(PackageInventorySnapshot {
+        target_id: TargetId::from_uuid(heartbeat.target_id),
+        collected_at: inventory.collected_at,
+        packages,
+    }))
 }
 
 fn sanitize_docker_telemetry_window(heartbeat: &mut AgentHeartbeat) {
@@ -509,6 +610,7 @@ mod telemetry_sanitization_tests {
                 partial: false,
             },
             docker_telemetry: Default::default(),
+            package_inventory: None,
         };
 
         let summary = sanitize_telemetry_window(&mut heartbeat);
@@ -559,6 +661,7 @@ mod telemetry_sanitization_tests {
                 partial: false,
             },
             docker_telemetry: Default::default(),
+            package_inventory: None,
         };
 
         let summary = sanitize_telemetry_window(&mut heartbeat);
@@ -604,6 +707,7 @@ mod telemetry_sanitization_tests {
                 partial: false,
             },
             docker_telemetry: Default::default(),
+            package_inventory: None,
         };
 
         let summary = sanitize_telemetry_window(&mut heartbeat);
@@ -673,6 +777,7 @@ mod tests {
                 sent_at: Utc::now(),
                 telemetry: Default::default(),
                 docker_telemetry: Default::default(),
+                package_inventory: None,
             },
         );
 

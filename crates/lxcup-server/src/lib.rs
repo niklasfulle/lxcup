@@ -25,8 +25,9 @@ use lxcup_ansible::AnsibleJobCoordinator;
 use lxcup_core::{
     ActorRole, AgentRegistration, Container, ContainerId, DockerWorkload,
     DockerWorkloadManagementState, Enrollment, EnrollmentId, EnrollmentState, Execution,
-    ExecutionId, Permission, Scan, ScanId, SecretId, SecretKind, SecretScope, SecretValue, Target,
-    TargetId, TargetKind, TargetState, TargetTransport, UpdatePlan,
+    ExecutionId, PackageInventorySnapshot, Permission, Scan, ScanId, SecretId, SecretKind,
+    SecretScope, SecretValue, Target, TargetId, TargetKind, TargetState, TargetTransport,
+    UpdatePlan,
 };
 use lxcup_execution::ExecutionCoordinator;
 use lxcup_persistence::Repositories;
@@ -591,6 +592,7 @@ impl Default for ApiState {
 struct ApiStore {
     targets: Vec<Target>,
     agent_reports: HashMap<TargetId, AgentHeartbeat>,
+    package_inventories: HashMap<TargetId, PackageInventorySnapshot>,
     containers: Vec<Container>,
     enrollments: Vec<Enrollment>,
     enrollment_keys: HashMap<String, EnrollmentId>,

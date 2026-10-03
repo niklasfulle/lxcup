@@ -18,9 +18,12 @@ use thiserror::Error;
 use uuid::Uuid;
 
 mod docker;
+mod package_inventory;
 mod parsers;
+pub use package_inventory::{PackageInventoryError, collect_package_inventory};
 pub use parsers::{
     is_safe_docker_container_id, parse_docker_stats, parse_remote_image_config_digest,
+    safe_winget_id,
 };
 use parsers::{
     normalize_apt_list, parse_dpkg_packages, parse_windows_packages, safe_detail, safe_package,
@@ -294,6 +297,8 @@ pub struct AgentPackageInventory {
 pub struct AgentInstalledPackage {
     pub name: String,
     pub installed_version: String,
+    #[serde(default)]
+    pub candidate_version: Option<String>,
     pub architecture: Option<String>,
     pub source: Option<String>,
 }
@@ -317,6 +322,8 @@ pub struct AgentHeartbeat {
     pub telemetry: SystemTelemetryWindow,
     #[serde(default)]
     pub docker_telemetry: DockerTelemetryWindow,
+    #[serde(default)]
+    pub package_inventory: Option<AgentPackageInventory>,
 }
 
 #[derive(Clone)]
@@ -649,6 +656,7 @@ pub struct LocalAgentState {
     metrics: Arc<tokio::sync::Mutex<AgentMetrics>>,
     telemetry: Arc<tokio::sync::Mutex<TelemetryBuffer>>,
     docker_telemetry: Arc<tokio::sync::Mutex<DockerTelemetryBuffer>>,
+    package_inventory: Arc<tokio::sync::Mutex<Option<AgentPackageInventory>>>,
     results: Arc<tokio::sync::Mutex<HashMap<String, AgentCommandResponse>>>,
     docker_command_runner: Arc<dyn docker::DockerCommandRunner>,
 }
@@ -666,6 +674,7 @@ impl LocalAgentState {
             })),
             telemetry: Arc::new(tokio::sync::Mutex::new(TelemetryBuffer::default())),
             docker_telemetry: Arc::new(tokio::sync::Mutex::new(DockerTelemetryBuffer::default())),
+            package_inventory: Arc::new(tokio::sync::Mutex::new(None)),
             results: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             docker_command_runner: Arc::new(docker::ProcessDockerCommandRunner),
         }
@@ -697,6 +706,21 @@ impl LocalAgentState {
     }
     pub async fn docker_telemetry_window(&self) -> DockerTelemetryWindow {
         self.docker_telemetry.lock().await.window()
+    }
+    pub async fn record_package_inventory(&self, inventory: AgentPackageInventory) {
+        *self.package_inventory.lock().await = Some(inventory);
+    }
+    pub async fn package_inventory_snapshot(&self) -> Option<AgentPackageInventory> {
+        self.package_inventory.lock().await.clone()
+    }
+    pub async fn acknowledge_package_inventory(&self, collected_at: DateTime<Utc>) {
+        let mut inventory = self.package_inventory.lock().await;
+        if inventory
+            .as_ref()
+            .is_some_and(|current| current.collected_at == collected_at)
+        {
+            *inventory = None;
+        }
     }
 }
 

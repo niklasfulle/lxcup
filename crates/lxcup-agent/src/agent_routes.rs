@@ -1,7 +1,7 @@
 use super::{
-    AgentAction, AgentCommandRequest, AgentCommandResponse, AgentHealth, AgentPackageInventory,
-    AgentPlatform, LocalAgentState, docker, normalize_apt_list, parse_dpkg_packages,
-    parse_windows_packages, safe_detail, safe_package,
+    AgentAction, AgentCommandRequest, AgentCommandResponse, AgentHealth, AgentPlatform,
+    LocalAgentState, PackageInventoryError, collect_package_inventory, docker, normalize_apt_list,
+    safe_detail, safe_package, safe_winget_id,
 };
 use axum::{
     Json, Router,
@@ -48,83 +48,29 @@ async fn agent_package_inventory(
         )
             .into_response();
     }
-    let mut command = if state.info.platform == AgentPlatform::Windows {
-        let mut command = Command::new("powershell.exe");
-        command.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "$ErrorActionPreference='Stop'; $items=@(Get-Package | Select-Object -Property Name,Version,ProviderName); if ($items.Count -gt 50000) { throw 'package inventory limit exceeded' }; ConvertTo-Json -InputObject $items -Compress",
-        ]);
-        command
-    } else {
-        let mut command = Command::new("dpkg-query");
-        command.args([
-            "-W",
-            "-f=${binary:Package}\\t${Version}\\t${Architecture}\\n",
-        ]);
-        command
-    };
-    const MAX_INVENTORY_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
-    let output = match tokio::time::timeout(Duration::from_secs(30), command.output()).await {
-        Ok(Ok(output)) if output.status.success() => {
-            if output.stdout.len() > MAX_INVENTORY_OUTPUT_BYTES {
-                return (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    Json(serde_json::json!({"error":"package_inventory_too_large"})),
-                )
-                    .into_response();
-            }
-            output.stdout
-        }
-        Ok(Ok(_)) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error":"package_manager_unavailable"})),
-            )
-                .into_response();
-        }
-        Ok(Err(_)) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error":"package_manager_unavailable"})),
-            )
-                .into_response();
-        }
-        Err(_) => {
-            return (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(serde_json::json!({"error":"package_inventory_timeout"})),
-            )
-                .into_response();
-        }
-    };
-    let packages = if state.info.platform == AgentPlatform::Windows {
-        match parse_windows_packages(&String::from_utf8_lossy(&output)) {
-            Ok(packages) => packages,
-            Err(()) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({"error":"package_inventory_invalid"})),
-                )
-                    .into_response();
-            }
-        }
-    } else {
-        parse_dpkg_packages(&String::from_utf8_lossy(&output))
-    };
-    if packages.len() > 50_000 {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error":"package_inventory_too_large"})),
-        )
-            .into_response();
+    match collect_package_inventory(state.info.platform).await {
+        Ok(inventory) => Json(inventory).into_response(),
+        Err(error) => package_inventory_error_response(error),
     }
-    Json(AgentPackageInventory {
-        collected_at: Utc::now(),
-        packages,
-    })
-    .into_response()
+}
+
+fn package_inventory_error_response(error: PackageInventoryError) -> axum::response::Response {
+    let (status, code) = match error {
+        PackageInventoryError::ManagerUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "package_manager_unavailable",
+        ),
+        PackageInventoryError::Timeout => {
+            (StatusCode::GATEWAY_TIMEOUT, "package_inventory_timeout")
+        }
+        PackageInventoryError::TooLarge => {
+            (StatusCode::PAYLOAD_TOO_LARGE, "package_inventory_too_large")
+        }
+        PackageInventoryError::InvalidOutput => {
+            (StatusCode::BAD_GATEWAY, "package_inventory_invalid")
+        }
+    };
+    (status, Json(serde_json::json!({"error": code}))).into_response()
 }
 
 async fn agent_health(
@@ -246,21 +192,10 @@ async fn run_local_command(
     action: AgentAction,
     packages: &[String],
 ) -> (i32, String, String) {
-    let mut command = if platform == AgentPlatform::Windows {
-        let mut command = Command::new("powershell.exe");
-        command.args(["-NoProfile", "-NonInteractive", "-Command"]);
-        let script = match action {
-            AgentAction::Health => "Write-Output 'healthy'",
-            AgentAction::Scan => {
-                "if (Get-Command Get-WindowsUpdate -ErrorAction SilentlyContinue) { Get-WindowsUpdate -MicrosoftUpdate -IgnoreReboot | ConvertTo-Json -Compress } else { Write-Error 'PSWindowsUpdate is not installed'; exit 2 }"
-            }
-            AgentAction::Apply => {
-                "if (Get-Command Install-WindowsUpdate -ErrorAction SilentlyContinue) { Install-WindowsUpdate -AcceptAll -IgnoreReboot } else { Write-Error 'PSWindowsUpdate is not installed'; exit 2 }"
-            }
-        };
-        command.arg(script);
-        command
-    } else {
+    if platform == AgentPlatform::Windows {
+        return run_windows_winget_command(action, packages).await;
+    }
+    let mut command = {
         let mut command = Command::new("apt");
         match action {
             AgentAction::Health => {
@@ -302,9 +237,82 @@ async fn run_local_command(
     }
 }
 
+async fn run_windows_winget_command(
+    action: AgentAction,
+    packages: &[String],
+) -> (i32, String, String) {
+    if action == AgentAction::Health {
+        return (0, "healthy".to_owned(), String::new());
+    }
+    let commands = match windows_winget_commands(action, packages) {
+        Ok(commands) => commands,
+        Err(message) => return (2, String::new(), message.to_owned()),
+    };
+    let result = tokio::time::timeout(Duration::from_secs(900), async move {
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        for arguments in commands {
+            match Command::new("winget").args(arguments).output().await {
+                Ok(output) => {
+                    stdout.push_str(&String::from_utf8_lossy(&output.stdout));
+                    stderr.push_str(&String::from_utf8_lossy(&output.stderr));
+                    if !output.status.success() {
+                        return (output.status.code().unwrap_or(1), stdout, stderr);
+                    }
+                }
+                Err(error) => return (1, stdout, error.to_string()),
+            }
+        }
+        (0, stdout, stderr)
+    })
+    .await;
+    match result {
+        Ok(result) => result,
+        Err(_) => (124, String::new(), "agent command timed out".to_owned()),
+    }
+}
+
+fn windows_winget_commands(
+    action: AgentAction,
+    packages: &[String],
+) -> Result<Vec<Vec<String>>, &'static str> {
+    let commands = match action {
+        AgentAction::Health => return Err("health action does not use winget"),
+        // WinGet's upgrade listing is the local, installed-package update
+        // search. It does not install or upgrade anything without an ID.
+        AgentAction::Scan => vec![vec![
+            "list".to_owned(),
+            "--upgrade-available".to_owned(),
+            "--disable-interactivity".to_owned(),
+            "--accept-source-agreements".to_owned(),
+        ]],
+        AgentAction::Apply => {
+            if packages.is_empty() {
+                return Err("apply requires at least one winget package ID");
+            }
+            let mut commands = Vec::with_capacity(packages.len());
+            for package in packages {
+                if !safe_winget_id(package) {
+                    return Err("apply contains an invalid winget package ID");
+                }
+                commands.push(vec![
+                    "upgrade".to_owned(),
+                    "--id".to_owned(),
+                    package.clone(),
+                    "--exact".to_owned(),
+                    "--disable-interactivity".to_owned(),
+                    "--accept-source-agreements".to_owned(),
+                ]);
+            }
+            commands
+        }
+    };
+    Ok(commands)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::run_local_command;
+    use super::{run_local_command, safe_winget_id, windows_winget_commands};
     use crate::{AgentAction, AgentPlatform};
     use tower::ServiceExt;
 
@@ -358,6 +366,74 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"],
             "windows_apply_requires_approved_workflow"
         );
+    }
+
+    #[test]
+    fn windows_update_scan_uses_only_the_local_winget_update_listing() {
+        let commands = windows_winget_commands(AgentAction::Scan, &[]).unwrap();
+
+        assert_eq!(
+            commands,
+            [[
+                "list",
+                "--upgrade-available",
+                "--disable-interactivity",
+                "--accept-source-agreements"
+            ]]
+        );
+        assert!(!commands[0].iter().any(|argument| argument == "--all"));
+    }
+
+    #[test]
+    fn windows_update_apply_is_limited_to_exact_validated_ids() {
+        let commands = windows_winget_commands(
+            AgentAction::Apply,
+            &["Microsoft.PowerToys".to_owned(), "7zip.7zip".to_owned()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            commands,
+            [
+                [
+                    "upgrade",
+                    "--id",
+                    "Microsoft.PowerToys",
+                    "--exact",
+                    "--disable-interactivity",
+                    "--accept-source-agreements",
+                ],
+                [
+                    "upgrade",
+                    "--id",
+                    "7zip.7zip",
+                    "--exact",
+                    "--disable-interactivity",
+                    "--accept-source-agreements",
+                ],
+            ]
+        );
+        assert!(
+            commands
+                .iter()
+                .flatten()
+                .all(|argument| argument != "--all")
+        );
+        assert!(
+            !commands
+                .iter()
+                .flatten()
+                .any(|argument| argument == "--accept-package-agreements")
+        );
+    }
+
+    #[test]
+    fn windows_update_apply_rejects_empty_or_argument_shaped_ids() {
+        assert!(windows_winget_commands(AgentAction::Apply, &[]).is_err());
+        for package in ["--all", "Microsoft.PowerToys; whoami", "Publisher..App"] {
+            assert!(!safe_winget_id(package), "unexpectedly accepted {package}");
+            assert!(windows_winget_commands(AgentAction::Apply, &[package.to_owned()]).is_err());
+        }
     }
 
     #[tokio::test]

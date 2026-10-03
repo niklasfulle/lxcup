@@ -46,7 +46,17 @@ pub(super) async fn get_package_inventory(
             .find_latest(target_id)
             .await
             .map_err(|_| ApiError::storage())?,
-        None => None,
+        None => state
+            .store
+            .read()
+            .await
+            .package_inventories
+            .get(&target_id)
+            .cloned()
+            .map(|snapshot| lxcup_persistence::PersistedPackageInventory {
+                snapshot,
+                status: lxcup_persistence::PackageInventoryStatus::Complete,
+            }),
     };
     let data = match latest {
         Some(inventory) => PackageInventoryDto {

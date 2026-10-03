@@ -50,6 +50,12 @@ schemas and route availability.
   raw stdout/stderr, secret values, credentials, and environment variables are
   excluded. The UI downloads it locally and does not upload it anywhere.
 - The agent heartbeat authenticates separately using the target's agent token.
+- A Windows agent collects locally available application upgrades with
+  `winget list --upgrade-available` and may include the bounded result in its
+  authenticated heartbeat. The controller validates and persists only entries
+  reported by the registered Windows agent; it does not search package sources
+  or run WinGet remotely. Windows update installation must run on that Windows
+  system through WinGet and target exact package IDs, never `--all`.
 - Target responses include `agent_version` and `agent_last_seen_at` from the last authenticated heartbeat and `latest_agent_version` from the running controller build. The UI warns when versions differ and uses the real heartbeat timestamp for stale-connection warnings; onboarding and update workflows use the controller-reported version rather than a frontend constant.
 - Telemetry sample times are interpreted relative to the authenticated heartbeat's `sent_at` and normalized to controller time. This preserves the rolling window when an agent and controller have modest clock skew; samples outside that window remain rejected.
 - Linux agents collect telemetry every five seconds and include the rolling last 60 seconds with each 30-second heartbeat. The overlap lets the controller recover samples when a heartbeat is delayed or lost; duplicate normalized timestamps are ignored by persistence. The controller persists samples for 30 days and returns only the last 10 minutes for charts (about 120 samples at the normal interval). A daily cleanup removes expired records. Heartbeats include `missing_samples` for detected gaps and `partial: true` when samples are missing, rejected, or lack metrics, so operators can distinguish gaps from a quiet system.

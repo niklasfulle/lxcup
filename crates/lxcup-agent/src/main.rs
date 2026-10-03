@@ -398,6 +398,20 @@ async fn run(
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         }
     });
+    if config.info.platform == AgentPlatform::Windows {
+        let inventory_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                match lxcup_agent::collect_package_inventory(AgentPlatform::Windows).await {
+                    Ok(inventory) => inventory_state.record_package_inventory(inventory).await,
+                    Err(error) => {
+                        tracing::warn!(?error, "Windows winget inventory collection failed")
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(900)).await;
+            }
+        });
+    }
     let listener = tokio::net::TcpListener::bind(&config.bind).await?;
     tracing::info!(%config.bind, agent_id = %config.info.agent_id, "lxcup agent starting");
     if let Some((controller_url, target_id)) = config.heartbeat {
@@ -415,7 +429,12 @@ async fn run(
                     sent_at: chrono::Utc::now(),
                     telemetry: reporter_state.telemetry_window().await,
                     docker_telemetry: reporter_state.docker_telemetry_window().await,
+                    package_inventory: reporter_state.package_inventory_snapshot().await,
                 };
+                let inventory_collected_at = heartbeat
+                    .package_inventory
+                    .as_ref()
+                    .map(|inventory| inventory.collected_at);
                 let sample_count = heartbeat.telemetry.samples.len();
                 match reporter
                     .post(&endpoint)
@@ -424,7 +443,13 @@ async fn run(
                     .send()
                     .await
                 {
-                    Ok(response) if response.status().is_success() => {}
+                    Ok(response) if response.status().is_success() => {
+                        if let Some(collected_at) = inventory_collected_at {
+                            reporter_state
+                                .acknowledge_package_inventory(collected_at)
+                                .await;
+                        }
+                    }
                     Ok(response) => {
                         tracing::warn!(
                             target: "lxcup_agent::telemetry",

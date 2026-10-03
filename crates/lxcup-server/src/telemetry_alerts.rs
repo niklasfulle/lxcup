@@ -221,6 +221,7 @@ mod tests {
                 partial: false,
             },
             docker_telemetry: lxcup_agent::DockerTelemetryWindow::default(),
+            package_inventory: None,
         };
         assert!(stale_agent_alert(&target, Some(&heartbeat), now).is_none());
     }
