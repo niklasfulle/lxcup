@@ -78,7 +78,7 @@ fn support_summary_filter_drops_common_embedded_credentials_and_urls() {
         sanitize_summary(&message),
         "safe failure summary migration exited with code 1"
     );
-    assert_eq!(diagnostic_text(&database_url.to_string()), "[REDACTED]");
+    assert_eq!(diagnostic_text(database_url.as_ref()), "[REDACTED]");
 }
 
 #[tokio::test]

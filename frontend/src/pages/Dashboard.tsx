@@ -42,7 +42,7 @@ export function Dashboard() {
 
     <StaleAgentNotice targets={targetList} />
 
-    <section className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(20rem,0.9fr)]" aria-label="Ressourcen und Aktivität">
+    <section className="grid items-start gap-3 xl:grid-cols-2" aria-label="Ressourcen und Aktivität">
       <ResourceInventory targets={targets} />
       <RecentJobs jobs={jobs} recentJobs={recentJobs} targets={targetList} />
     </section>

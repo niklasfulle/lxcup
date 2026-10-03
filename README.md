@@ -5,11 +5,11 @@ workflows across Linux servers, LXC guests, Docker workloads, and Windows
 systems. It combines a web dashboard, a Rust controller and agents, PostgreSQL,
 and a restricted Ansible worker.
 
-> **Project status:** lxcup is under active development. The core onboarding,
-> agent deployment, heartbeat, health-check, package inventory, and workflow
-> paths are implemented. Some inventory, telemetry, backup, security, and
-> production-operations features are still being completed; see the open GitHub
-> issues before relying on a capability in production.
+> **Project status:** lxcup is under active development. Core onboarding,
+> workflow reconciliation, Compose-managed image updates, operational alerts,
+> encrypted backups, and diagnostic exports are implemented. Before relying on
+> the system in production, follow the deployment and recovery runbooks and
+> verify a restore using an isolated database.
 
 ## Components
 
@@ -71,37 +71,49 @@ docker compose down
 
 ## Backup and restore
 
-Create an encrypted backup of PostgreSQL and the encrypted secret store with
-Docker Compose and [age](https://age-encryption.org/):
+Admins can create backups in **System → Backups**. Each backup contains a
+PostgreSQL dump, the already encrypted secret store, and versioned deployment
+templates. The application encrypts the archive with the passphrase entered in
+the dialog using the standard [age](https://age-encryption.org/) passphrase
+format; the passphrase is never stored by lxcup. Keep it separately: losing it
+makes that archive unrecoverable. The live `.env` and
+`LXCUP_SECRET_MASTER_KEY` are not included, so keep the master key in a separate
+secret manager or other access-controlled recovery location.
+
+The encrypted archive remains in the persistent backup volume according to
+`LXCUP_BACKUP_RETENTION_DAYS` (default 30 days) until downloaded. You can also
+schedule **Backup erstellen** from **Zeitpläne** by selecting an active,
+global `backup_passphrase` Secret. The secret is resolved at run time and is
+not exposed in schedule responses or activity events. Scheduled backups are
+retained in the same list for manual download. Copy downloaded archives
+off-host; the application volume is not an offsite recovery strategy.
+
+To inspect an archive locally, decrypt it with age; age prompts for the
+passphrase:
 
 ```powershell
-.\scripts\backup-stack.ps1 -AgeRecipient $env:LXCUP_BACKUP_AGE_RECIPIENT
+age --decrypt --output .\backup.tar .\lxcup-backup-<id>.tar.age
+tar -xf .\backup.tar -C .\restore-test
 ```
 
-Set `LXCUP_BACKUP_AGE_RECIPIENT` to the public age recipient first. Keep the
-matching age identity and `LXCUP_SECRET_MASTER_KEY` in separate,
-access-controlled storage; neither private key is included in the backup. Do
-not store backups, identities, or master keys in the repository. Configure an
-external schedule and retention policy appropriate to your recovery objectives.
-
-To validate a backup, install `age`, PostgreSQL client tools (`pg_restore` and
-`psql`), and the Rust toolchain. Configure `DATABASE_TEST_URL` for an isolated
-database whose name includes `test` or `restore`, provide the age identity and
-the externally managed `LXCUP_SECRET_MASTER_KEY`, then run:
+To validate restore end-to-end, install `age`, PostgreSQL client tools
+(`pg_restore` and `psql`), and the Rust toolchain. Set `DATABASE_TEST_URL` to a
+disposable database whose name includes `test` or `restore`, provide the
+externally managed `LXCUP_SECRET_MASTER_KEY`, then run:
 
 ```powershell
 .\scripts\restore-backup-test.ps1 `
-  -BackupFile ".\backups\lxcup-<timestamp>.tar.age" `
-  -AgeIdentity "$env:LXCUP_BACKUP_AGE_IDENTITY" `
+  -BackupFile ".\lxcup-backup-<id>.tar.age" `
   -ConfirmIsolatedDatabase
 ```
 
-This test restores into the explicitly supplied database, applies migrations,
-and validates database references, audit data, and secret-store readability.
-It is destructive to that database: use a disposable restore/test database,
-never a production database. See
-[`docs/secret-store-recovery.md`](docs/secret-store-recovery.md) for the
-recovery procedure and recovery objectives.
+This test decrypts the archive (prompting for the backup passphrase), restores
+into only the explicitly supplied test database, applies migrations, and
+validates account/resource/inventory references, audit data, and secret-store
+readability using the external master key. It is destructive to that database:
+never point it at development or production data. See
+[`docs/secret-store-recovery.md`](docs/secret-store-recovery.md) for recovery
+details and the optional standalone Compose backup procedure.
 
 ## Onboarding and agent deployment
 

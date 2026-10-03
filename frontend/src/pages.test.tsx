@@ -205,6 +205,7 @@ describe("inventory pages", () => {
     mocks.jobs.data = [{ id: "dashboard-job", operation: "health_check", target: { target: target.id }, status: "failed", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:01:00Z" }];
     renderPage(<Dashboard />);
     expect(screen.getByRole("heading", { name: "Übersicht" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Ressourcen und Aktivität" })).toHaveClass("items-start", "gap-3", "xl:grid-cols-2");
     expect(screen.getByText("test-target")).toBeInTheDocument();
     expect(screen.getByText("Verbunden")).toBeInTheDocument();
     expect(screen.getByText("Worker · Verfügbar")).toBeInTheDocument();
@@ -1258,6 +1259,28 @@ describe("workflow pages", () => {
 });
 
 describe("application shell", () => {
+  it("explains server connection failures and retries the session check", async () => {
+    mocks.getSession.mockRejectedValueOnce(new Error("connection refused"));
+    mocks.getSession.mockResolvedValueOnce({ role: "user", username: "operator", must_change_password: false, expires_in_seconds: 28_800 });
+    renderPage(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Der Server ist gerade nicht erreichbar" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("lxcup-Server ist nicht erreichbar");
+    expect(screen.getByText("/api")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Erneut verbinden" }));
+    expect(await screen.findByRole("navigation", { name: "Hauptnavigation" })).toBeInTheDocument();
+  });
+
+  it("shows a server connection failure when the unauthenticated session check also fails", async () => {
+    mocks.getSession.mockRejectedValueOnce(new ApiError("authentication required", 401, "unauthorized"));
+    mocks.getAuthStatus.mockRejectedValueOnce(new Error("connection refused"));
+    renderPage(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Der Server ist gerade nicht erreichbar" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Anmelden" })).not.toBeInTheDocument();
+  });
+
   it("uses the account login and keeps credential errors generic", async () => {
     globalThis.localStorage.setItem("lxcup-theme-v2", "light");
     mocks.getSession.mockRejectedValueOnce(new ApiError("authentication required", 401, "unauthorized"));

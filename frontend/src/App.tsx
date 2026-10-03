@@ -20,6 +20,8 @@ import AuditLogPage from "./pages/AuditLogPage";
 import { BackupsPage } from "./pages/BackupsPage";
 import AccountPasswordPage from "./pages/AccountPasswordPage";
 import { WikiPage } from "./pages/WikiPage";
+import { ServerConnectionError } from "./components/ServerConnectionError";
+import { checkInitialAuthSession } from "./authSession";
 import { TaskMonitor, type GlobalEvent } from "./components/TaskMonitor";
 import { PasswordInput } from "./components/PasswordInput";
 import { cn } from "./classnames";
@@ -42,6 +44,7 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [accountAuth, setAccountAuth] = useState(false);
+  const [authCheckAttempt, setAuthCheckAttempt] = useState(0);
 
   useEffect(() => {
     apiClient.setUnauthorizedHandler(() => {
@@ -55,25 +58,26 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    void apiClient.getSession().then((session) => {
-      if (active) { apiClient.setCredentials(null, session.role); setAuthSession(session); setAuthReady(true); }
-    }).catch((error: unknown) => {
+    void checkInitialAuthSession().then((result) => {
       if (!active) return;
-      if (error instanceof ApiError && error.status === 401) {
-        void apiClient.getAuthStatus().then((status) => {
-          if (!active) return;
-          setAccountAuth(status.enabled);
-          setAuthReady(true);
-        }).catch(() => {
-          if (active) setAuthReady(true);
-        });
+      if (result.kind === "authenticated") {
+        apiClient.setCredentials(null, result.session.role);
+        setAuthSession(result.session);
+      } else if (result.kind === "unauthenticated") {
+        setAccountAuth(result.accountAuth);
       } else {
-        setAuthError("Die API-Sitzung konnte nicht geprüft werden.");
-        setAuthReady(true);
+        setAuthError("Der lxcup-Server ist nicht erreichbar oder antwortet nicht korrekt.");
       }
+      setAuthReady(true);
     });
     return () => { active = false; };
-  }, []);
+  }, [authCheckAttempt]);
+
+  const retryAuthCheck = () => {
+    setAuthError(null);
+    setAuthReady(false);
+    setAuthCheckAttempt((attempt) => attempt + 1);
+  };
 
   const login = async (token: string) => {
     queryClient.clear();
@@ -119,7 +123,7 @@ export default function App() {
   };
 
   if (!authReady) return <AuthMessage message="Sitzung wird geprüft …" />;
-  if (authError) return <AuthMessage message={authError} />;
+  if (authError) return <ServerConnectionError message={authError} onRetry={retryAuthCheck} />;
   if (!authSession) {
     if (!isKnownApplicationPath(location.pathname)) return <NotFound />;
     return accountAuth
