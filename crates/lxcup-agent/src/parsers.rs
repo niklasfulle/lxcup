@@ -138,9 +138,16 @@ pub(super) fn parse_dpkg_packages(output: &str) -> Vec<AgentInstalledPackage> {
         .collect()
 }
 
-pub(super) fn parse_windows_packages(output: &str) -> Result<Vec<AgentInstalledPackage>, ()> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowsPackageParseError {
+    InvalidOutput,
+}
+
+pub fn parse_windows_packages(
+    output: &str,
+) -> Result<Vec<AgentInstalledPackage>, WindowsPackageParseError> {
     if output.trim().is_empty() {
-        return Err(());
+        return Err(WindowsPackageParseError::InvalidOutput);
     }
     let mut packages = Vec::new();
     let mut has_table_separator = false;
@@ -155,14 +162,14 @@ pub(super) fn parse_windows_packages(output: &str) -> Result<Vec<AgentInstalledP
             continue;
         }
         if !safe_winget_id(columns[1]) {
-            return Err(());
+            return Err(WindowsPackageParseError::InvalidOutput);
         }
         if columns[0].is_empty()
             || columns[0].len() > 256
             || columns[2].is_empty()
             || columns[2].len() > 128
         {
-            return Err(());
+            return Err(WindowsPackageParseError::InvalidOutput);
         }
         let candidate_version = (columns.len() >= 5)
             .then(|| columns[3].trim())
@@ -184,11 +191,11 @@ pub(super) fn parse_windows_packages(output: &str) -> Result<Vec<AgentInstalledP
             source,
         });
         if packages.len() > 50_000 {
-            return Err(());
+            return Err(WindowsPackageParseError::InvalidOutput);
         }
     }
     if !has_table_separator {
-        return Err(());
+        return Err(WindowsPackageParseError::InvalidOutput);
     }
     Ok(packages)
 }

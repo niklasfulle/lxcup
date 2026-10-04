@@ -13,7 +13,9 @@ async fn unresolved_apply(state: &ApiState) -> lxcup_core::AnsibleJobId {
     )
     .unwrap();
     let target_id = target.id;
-    let credential = target.credential_secret_ref;
+    let credential = target
+        .credential_secret_ref
+        .expect("SSH target has deployment credentials");
     let agent = target.agent_secret_ref;
     state.store.write().await.targets.push(target);
     let created = state
@@ -137,7 +139,9 @@ async fn reconcile_endpoint_rejects_new_or_resolved_jobs() {
     )
     .unwrap();
     let target_id = target.id;
-    let credential = target.credential_secret_ref;
+    let credential = target
+        .credential_secret_ref
+        .expect("SSH target has deployment credentials");
     let agent = target.agent_secret_ref;
     state.store.write().await.targets.push(target);
     let rejected_source = state

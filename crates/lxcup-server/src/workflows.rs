@@ -29,7 +29,8 @@ pub(super) use jobs::{
 };
 pub(super) use reconciliation::{queue_agent_reconfiguration, reconcile_onboarding_jobs};
 
-use jobs::{configured_ansible_secret_refs, map_ansible_error, queue_enrollment_job};
+pub(super) use jobs::map_ansible_error;
+use jobs::{configured_ansible_secret_refs, queue_enrollment_job};
 use package_policy::{
     find_existing_job, find_idempotent_job, resolve_ansible_target, resolve_job_secret_refs,
     validate_package_update,

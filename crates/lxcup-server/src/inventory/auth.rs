@@ -284,12 +284,17 @@ async fn authenticate_request(
 }
 
 fn is_public_request(state: &ApiState, path: &str) -> bool {
-    // The heartbeat handler validates its own per-target agent token.
+    // Agent-to-controller routes validate their own per-target agent token.
     matches!(
         path,
-        "/health/live" | "/health/ready" | "/metrics" | "/api/v1/agents/heartbeat"
+        "/health/live"
+            | "/health/ready"
+            | "/metrics"
+            | "/api/v1/agents/heartbeat"
+            | "/api/v1/agents/workflows/claim"
     ) || (state.account_auth_enabled
         && matches!(path, "/api/v1/auth/status" | "/api/v1/auth/login"))
+        || (path.starts_with("/api/v1/agents/workflows/") && path.ends_with("/result"))
 }
 
 async fn load_account_actor(

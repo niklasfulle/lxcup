@@ -179,6 +179,51 @@ async fn agent_command(
     Json(response).into_response()
 }
 
+pub async fn execute_workflow_command(
+    state: &LocalAgentState,
+    command: &super::AgentWorkflowCommand,
+) -> super::AgentWorkflowResult {
+    let idempotency_key = command.job_id.to_string();
+    let mut results = state.results.lock().await;
+    if let Some(response) = results.get(&idempotency_key).cloned() {
+        return super::AgentWorkflowResult { response };
+    }
+    let started = std::time::Instant::now();
+    let (exit_code, stdout, stderr) = if command
+        .packages
+        .iter()
+        .any(|package| !safe_package(package))
+    {
+        (2, String::new(), "invalid package selection".to_owned())
+    } else {
+        run_local_command(state.info.platform, command.action, &command.packages).await
+    };
+    let success = exit_code == 0;
+    let now = Utc::now();
+    let mut metrics = state.metrics.lock().await;
+    metrics.commands_total = metrics.commands_total.saturating_add(1);
+    if !success {
+        metrics.commands_failed = metrics.commands_failed.saturating_add(1);
+    }
+    metrics.last_command_at = Some(now);
+    metrics.collected_at = now;
+    drop(metrics);
+    let response = AgentCommandResponse {
+        request_id: Uuid::new_v4(),
+        success,
+        exit_code,
+        stdout: safe_detail(&stdout),
+        stderr: safe_detail(&stderr),
+        reboot_required: false,
+        duration_ms: started.elapsed().as_millis() as u64,
+    };
+    if results.len() >= 512 {
+        results.clear();
+    }
+    results.insert(idempotency_key, response.clone());
+    super::AgentWorkflowResult { response }
+}
+
 pub(crate) fn authorized(state: &LocalAgentState, headers: &axum::http::HeaderMap) -> bool {
     headers
         .get(axum::http::header::AUTHORIZATION)

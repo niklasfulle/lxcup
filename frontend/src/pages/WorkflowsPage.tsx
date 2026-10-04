@@ -27,6 +27,7 @@ const modes: Array<{ value: AnsibleExecutionMode; label: string; effect: string;
 
 type BuildWorkflowRequestOptions = Readonly<{
   targetId: string;
+  targetKind?: string;
   operation: AnsibleOperation;
   mode: AnsibleExecutionMode;
   packages: readonly string[] | string;
@@ -38,6 +39,7 @@ type BuildWorkflowRequestOptions = Readonly<{
 
 export function buildWorkflowRequest({
   targetId,
+  targetKind,
   operation,
   mode,
   packages,
@@ -51,7 +53,7 @@ export function buildWorkflowRequest({
     const selectedPackages = typeof packages === "string"
       ? packages.split(",").map((item) => item.trim()).filter(Boolean)
       : [...packages];
-    parameters = { operation, packages: selectedPackages.length > 0 ? selectedPackages : ["*"] };
+    parameters = { operation, packages: selectedPackages.length > 0 ? selectedPackages : targetKind === "windows_server" ? [] : ["*"] };
   } else if (operation === "deploy_agent" || operation === "update_agent" || operation === "repair_agent") {
     if (!latestAgentVersion) throw new Error("Die aktuelle Agent-Version konnte nicht vom Controller geladen werden.");
     parameters = { operation, agent_version: latestAgentVersion };
@@ -99,6 +101,7 @@ export function WorkflowsPage() {
     mutationFn: async ({ selectedTargets, planIds }: { selectedTargets: TargetDto[]; planIds: Record<string, string> }) => {
       const outcomes = await Promise.allSettled(selectedTargets.map((target) => createAnsibleJob(buildWorkflowRequest({
         targetId: target.id,
+        targetKind: target.kind,
         operation,
         mode,
         packages: packagesByTarget[target.id] ?? [],
@@ -127,7 +130,7 @@ export function WorkflowsPage() {
     return [targetId, (jobs.data ?? []).filter((job) => job.operation === "update_packages" && job.mode === "plan" && job.status === "succeeded" && "target" in job.target && job.target.target === targetId && job.update_policy_id === policyId && [...(job.package_names ?? [])].sort(compareText).join(",") === requestedPackageScope)];
   }));
   const selectedPolicy = policies.data?.find((policy) => policy.id === policyId && policy.enabled);
-  const canSubmit = canSubmitWorkflow({ targetIds, allTargetsExist: selectedTargets.length === targetIds.length, isModifyingOperation, confirmed, operation, policyId, policyTargetIds: selectedPolicy?.allowed_targets ?? [], mode, approvedPlanJobIds, packagePlansByTarget, supportedModes: operationModes[operation] });
+  const canSubmit = canSubmitWorkflow({ targetIds, allTargetsExist: selectedTargets.length === targetIds.length, isModifyingOperation, confirmed, operation, policyId, policyTargetIds: selectedPolicy?.allowed_targets ?? [], mode, approvedPlanJobIds, packagePlansByTarget, supportedModes: operationModes[operation], windowsTargetIds: selectedTargets.filter((target) => target.kind === "windows_server").map((target) => target.id), packagesByTarget });
 
   function submit(event: Readonly<{ preventDefault: () => void }>) {
     event.preventDefault();
@@ -240,6 +243,8 @@ function workflowSubmitLabel(targetCount: number, pending: boolean) {
 
 function WorkflowControlPanel(props: WorkflowControlPanelProps) {
   const { targets, targetIds, onTargetToggle, bulkMode, onBulkModeChange, onSingleTargetChange, onSelectAllTargets, onClearTargets, operation, onOperationChange, mode, onModeChange, packagesByTarget, onPackagesChange, packageInventories, policies, policyId, onPolicyChange, approvedPlanJobIds, onApprovedPlanChange, packagePlansByTarget, modifying, confirmed, onConfirmedChange, pendingTargets, selectedOperation, selectedMode, pending, error, results, canSubmit, onSubmit } = props;
+  const windowsSelected = targets.some((target) => targetIds.includes(target.id) && target.kind === "windows_server");
+  const windowsOnlyOperations: AnsibleOperation[] = ["health_check", "collect_package_inventory", "update_packages"];
   const selectedPolicy = policies.find((policy) => policy.id === policyId && policy.enabled);
   const policyCoversTargets = selectedPolicy !== undefined && targetIds.every((targetId) => selectedPolicy.allowed_targets.includes(targetId));
   const policyWarning = operation === "update_packages" && policyId && targetIds.length > 0 && !policyCoversTargets;
@@ -263,7 +268,7 @@ function WorkflowControlPanel(props: WorkflowControlPanelProps) {
             <WorkflowTargetSelection bulkMode={bulkMode} targets={targets} targetIds={targetIds} onTargetToggle={onTargetToggle} onSingleTargetChange={onSingleTargetChange} onSelectAllTargets={onSelectAllTargets} onClearTargets={onClearTargets} />
             <label className="grid content-start gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Die erlaubte, fest registrierte Aktion des Workers."><span>Operation</span>
                 <select value={operation} onChange={(event) => onOperationChange(event.target.value as AnsibleOperation)}>
-                {operations.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                {operations.map((item) => <option key={item.value} value={item.value} disabled={windowsSelected && !windowsOnlyOperations.includes(item.value)}>{item.label}{windowsSelected && !windowsOnlyOperations.includes(item.value) ? " · nur über lokales Setup" : ""}</option>)}
               </select>
             </label>
             <label className="grid content-start gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Check prüft, Plan erstellt eine Vorschau, Apply führt aus und Reconcile gleicht einen unklaren Zustand ab."><span>Modus</span>
@@ -328,8 +333,9 @@ function PackageUpdatePicker({ targets, targetIds, packagesByTarget, onPackagesC
 
 function packageSelectionLabel(targets: TargetDto[], packagesByTarget: Record<string, string[]>, targetId: string) {
   const count = packagesByTarget[targetId]?.length ?? 0;
-  const name = targets.find((item) => item.id === targetId)?.name ?? targetId;
-  const scope = count === 0 ? "alle Updates" : `${count} ausgewählt`;
+  const target = targets.find((item) => item.id === targetId);
+  const name = target?.name ?? targetId;
+  const scope = count === 0 ? target?.kind === "windows_server" ? "winget-ID auswählen" : "alle Updates" : `${count} ausgewählt`;
   return `${name}: ${scope}`;
 }
 
@@ -346,12 +352,13 @@ function PackageUpdateDialog({ targetId, targetName, targetIds, targets, invento
   onClearSelection: () => void;
   onClose: () => void;
 }>) {
+  const windowsTarget = targets.find((item) => item.id === targetId)?.kind === "windows_server";
   return <dialog open className="fixed inset-0 z-50 m-0 grid h-full w-full max-h-none max-w-none place-items-center overflow-hidden bg-black/60 p-4" aria-modal="true" aria-labelledby="package-picker-title">
     <section className="grid max-h-[min(85vh,48rem)] w-full max-w-3xl grid-rows-[auto_auto_1fr_auto] overflow-hidden border border-[var(--line)] bg-[var(--panel)] text-[var(--ink)] shadow-xl">
-      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] p-4"><div><h2 id="package-picker-title" className="m-0">Verfügbare Updates</h2><p className="mb-0 mt-1 text-sm text-[var(--muted)]">Wähle einzelne Pakete aus. Bleibt die Auswahl leer, werden alle verfügbaren Updates eingeplant.</p></div><button className="border border-[var(--line)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--paper-muted)]" type="button" onClick={onClose}>Schließen</button></header>
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] p-4"><div><h2 id="package-picker-title" className="m-0">Verfügbare Updates</h2><p className="mb-0 mt-1 text-sm text-[var(--muted)]">{windowsTarget ? "Updates werden lokal mit winget gesucht. Wähle mindestens eine exakte Paket-ID aus." : "Wähle einzelne Pakete aus. Bleibt die Auswahl leer, werden alle verfügbaren Updates eingeplant."}</p></div><button className="border border-[var(--line)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--paper-muted)]" type="button" onClick={onClose}>Schließen</button></header>
       <PackageUpdateDialogTarget targetId={targetId} targetName={targetName} targetIds={targetIds} targets={targets} inventory={inventory} availableCount={availableUpdates.length} onTargetChange={onTargetChange} />
       <PackageUpdateDialogList targetId={targetId} inventory={inventory} availableUpdates={availableUpdates} selectedPackages={selectedPackages} onPackageSelected={onPackageSelected} />
-      <PackageUpdateDialogFooter selectedCount={selectedPackages.length} onClearSelection={onClearSelection} onClose={onClose} />
+      <PackageUpdateDialogFooter selectedCount={selectedPackages.length} windowsTarget={windowsTarget} onClearSelection={onClearSelection} onClose={onClose} />
     </section>
   </dialog>;
 }
@@ -370,13 +377,13 @@ function PackageUpdateDialogList({ targetId, inventory, availableUpdates, select
   return <ul className="m-0 grid min-h-0 list-none gap-2 overflow-y-auto p-4">{availableUpdates.map((item) => <li key={`${targetId}-${item.name}`}><label className="grid cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border border-[var(--line)] bg-[var(--paper-muted)] px-3 py-2.5 hover:border-[var(--primary)]"><input className="h-4 w-4 accent-lxcup-primary" type="checkbox" checked={selectedPackages.includes(item.name)} onChange={(event) => onPackageSelected(item.name, event.target.checked)} /><span className="min-w-0"><strong className="block truncate text-sm text-[var(--ink)]">{item.name}</strong><span className="text-xs text-[var(--muted)]">{item.installed_version} → {item.candidate_version}</span></span><span className="text-xs text-[var(--muted)]">{item.architecture ?? ""}</span></label></li>)}</ul>;
 }
 
-function PackageUpdateDialogFooter({ selectedCount, onClearSelection, onClose }: Readonly<{ selectedCount: number; onClearSelection: () => void; onClose: () => void }>) {
-  const selectedLabel = selectedPackageLabel(selectedCount);
-  return <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line)] p-4"><span className="text-xs text-[var(--muted)]">{selectedLabel}</span><div className="flex gap-2"><button className="border border-[var(--line)] px-3 py-2 text-xs font-semibold hover:bg-[var(--paper-muted)]" type="button" onClick={onClearSelection}>Auswahl leeren (alle)</button><button className="border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700" type="button" onClick={onClose}>Übernehmen</button></div></footer>;
+function PackageUpdateDialogFooter({ selectedCount, windowsTarget, onClearSelection, onClose }: Readonly<{ selectedCount: number; windowsTarget: boolean; onClearSelection: () => void; onClose: () => void }>) {
+  const selectedLabel = selectedPackageLabel(selectedCount, windowsTarget);
+  return <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line)] p-4"><span className="text-xs text-[var(--muted)]">{selectedLabel}</span><div className="flex gap-2"><button className="border border-[var(--line)] px-3 py-2 text-xs font-semibold hover:bg-[var(--paper-muted)]" type="button" onClick={onClearSelection}>Auswahl leeren{windowsTarget ? "" : " (alle)"}</button><button className="border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700" type="button" onClick={onClose}>Übernehmen</button></div></footer>;
 }
 
-function selectedPackageLabel(selectedCount: number) {
-  if (selectedCount === 0) return "Keine Auswahl: alle Updates";
+function selectedPackageLabel(selectedCount: number, windowsTarget: boolean) {
+  if (selectedCount === 0) return windowsTarget ? "Wähle mindestens eine winget-ID aus" : "Keine Auswahl: alle Updates";
   const unit = selectedCount === 1 ? "Paket" : "Pakete";
   return `${selectedCount} ${unit} für dieses Ziel ausgewählt`;
 }
@@ -408,7 +415,7 @@ function workflowHistoryDescription(targetId: string | null, targets: TargetDto[
   return `Ausführungen für ${targetName}.`;
 }
 
-function canSubmitWorkflow({ targetIds, allTargetsExist, isModifyingOperation, confirmed, operation, policyId, policyTargetIds, mode, approvedPlanJobIds, packagePlansByTarget, supportedModes }: {
+function canSubmitWorkflow({ targetIds, allTargetsExist, isModifyingOperation, confirmed, operation, policyId, policyTargetIds, mode, approvedPlanJobIds, packagePlansByTarget, supportedModes, windowsTargetIds, packagesByTarget }: {
   targetIds: string[];
   allTargetsExist: boolean;
   isModifyingOperation: boolean;
@@ -420,10 +427,14 @@ function canSubmitWorkflow({ targetIds, allTargetsExist, isModifyingOperation, c
   approvedPlanJobIds: Record<string, string>;
   packagePlansByTarget: Record<string, NonNullable<ReturnType<typeof useAnsibleJobs>["data"]>>;
   supportedModes: AnsibleExecutionMode[];
+  windowsTargetIds: string[];
+  packagesByTarget: Record<string, string[]>;
 }) {
   if (!targetIds.length || !allTargetsExist || !supportedModes.includes(mode) || (isModifyingOperation && !confirmed)) return false;
+  if (windowsTargetIds.length > 0 && !["health_check", "collect_package_inventory", "update_packages"].includes(operation)) return false;
   if (operation !== "update_packages") return true;
   if (!policyId || !targetIds.every((targetId) => policyTargetIds.includes(targetId))) return false;
+  if (windowsTargetIds.some((targetId) => (packagesByTarget[targetId] ?? []).length === 0)) return false;
   if (mode === "plan") return true;
   return mode === "apply" && targetIds.every((targetId) => (packagePlansByTarget[targetId] ?? []).some((job) => job.id === approvedPlanJobIds[targetId]));
 }

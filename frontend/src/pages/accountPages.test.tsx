@@ -67,7 +67,7 @@ describe("account and admin pages", () => {
   });
 
   it("creates, lists, and downloads encrypted admin backups", async () => {
-    vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:backup"), revokeObjectURL: vi.fn() });
+    vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:backup") });
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     renderPage(<BackupsPage />);
     expect(await screen.findByText(/2\.0 KB · verschlüsselt/)).toBeInTheDocument();

@@ -27,6 +27,7 @@ pub(super) async fn validate_package_update(
     })?;
     let policy = load_update_policy(state, target_id, policy_id).await?;
     let packages = update_packages(request)?;
+    validate_platform_package_ids(state, target_id, packages).await?;
     validate_policy_allows_packages(&policy, target_id, packages)?;
 
     match request.mode {
@@ -50,18 +51,12 @@ async fn load_update_policy(
     policy_id: &str,
 ) -> Result<lxcup_core::UpdatePolicy, ApiError> {
     let store = state.store.read().await;
-    let target_kind = store
+    store
         .targets
         .iter()
         .find(|target| target.id == target_id)
         .map(|target| target.kind)
         .ok_or_else(|| ApiError::not_found("target not found"))?;
-    if target_kind == lxcup_core::TargetKind::WindowsServer {
-        return Err(ApiError::bad_request(
-            "package_update_platform_unsupported",
-            "package-name update plans are currently supported on Debian and Ubuntu targets only",
-        ));
-    }
     store
         .update_policies
         .iter()
@@ -73,6 +68,31 @@ async fn load_update_policy(
                 "the selected update policy is missing or disabled",
             )
         })
+}
+
+async fn validate_platform_package_ids(
+    state: &ApiState,
+    target_id: TargetId,
+    packages: &[String],
+) -> Result<(), ApiError> {
+    let store = state.store.read().await;
+    let target = store
+        .targets
+        .iter()
+        .find(|target| target.id == target_id)
+        .ok_or_else(|| ApiError::not_found("target not found"))?;
+    if target.kind == lxcup_core::TargetKind::WindowsServer
+        && (packages.iter().any(|package| package == "*")
+            || packages
+                .iter()
+                .any(|package| !lxcup_agent::safe_winget_id(package)))
+    {
+        return Err(ApiError::bad_request(
+            "invalid_winget_package_id",
+            "Windows updates require explicit exact winget package IDs",
+        ));
+    }
+    Ok(())
 }
 
 fn update_packages(request: &CreateAnsibleJobRequest) -> Result<&[String], ApiError> {
@@ -276,7 +296,7 @@ pub(super) async fn resolve_ansible_target(
         return Ok((
             ResourceTarget::Target(target_id),
             lifecycle,
-            Some(target.credential_secret_ref),
+            target.workflow_auth_secret_ref(),
         ));
     }
     if request.container_id == 0 {
@@ -449,7 +469,11 @@ mod package_policy_tests {
                 lifecycle: ResourceLifecycle::Managed,
                 mode: ExecutionMode::Plan,
                 parameters: parameters.clone(),
-                secret_refs: vec![target.credential_secret_ref],
+                secret_refs: vec![
+                    target
+                        .credential_secret_ref
+                        .expect("SSH target credentials"),
+                ],
                 idempotency_key: "package-plan:security:failed-plan".to_owned(),
                 confirmed: true,
                 actor_role: ActorRole::Admin,
@@ -487,7 +511,11 @@ mod package_policy_tests {
                 lifecycle: ResourceLifecycle::Managed,
                 mode: ExecutionMode::Plan,
                 parameters: parameters.clone(),
-                secret_refs: vec![target.credential_secret_ref],
+                secret_refs: vec![
+                    target
+                        .credential_secret_ref
+                        .expect("SSH target credentials"),
+                ],
                 idempotency_key: "package-plan:security:approved-plan".to_owned(),
                 confirmed: true,
                 actor_role: ActorRole::Admin,
@@ -528,7 +556,11 @@ mod package_policy_tests {
                 lifecycle: ResourceLifecycle::Managed,
                 mode: ExecutionMode::Apply,
                 parameters: parameters.clone(),
-                secret_refs: vec![target.credential_secret_ref],
+                secret_refs: vec![
+                    target
+                        .credential_secret_ref
+                        .expect("SSH target credentials"),
+                ],
                 idempotency_key: apply.idempotency_key.clone(),
                 confirmed: true,
                 actor_role: ActorRole::Admin,
@@ -593,7 +625,11 @@ mod package_policy_tests {
                 parameters: AnsibleParameters::UpdatePackages {
                     packages: vec!["curl".to_owned()],
                 },
-                secret_refs: vec![target.credential_secret_ref],
+                secret_refs: vec![
+                    target
+                        .credential_secret_ref
+                        .expect("SSH target credentials"),
+                ],
                 idempotency_key: "completed-package-update".to_owned(),
                 confirmed: true,
                 actor_role: ActorRole::Admin,
@@ -636,7 +672,9 @@ mod package_policy_tests {
         .unwrap();
         target.mark_managed();
         let target_id = target.id;
-        let target_secret_ref = target.credential_secret_ref;
+        let target_secret_ref = target
+            .credential_secret_ref
+            .expect("SSH target has deployment credentials");
         {
             let mut store = state.store.write().await;
             store.targets.push(target.clone());
@@ -707,6 +745,41 @@ mod package_policy_tests {
                 .unwrap_err()
                 .code,
             "update_policy_denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_package_selection_requires_explicit_winget_ids() {
+        let state = ApiState::new();
+        let target = Target::new(
+            "windows-winget-target",
+            TargetKind::WindowsServer,
+            "192.0.2.20",
+            TargetTransport::Winrm,
+            SecretId::new(),
+            SecretId::new(),
+        )
+        .unwrap();
+        state.store.write().await.targets.push(target.clone());
+
+        assert!(
+            validate_platform_package_ids(&state, target.id, &["Microsoft.PowerToys".to_owned()])
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            validate_platform_package_ids(&state, target.id, &["*".to_owned()])
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_winget_package_id"
+        );
+        assert_eq!(
+            validate_platform_package_ids(&state, target.id, &["--all".to_owned()])
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_winget_package_id"
         );
     }
 }

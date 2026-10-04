@@ -71,6 +71,19 @@ to the target, and builds a temporary Ansible inventory and variables file.
   non-authenticating CSRF value is readable by the frontend.
 - Agent heartbeats use the target's agent token, independently of user-session
   tokens. Rotate or revoke credentials using the supported secret lifecycle.
+- Windows update workflows are outbound agent claims only. The controller
+  authenticates each claim/result with the target's agent token and permits only
+  allowlisted workflow actions. Update installs use validated exact winget IDs
+  locally; Windows package changes must never fall back to WinRM or caller-built
+  commands.
+- The Windows setup script verifies the versioned manifest, SHA-256, PE32+
+  format, and amd64 machine type before replacing the local executable. It
+  restricts the ProgramData configuration directory and token file to SYSTEM
+  and local Administrators, and does not place the token in process arguments.
+  The service runs as LocalSystem to support system-wide winget installation;
+  therefore each approved update has high local privilege. Keep Windows update
+  policies narrow and perform the documented isolated-host acceptance before
+  production use.
 
 For the implemented role behavior and production requirements, see
 [`operations.md`](operations.md) and [`../deploy/README.md`](../deploy/README.md).

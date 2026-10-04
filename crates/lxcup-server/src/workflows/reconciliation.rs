@@ -104,7 +104,7 @@ pub(super) async fn queue_package_inventory_followup(
             lifecycle: ResourceLifecycle::Managed,
             mode: ExecutionMode::Check,
             parameters: AnsibleParameters::CollectPackageInventory,
-            secret_refs: vec![target.credential_secret_ref],
+            secret_refs: target.workflow_auth_secret_ref().into_iter().collect(),
             idempotency_key: key,
             confirmed: true,
             actor_role: ActorRole::Operator,
@@ -146,7 +146,7 @@ pub(crate) async fn queue_agent_reconfiguration(
             parameters: AnsibleParameters::DeployAgent {
                 agent_version: env!("CARGO_PKG_VERSION").to_owned(),
             },
-            secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
+            secret_refs: target.deployment_secret_refs(),
             idempotency_key,
             confirmed: true,
             actor_role: ActorRole::Admin,
@@ -249,7 +249,7 @@ pub(super) async fn ensure_deployment_followups(
             lifecycle: ResourceLifecycle::Managed,
             mode: ExecutionMode::Check,
             parameters: AnsibleParameters::CollectPackageInventory,
-            secret_refs: vec![target.credential_secret_ref],
+            secret_refs: target.workflow_auth_secret_ref().into_iter().collect(),
             idempotency_key: inventory_key,
             confirmed: true,
             actor_role: ActorRole::Operator,
@@ -304,7 +304,12 @@ mod tests {
                 parameters: AnsibleParameters::DeployAgent {
                     agent_version: "0.3.1".to_owned(),
                 },
-                secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
+                secret_refs: vec![
+                    target
+                        .credential_secret_ref
+                        .expect("SSH target credentials"),
+                    target.agent_secret_ref,
+                ],
                 idempotency_key: idempotency_key.to_owned(),
                 confirmed: true,
                 actor_role: ActorRole::Admin,
@@ -459,7 +464,12 @@ mod tests {
                 parameters: AnsibleParameters::DeployAgent {
                     agent_version: "0.3.1".to_owned(),
                 },
-                secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
+                secret_refs: vec![
+                    target
+                        .credential_secret_ref
+                        .expect("SSH target credentials"),
+                    target.agent_secret_ref,
+                ],
                 idempotency_key: "unrecognized-deployment-key".to_owned(),
                 confirmed: true,
                 actor_role: ActorRole::Admin,

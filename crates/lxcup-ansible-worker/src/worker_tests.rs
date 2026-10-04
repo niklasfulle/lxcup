@@ -199,7 +199,8 @@ async fn wait_for_worker_status(
 ) -> lxcup_persistence::WorkerHeartbeatStatus {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(status) = repository.latest_status().await.unwrap() {
+            let status = repository.latest_status().await.unwrap();
+            if let Some(status) = status {
                 if status.artifact_store_available == Some(available) {
                     break status;
                 }
@@ -208,7 +209,7 @@ async fn wait_for_worker_status(
         }
     })
     .await
-    .expect("worker availability task should persist its first heartbeat")
+    .expect("worker availability task should persist the requested artifact-store status")
 }
 
 #[tokio::test]
@@ -244,7 +245,8 @@ async fn artifact_store_monitor_persists_unavailable_and_recovered_states() {
         "version": lxcup_core::VERSION,
         "artifacts": [
             { "platform": "linux-amd64", "file": "agent-amd64", "sha256": "digest" },
-            { "platform": "linux-arm64", "file": "agent-arm64", "sha256": "digest" }
+            { "platform": "linux-arm64", "file": "agent-arm64", "sha256": "digest" },
+            { "platform": "windows-amd64", "file": "agent.exe", "sha256": "digest" }
         ]
     });
     let (base_url, server) = artifact_server(manifest, Vec::new(), 1).await;
@@ -807,6 +809,27 @@ fn invocation_prepares_private_inventory_and_known_hosts_files() {
         fs::read_to_string(root.join("known_hosts")).unwrap(),
         "192.0.2.20 ssh-ed25519 AAAA"
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn ansible_invocation_rejects_agent_only_windows_targets_without_credentials() {
+    let root = std::env::temp_dir().join(format!("lxcup-worker-agent-only-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let (runtime, _, agent_ref, _) = runtime_with_secrets(&root);
+    let target = Target::new_agent_only(
+        "windows-agent-only",
+        TargetKind::WindowsServer,
+        "192.0.2.25",
+        agent_ref,
+    )
+    .unwrap();
+    let job = health_job(&target, "windows-agent-only-invocation");
+
+    assert!(matches!(
+        prepare_invocation(&runtime, &job, &target, &root).await,
+        Err(JobFailureCode::InvalidCredentials)
+    ));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1633,6 +1656,23 @@ async fn recovery_and_queue_processing_persist_all_worker_outcomes() {
     non_target_job.target = ResourceTarget::Container(lxcup_core::ContainerId::new(7));
     assert_eq!(
         run(&repos, &runtime, &mut non_target_job).await,
+        Err(JobFailureCode::PlaybookFailed)
+    );
+
+    let windows_agent_target = Target::new_agent_only(
+        "worker-windows-agent-target",
+        TargetKind::WindowsServer,
+        "192.0.2.24",
+        target.agent_secret_ref,
+    )
+    .unwrap();
+    repos.targets.save(&windows_agent_target).await.unwrap();
+    let mut windows_agent_job = health_job(
+        &windows_agent_target,
+        &format!("windows-agent-{}", Uuid::new_v4()),
+    );
+    assert_eq!(
+        run(&repos, &runtime, &mut windows_agent_job).await,
         Err(JobFailureCode::PlaybookFailed)
     );
 

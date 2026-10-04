@@ -136,7 +136,7 @@ pub(super) async fn queue_enrollment_job(
             parameters: AnsibleParameters::DeployAgent {
                 agent_version: "0.3.1".to_owned(),
             },
-            secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
+            secret_refs: target.deployment_secret_refs(),
             idempotency_key: format!("enrollment-{}", dto.id.as_uuid()),
             confirmed: true,
             actor_role: ActorRole::Operator,
@@ -186,6 +186,7 @@ pub(crate) async fn create_ansible_job(
     JsonBody(request): JsonBody<CreateAnsibleJobRequest>,
 ) -> Result<(StatusCode, Json<ApiEnvelope<AnsibleJobDto>>), ApiError> {
     let (target, lifecycle, target_secret_ref) = resolve_ansible_target(&state, &request).await?;
+    validate_windows_agent_operation(&state, target, request.operation).await?;
     validate_package_update(&state, &request, target).await?;
     let secret_refs = resolve_job_secret_refs(request.operation, target_secret_ref)?;
     let job_request = AnsibleJobRequest {
@@ -256,6 +257,35 @@ pub(crate) async fn create_ansible_job(
         "queued",
     ));
     Ok((status, Json(envelope(dto))))
+}
+
+async fn validate_windows_agent_operation(
+    state: &ApiState,
+    target: ResourceTarget,
+    operation: AnsibleOperation,
+) -> Result<(), ApiError> {
+    let ResourceTarget::Target(target_id) = target else {
+        return Ok(());
+    };
+    let store = state.store.read().await;
+    let Some(target) = store.targets.iter().find(|target| target.id == target_id) else {
+        return Err(ApiError::not_found("target not found"));
+    };
+    if target.kind == lxcup_core::TargetKind::WindowsServer
+        && (target.transport != lxcup_core::TargetTransport::Agent
+            || !matches!(
+                operation,
+                AnsibleOperation::HealthCheck
+                    | AnsibleOperation::CollectPackageInventory
+                    | AnsibleOperation::UpdatePackages
+            ))
+    {
+        return Err(ApiError::bad_request(
+            "windows_local_setup_required",
+            "Windows agent installation and maintenance must use the local setup package; remote WinRM workflows are not supported",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn persist_created_job(
@@ -586,7 +616,7 @@ pub(super) fn configured_ansible_secret_refs() -> Result<Vec<SecretId>, ApiError
     Ok(refs)
 }
 
-pub(super) fn map_ansible_error(error: lxcup_ansible::CoordinatorError) -> ApiError {
+pub(crate) fn map_ansible_error(error: lxcup_ansible::CoordinatorError) -> ApiError {
     match error {
         lxcup_ansible::CoordinatorError::TargetBusy => ApiError::conflict(
             "ansible_target_busy",

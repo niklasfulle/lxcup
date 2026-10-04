@@ -50,12 +50,24 @@ schemas and route availability.
   raw stdout/stderr, secret values, credentials, and environment variables are
   excluded. The UI downloads it locally and does not upload it anywhere.
 - The agent heartbeat authenticates separately using the target's agent token.
-- A Windows agent collects locally available application upgrades with
-  `winget list --upgrade-available` and may include the bounded result in its
-  authenticated heartbeat. The controller validates and persists only entries
-  reported by the registered Windows agent; it does not search package sources
-  or run WinGet remotely. Windows update installation must run on that Windows
-  system through WinGet and target exact package IDs, never `--all`.
+- Windows targets use the `agent` transport and do not have a deployment
+  credential or WinRM connection. The locally run PowerShell installer is
+  served by the frontend; it downloads `/agent/<version>/manifest.json` and the
+  matching `windows-amd64.exe` from the same controller origin. The installer
+  prompts for the agent token instead of putting it in a URL, command argument,
+  or browser history. Windows workflow claim and result routes accept only
+  Windows targets registered with the `agent` transport; legacy WinRM targets
+  cannot use the local agent workflow API.
+- A Windows agent collects installed software with local `winget list` and
+  available upgrades with `winget list --upgrade-available`, then includes the
+  bounded inventory in its authenticated heartbeat. Windows update plans are
+  refreshed by a local `winget list --upgrade-available` command. After an
+  approved plan and explicit Apply confirmation, the agent installs each exact
+  selected ID with `winget upgrade --id <id> --exact`; wildcard/`--all` updates
+  are rejected. The Windows agent claims allowlisted jobs over its outbound
+  authenticated connection at `POST /api/v1/agents/workflows/claim` and reports
+  results to `POST /api/v1/agents/workflows/{job_id}/result`. The controller
+  never connects to Windows through WinRM or runs winget remotely.
 - Target responses include `agent_version` and `agent_last_seen_at` from the last authenticated heartbeat and `latest_agent_version` from the running controller build. The UI warns when versions differ and uses the real heartbeat timestamp for stale-connection warnings; onboarding and update workflows use the controller-reported version rather than a frontend constant.
 - Telemetry sample times are interpreted relative to the authenticated heartbeat's `sent_at` and normalized to controller time. This preserves the rolling window when an agent and controller have modest clock skew; samples outside that window remain rejected.
 - Linux agents collect telemetry every five seconds and include the rolling last 60 seconds with each 30-second heartbeat. The overlap lets the controller recover samples when a heartbeat is delayed or lost; duplicate normalized timestamps are ignored by persistence. The controller persists samples for 30 days and returns only the last 10 minutes for charts (about 120 samples at the normal interval). A daily cleanup removes expired records. Heartbeats include `missing_samples` for detected gaps and `partial: true` when samples are missing, rejected, or lack metrics, so operators can distinguish gaps from a quiet system.
@@ -95,7 +107,7 @@ Consult OpenAPI for exact payloads and response codes.
 | Authentication | `GET /api/v1/auth/status`, `POST /api/v1/auth/login`, `GET /api/v1/auth/session`, `POST /api/v1/auth/logout`, `POST /api/v1/auth/password` |
 | Admin | Admin-only user management under `/api/v1/users`, user activity under `GET /api/v1/auth/audit` |
 | Targets | `GET/POST /api/v1/targets`, `GET /api/v1/targets/{target_id}`, confirmed Admin-only `DELETE /api/v1/targets/{target_id}`, package inventory and host/Docker telemetry reads, active telemetry alerts at `GET /api/v1/telemetry-alerts`, Docker inventory read and confirmed discovery via a connected LXC or Linux-server agent at `/api/v1/targets/{target_id}/docker/discovery`, confirmed Docker lifecycle actions at `/api/v1/targets/{target_id}/docker/containers/{container_id}/action`, read-only registry checks at `/api/v1/targets/{target_id}/docker/containers/{container_id}/image-update-check` |
-| Enrollment and agents | `POST /api/v1/enrollments`, `GET /api/v1/enrollments/{enrollment_id}`, `POST /api/v1/agents/heartbeat` |
+| Enrollment and agents | `POST /api/v1/enrollments`, `GET /api/v1/enrollments/{enrollment_id}`, `POST /api/v1/agents/heartbeat`; Windows agents also claim local allowlisted workflows at `POST /api/v1/agents/workflows/claim` and report results at `POST /api/v1/agents/workflows/{job_id}/result` |
 | Secrets | list/create, audit, metadata read, rotate, and revoke under `/api/v1/secrets` |
 | Ansible workflows | enqueue, read, retry, and event reads under `/api/v1/ansible/jobs`; worker availability under `/api/v1/ansible/worker-availability` |
 | Scheduling | list/create `/api/v1/schedules`; list/create `/api/v1/update-policies`; confirmed deletion of non-system policies at `DELETE /api/v1/update-policies/{policy_id}` |

@@ -845,7 +845,7 @@ async fn windows_agent_heartbeat_persists_only_validated_winget_updates() {
         .as_mut()
         .unwrap()
         .packages[0]
-        .candidate_version = None;
+        .candidate_version = Some(" ".to_owned());
     let rejected = router(state.clone())
         .oneshot(
             Request::builder()

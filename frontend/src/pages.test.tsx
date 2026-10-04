@@ -913,7 +913,7 @@ describe("onboarding and secret pages", () => {
     const sections = [
       { area: "linux_server" as const, button: "Hinzufügen", heading: "Serverzugang konfigurieren" },
       { area: "lxc" as const, button: "Hinzufügen", heading: "LXC-Container hinzufügen" },
-      { area: "windows_server" as const, button: "Hinzufügen", heading: "Windows-Zugang konfigurieren" },
+      { area: "windows_server" as const, button: "Hinzufügen", heading: "Agent lokal installieren" },
     ];
 
     for (const section of sections) {
@@ -984,7 +984,7 @@ describe("onboarding and secret pages", () => {
     await waitFor(() => expect(mocks.createSecret).toHaveBeenCalled());
   });
 
-  it("registers Windows targets with a WinRM credential and username", async () => {
+  it("registers Windows targets without WinRM credentials or onboarding jobs", async () => {
     mocks.targets.data = [];
     mocks.listSecrets.mockResolvedValue([
       secret("winrm", "windows-password", "winrm_password"),
@@ -994,25 +994,22 @@ describe("onboarding and secret pages", () => {
     renderPage(<TargetsPage area="windows_server" />);
     await userEvent.click(screen.getByRole("button", { name: "Hinzufügen" }));
 
-    expect(screen.getByLabelText("WinRM-Benutzer")).toHaveValue("Administrator");
-    const credential = screen.getByLabelText("Deployment-Secret");
-    expect(await within(credential).findByRole("option", { name: "windows-password" })).toBeInTheDocument();
-    expect(within(credential).queryByRole("option", { name: "ssh-password" })).not.toBeInTheDocument();
     await userEvent.type(screen.getByLabelText("Name"), "windows-test");
     await userEvent.type(screen.getByPlaceholderText("IP oder DNS-Name …"), "192.0.2.30");
-    await userEvent.selectOptions(credential, "winrm");
     await userEvent.selectOptions(screen.getByLabelText("Agent-Token"), "agent");
-    await userEvent.click(screen.getByRole("checkbox", { name: "Onboarding direkt starten" }));
     fireEvent.submit(screen.getByRole("button", { name: "Hinzufügen" }).closest("form")!);
 
     await waitFor(() => expect(mocks.createTarget).toHaveBeenCalledWith(expect.objectContaining({
       name: "windows-test",
       kind: "windows_server",
-      transport: "winrm",
-      ssh_user: "Administrator",
-      credential_secret_ref: "winrm",
+      transport: "agent",
+      ssh_user: null,
+      credential_secret_ref: null,
       ssh_known_hosts_secret_ref: null,
     })));
+    expect(screen.queryByLabelText("WinRM-Benutzer")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Deployment-Secret")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Onboarding direkt starten" })).not.toBeInTheDocument();
   });
 
   it("copies the complete target host preparation script including curl installation", async () => {

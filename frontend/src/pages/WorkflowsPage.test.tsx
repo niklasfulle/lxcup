@@ -28,6 +28,12 @@ describe("workflow mode contract", () => {
     expect(request.policy_id).toBe("standard");
   });
 
+  it("never expands an empty Windows selection to all winget updates", () => {
+    const request = buildWorkflowRequest({ targetId: "windows-1", targetKind: "windows_server", operation: "update_packages", mode: "plan", packages: [], confirmed: true, policyId: "standard" });
+
+    expect(request.parameters).toEqual({ operation: "update_packages", packages: [] });
+  });
+
   it("passes only explicitly selected packages to a targeted plan", () => {
     const request = buildWorkflowRequest({ targetId: "target-1", operation: "update_packages", mode: "plan", packages: ["curl", "nginx"], confirmed: true, policyId: "standard" });
 

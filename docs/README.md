@@ -28,6 +28,7 @@ detail changes; update the relevant documentation alongside that change.
 
 - [Operations runbook](operations.md)
 - [Worker setup](worker-setup.md)
+- [Windows agent installation and acceptance](windows-agent-acceptance.md)
 - [Secret-store recovery](secret-store-recovery.md)
 - [Quality gates](quality-gates.md)
 - [Frontend testing](frontend-testing.md)

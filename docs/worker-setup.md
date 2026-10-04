@@ -52,18 +52,34 @@ Der Worker akzeptiert nur die im Manifest genannte Datei und SHA-256-Summe.
 Ohne vollständige Executor-Konfiguration schlägt der Worker sicher fehl und
 protokolliert `worker_unavailable`; er behauptet keinen Erfolg.
 
-Windows-Ziele werden über WinRM mit HTTPS, aktivierter Zertifikatsprüfung und
-NTLM auf Port 5986 angesprochen. Benutzername und typisiertes
-`winrm_password`-Secret werden im Zielzugang hinterlegt. Der Windows-Agent läuft
-als eingeschränkter LocalService-Dienst und bindet seinen HTTP-Endpunkt
-standardmäßig nur an localhost. Installation, Healthcheck und Paketinventar
-sind verfügbar; Windows-Paketupdates bleiben deaktiviert, bis sie denselben
-Plan-, Policy- und Apply-Schutz wie Linux erfüllen. Den isolierten
-Windows-11-Test führt der Betreiber manuell durch, nicht gegen ein
-Produktivsystem. Beim Upgrade wird der Dienst vor dem Austausch der aktiven
-EXE gestoppt. Vorherige EXE und Umgebungskonfiguration bleiben für den
-Healthcheck-Rollback erhalten; schlägt der Healthcheck fehl, stellt der Worker
-die vorherige Version wieder her und markiert den Workflow als fehlgeschlagen.
+## Windows-Agent lokal installieren
+
+Windows 11 x64 wird ohne WinRM-Zugangsdaten eingebunden. In lxcup ein
+Windows-System mit Agent-Token anlegen, das angebotene
+`windows-agent-setup.ps1` herunterladen und den angezeigten Befehl in einer
+als Administrator gestarteten PowerShell ausführen. Das Skript fragt das
+Agent-Token verdeckt ab, lädt ausschließlich die Version aus dem Controller
+Manifest und prüft Plattform, PE32+-Architektur und SHA-256, bevor es den
+automatisch startenden Windows-Dienst aktualisiert. Es öffnet keine Firewall
+und benötigt keine Hilfsdatei auf dem Controller.
+
+Der Agent meldet Heartbeats, Telemetrie und das lokale `winget`-Inventar über
+ausgehendes HTTPS. Windows-Workflows werden ebenfalls vom Agenten über die
+authentifizierte Claim-/Result-API abgeholt. Updates werden ausschließlich mit
+`winget list --upgrade-available` geplant und pro genehmigter exakter ID mit
+`winget upgrade --id <ID> --exact` angewendet. Controller-Policy, erfolgreicher
+Plan und erneute Bestätigung sind weiterhin erforderlich; direkter Apply über
+den Agent-Endpunkt ist gesperrt.
+
+Das Setup-Skript legt Token und Konfiguration in
+`%ProgramData%\lxcup\agent.env` ab. Das Verzeichnis ist auf `SYSTEM` und lokale
+Administratoren beschränkt. Der Dienst läuft als `LocalSystem`, damit
+systemweite Paketinstallationen unterstützt werden können; dies verleiht
+freigegebenen winget-Updates hohe lokale Rechte. Beschränke Update-Policies
+und Agent-Token entsprechend und teste zuerst auf einem isolierten
+Windows-11-x64-System. Windows ARM64 ist nicht unterstützt. Manuelle
+Abnahme-, Upgrade-, winget-Verfügbarkeits- und Recovery-Schritte sind in
+[`windows-agent-acceptance.md`](windows-agent-acceptance.md) festgehalten.
 
 Der Worker prüft den versionierten Artifact-Store-Manifest-Endpunkt beim Start
 und anschließend alle 15 Sekunden. Bei Nichterreichbarkeit schreibt er eine

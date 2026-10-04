@@ -401,6 +401,43 @@ async fn authenticated_health_command_is_idempotent_and_updates_metrics() {
 }
 
 #[tokio::test]
+async fn local_windows_workflow_commands_are_cached_and_reject_unsafe_packages() {
+    let state = LocalAgentState::new(
+        AgentInfo {
+            agent_id: "windows-workflow-agent".to_owned(),
+            platform: AgentPlatform::Windows,
+            hostname: "windows-host".to_owned(),
+            version: "0.5.0".to_owned(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+        },
+        "agent-token",
+    );
+    let health_command = AgentWorkflowCommand {
+        job_id: uuid::Uuid::new_v4(),
+        action: AgentAction::Health,
+        packages: Vec::new(),
+    };
+
+    let first = execute_workflow_command(&state, &health_command).await;
+    let repeated = execute_workflow_command(&state, &health_command).await;
+    assert!(first.response.success);
+    assert_eq!(first.response.stdout, "healthy");
+    assert_eq!(first.response.request_id, repeated.response.request_id);
+
+    let unsafe_command = AgentWorkflowCommand {
+        job_id: uuid::Uuid::new_v4(),
+        action: AgentAction::Apply,
+        packages: vec!["--accept-all".to_owned()],
+    };
+    let rejected = execute_workflow_command(&state, &unsafe_command).await;
+    assert!(!rejected.response.success);
+    assert_eq!(rejected.response.exit_code, 2);
+    let metrics = state.metrics_snapshot().await;
+    assert_eq!(metrics.commands_total, 2);
+    assert_eq!(metrics.commands_failed, 1);
+}
+
+#[tokio::test]
 async fn inventory_routes_enforce_auth_and_report_platform_support() {
     let linux_state = LocalAgentState::new(
         AgentInfo {
@@ -487,7 +524,10 @@ async fn inventory_routes_enforce_auth_and_report_platform_support() {
         .unwrap();
     assert!(matches!(
         packages.status(),
-        StatusCode::OK | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
+        StatusCode::OK
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+            | StatusCode::BAD_GATEWAY
     ));
 }
 

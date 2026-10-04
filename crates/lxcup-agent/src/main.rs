@@ -5,8 +5,9 @@ use tokio::process::Command;
 mod windows_service;
 
 use lxcup_agent::{
-    AgentHeartbeat, AgentInfo, AgentPlatform, LocalAgentState, SystemTelemetrySample, agent_router,
-    parse_docker_stats,
+    AgentHeartbeat, AgentInfo, AgentPlatform, AgentWorkflowClaimRequest, AgentWorkflowCommand,
+    AgentWorkflowResult, LocalAgentState, SystemTelemetrySample, agent_router,
+    execute_workflow_command, parse_docker_stats,
 };
 
 fn value_or_default(value: Option<String>, default: &str) -> String {
@@ -40,6 +41,20 @@ async fn collect_docker_telemetry(
 fn heartbeat_endpoint(controller_url: &str) -> String {
     format!(
         "{}/api/v1/agents/heartbeat",
+        controller_url.trim_end_matches('/')
+    )
+}
+
+fn workflow_claim_endpoint(controller_url: &str) -> String {
+    format!(
+        "{}/api/v1/agents/workflows/claim",
+        controller_url.trim_end_matches('/')
+    )
+}
+
+fn workflow_result_endpoint(controller_url: &str, job_id: uuid::Uuid) -> String {
+    format!(
+        "{}/api/v1/agents/workflows/{job_id}/result",
         controller_url.trim_end_matches('/')
     )
 }
@@ -415,12 +430,14 @@ async fn run(
     let listener = tokio::net::TcpListener::bind(&config.bind).await?;
     tracing::info!(%config.bind, agent_id = %config.info.agent_id, "lxcup agent starting");
     if let Some((controller_url, target_id)) = config.heartbeat {
+        let reporter_controller = controller_url.clone();
+        let workflow_controller = controller_url.clone();
         let reporter = reqwest::Client::new();
         let reporter_info = config.info.clone();
         let reporter_token = config.token.clone();
         let reporter_state = state.clone();
         tokio::spawn(async move {
-            let endpoint = heartbeat_endpoint(&controller_url);
+            let endpoint = heartbeat_endpoint(&reporter_controller);
             loop {
                 let heartbeat = AgentHeartbeat {
                     target_id,
@@ -470,17 +487,105 @@ async fn run(
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }
         });
+        if config.info.platform == AgentPlatform::Windows {
+            let token = config.token.clone();
+            let workflow_state = state.clone();
+            tokio::spawn(async move {
+                let client = reqwest::Client::new();
+                let endpoint = workflow_claim_endpoint(&workflow_controller);
+                loop {
+                    let claim = client
+                        .post(&endpoint)
+                        .bearer_auth(&token)
+                        .json(&AgentWorkflowClaimRequest { target_id })
+                        .send()
+                        .await;
+                    match claim {
+                        Ok(response) if response.status().is_success() => {
+                            match response.json::<WorkflowClaimEnvelope>().await {
+                                Ok(envelope) => {
+                                    if let Some(command) = envelope.data {
+                                        report_claimed_workflow(
+                                            &client,
+                                            &workflow_controller,
+                                            &token,
+                                            &workflow_state,
+                                            command,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "Windows workflow claim response was invalid")
+                                }
+                            }
+                        }
+                        Ok(response) if response.status() == reqwest::StatusCode::NO_CONTENT => {}
+                        Ok(response) => {
+                            tracing::warn!(status = %response.status(), "Windows workflow claim was rejected")
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "outbound Windows workflow claim failed")
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            });
+        }
     }
     axum::serve(listener, agent_router(state))
         .with_graceful_shutdown(shutdown)
         .await
 }
 
+#[derive(serde::Deserialize)]
+struct WorkflowClaimEnvelope {
+    data: Option<AgentWorkflowCommand>,
+}
+
+async fn report_claimed_workflow(
+    client: &reqwest::Client,
+    controller: &str,
+    token: &str,
+    state: &LocalAgentState,
+    command: AgentWorkflowCommand,
+) {
+    let result = execute_workflow_command(state, &command).await;
+    if result.response.success && command.action == lxcup_agent::AgentAction::Apply {
+        match lxcup_agent::collect_package_inventory(AgentPlatform::Windows).await {
+            Ok(inventory) => state.record_package_inventory(inventory).await,
+            Err(error) => tracing::warn!(?error, "post-update winget inventory collection failed"),
+        }
+    }
+    let endpoint = workflow_result_endpoint(controller, command.job_id);
+    loop {
+        match client
+            .post(&endpoint)
+            .bearer_auth(token)
+            .json(&AgentWorkflowResult {
+                response: result.response.clone(),
+            })
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => break,
+            Ok(response) => {
+                tracing::warn!(job_id = %command.job_id, status = %response.status(), "Windows workflow result was rejected; retrying")
+            }
+            Err(error) => {
+                tracing::warn!(job_id = %command.job_id, %error, "Windows workflow result delivery failed; retrying")
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ProcTelemetryInput, heartbeat_endpoint, parse_agent_environment, run,
-        startup_config_from_values, telemetry_from_proc, value_or_default,
+        startup_config_from_values, telemetry_from_proc, value_or_default, workflow_claim_endpoint,
+        workflow_result_endpoint,
     };
 
     #[test]
@@ -492,6 +597,19 @@ mod tests {
         assert_eq!(
             heartbeat_endpoint("http://controller"),
             "http://controller/api/v1/agents/heartbeat"
+        );
+    }
+
+    #[test]
+    fn outbound_workflow_endpoints_normalize_controller_slashes() {
+        let job_id = uuid::Uuid::nil();
+        assert_eq!(
+            workflow_claim_endpoint("https://controller/"),
+            "https://controller/api/v1/agents/workflows/claim"
+        );
+        assert_eq!(
+            workflow_result_endpoint("https://controller/", job_id),
+            format!("https://controller/api/v1/agents/workflows/{job_id}/result")
         );
     }
 

@@ -22,12 +22,10 @@ mod package_inventory;
 mod parsers;
 pub use package_inventory::{PackageInventoryError, collect_package_inventory};
 pub use parsers::{
-    is_safe_docker_container_id, parse_docker_stats, parse_remote_image_config_digest,
-    safe_winget_id,
+    WindowsPackageParseError, is_safe_docker_container_id, parse_docker_stats,
+    parse_remote_image_config_digest, parse_windows_packages, safe_winget_id,
 };
-use parsers::{
-    normalize_apt_list, parse_dpkg_packages, parse_windows_packages, safe_detail, safe_package,
-};
+use parsers::{normalize_apt_list, parse_dpkg_packages, safe_detail, safe_package};
 
 pub const PROTOCOL_VERSION: &str = "v1";
 
@@ -72,6 +70,26 @@ pub struct AgentCommandResponse {
     pub stderr: String,
     pub reboot_required: bool,
     pub duration_ms: u64,
+}
+
+/// A bounded allowlisted task claimed by the installed Windows agent over
+/// its authenticated outbound connection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentWorkflowCommand {
+    pub job_id: uuid::Uuid,
+    pub action: AgentAction,
+    #[serde(default)]
+    pub packages: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentWorkflowClaimRequest {
+    pub target_id: uuid::Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentWorkflowResult {
+    pub response: AgentCommandResponse,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -727,6 +745,7 @@ impl LocalAgentState {
 mod agent_routes;
 pub use agent_routes::agent_router;
 pub(crate) use agent_routes::authorized;
+pub use agent_routes::execute_workflow_command;
 
 #[cfg(test)]
 #[path = "tests.rs"]

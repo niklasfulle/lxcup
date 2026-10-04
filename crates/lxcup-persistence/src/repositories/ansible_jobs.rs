@@ -1,7 +1,8 @@
 use super::{
     AnsibleJob, AnsibleJobRepository, AnsibleJobStatus, Database, JobEvent, RepositoryError, Row,
-    Utc, ansible_status_to_db, is_active_ansible_job_status,
+    TargetId, Utc, ansible_status_to_db, is_active_ansible_job_status,
 };
+use lxcup_ansible::ExecutionMode;
 use lxcup_core::ResourceTarget;
 
 /// Aggregated queue values used by the operational metrics endpoint.
@@ -168,6 +169,9 @@ impl AnsibleJobRepository {
         let row = sqlx::query(
             "SELECT candidate.payload FROM ansible_jobs AS candidate \
              WHERE candidate.status = 'queued' \
+               AND NOT EXISTS (SELECT 1 FROM targets AS windows_target \
+                               WHERE windows_target.id = candidate.target_id \
+                                 AND windows_target.kind = 'windowsserver') \
                AND NOT EXISTS ( \
                    SELECT 1 FROM ansible_jobs AS active \
                    WHERE active.target = candidate.target \
@@ -242,6 +246,75 @@ impl AnsibleJobRepository {
             .bind(Utc::now())
             .execute(&mut *transaction)
             .await?;
+        transaction.commit().await?;
+        Ok(Some(job))
+    }
+
+    /// Atomically claims one queued Windows workflow for its installed
+    /// agent. Windows targets are excluded from the Ansible worker queue so
+    /// package changes can only execute locally through the outbound agent.
+    pub async fn claim_next_windows_agent_job(
+        &self,
+        target_id: TargetId,
+    ) -> Result<Option<AnsibleJob>, RepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT candidate.payload FROM ansible_jobs AS candidate \
+             JOIN targets AS target ON target.id = candidate.target_id \
+             WHERE candidate.target_id = $1 AND target.kind = 'windowsserver' \
+               AND candidate.status = 'queued' \
+               AND candidate.payload->>'operation' IN ('health_check', 'collect_package_inventory', 'update_packages') \
+               AND NOT EXISTS (SELECT 1 FROM ansible_jobs AS active \
+                               WHERE active.target_id = candidate.target_id \
+                                 AND active.status IN ('checking', 'planned', 'applying')) \
+             ORDER BY candidate.created_at \
+             FOR UPDATE OF candidate SKIP LOCKED LIMIT 1",
+        )
+        .bind(target_id.as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let mut job: AnsibleJob =
+            serde_json::from_value(row.try_get("payload")?).map_err(|_| {
+                RepositoryError::InvalidValue {
+                    field: "ansible job payload",
+                }
+            })?;
+        let mut statuses = vec![AnsibleJobStatus::Checking];
+        job.transition_to(AnsibleJobStatus::Checking).map_err(|_| {
+            RepositoryError::InvalidValue {
+                field: "ansible job status",
+            }
+        })?;
+        if job.mode == ExecutionMode::Apply {
+            job.transition_to(AnsibleJobStatus::Planned).map_err(|_| {
+                RepositoryError::InvalidValue {
+                    field: "ansible job status",
+                }
+            })?;
+            job.transition_to(AnsibleJobStatus::Applying).map_err(|_| {
+                RepositoryError::InvalidValue {
+                    field: "ansible job status",
+                }
+            })?;
+            statuses.extend([AnsibleJobStatus::Planned, AnsibleJobStatus::Applying]);
+        }
+        let payload = serde_json::to_value(&job).map_err(RepositoryError::Serialization)?;
+        sqlx::query(
+            "UPDATE ansible_jobs SET status = $1, payload = $2, updated_at = $3 WHERE id = $4",
+        )
+        .bind(ansible_status_to_db(job.status))
+        .bind(payload)
+        .bind(job.updated_at)
+        .bind(job.id.as_uuid())
+        .execute(&mut *transaction)
+        .await?;
+        for status in statuses {
+            append_status_event(&mut transaction, job.id, status).await?;
+        }
         transaction.commit().await?;
         Ok(Some(job))
     }
@@ -427,4 +500,31 @@ impl AnsibleJobRepository {
             })
             .collect()
     }
+}
+
+async fn append_status_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    job_id: lxcup_core::AnsibleJobId,
+    status: AnsibleJobStatus,
+) -> Result<(), RepositoryError> {
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM ansible_job_events WHERE job_id = $1",
+    )
+    .bind(job_id.as_uuid())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let event = JobEvent {
+        sequence: sequence as u64,
+        job_id,
+        event: lxcup_ansible::JobEventKind::StatusChanged { status },
+        created_at: Utc::now(),
+    };
+    sqlx::query("INSERT INTO ansible_job_events (job_id, sequence, payload, created_at) VALUES ($1, $2, $3, $4)")
+        .bind(job_id.as_uuid())
+        .bind(sequence)
+        .bind(serde_json::to_value(event).map_err(RepositoryError::Serialization)?)
+        .bind(Utc::now())
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
 }
