@@ -22,11 +22,14 @@ export function BackupsPage() {
     try {
       const blob = await downloadAdminBackup(backup.id);
       const url = URL.createObjectURL(blob);
+      const revokeObjectUrl = typeof URL.revokeObjectURL === "function"
+        ? URL.revokeObjectURL.bind(URL)
+        : undefined;
       const anchor = document.createElement("a");
       anchor.href = url;
       anchor.download = `lxcup-backup-${backup.id}.tar.age`;
       anchor.click();
-      globalThis.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      if (revokeObjectUrl) globalThis.setTimeout(() => revokeObjectUrl(url), 1000);
     } catch (error) {
       setDownloadError(message(error, "Backup konnte nicht geladen werden."));
     } finally {

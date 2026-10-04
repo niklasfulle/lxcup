@@ -252,7 +252,12 @@ async fn postgres_worker_claims_reconciliation_while_unresolved_apply_locks_targ
         lifecycle: ResourceLifecycle::Managed,
         mode: ExecutionMode::Apply,
         parameters: AnsibleParameters::RepairAgent,
-        secret_refs: vec![target.credential_secret_ref, target.agent_secret_ref],
+        secret_refs: vec![
+            target
+                .credential_secret_ref
+                .expect("test target has credentials"),
+            target.agent_secret_ref,
+        ],
         idempotency_key: "reconcile-source-job".to_owned(),
         confirmed: true,
         actor_role: ActorRole::Admin,
@@ -335,6 +340,146 @@ async fn postgres_worker_claims_reconciliation_while_unresolved_apply_locks_targ
     assert_eq!(claimed.id, reconciliation.id);
     assert_eq!(claimed.mode, ExecutionMode::Reconcile);
     assert_eq!(claimed.status, AnsibleJobStatus::Checking);
+
+    test_database.finish().await;
+}
+
+#[tokio::test]
+async fn postgres_windows_agent_claims_only_allowlisted_jobs_and_persists_apply_transitions() {
+    let Some(test_database) = scoped_test_database("windows_agent_jobs").await else {
+        return;
+    };
+    let database = test_database.database();
+    let repositories = Repositories::new(database);
+    let target = Target::new_agent_only(
+        "windows-agent-queue-target",
+        TargetKind::WindowsServer,
+        "192.0.2.60",
+        SecretId::new(),
+    )
+    .unwrap();
+    repositories.targets.save(&target).await.unwrap();
+    let target_ref = ResourceTarget::Target(target.id);
+    let plan = AnsibleJob::from_request(AnsibleJobRequest {
+        operation: AnsibleOperation::UpdatePackages,
+        target: target_ref,
+        lifecycle: ResourceLifecycle::Managed,
+        mode: ExecutionMode::Plan,
+        parameters: AnsibleParameters::UpdatePackages {
+            packages: vec!["7zip.7zip".to_owned()],
+        },
+        secret_refs: vec![target.agent_secret_ref],
+        idempotency_key: "windows-agent-plan".to_owned(),
+        confirmed: true,
+        actor_role: ActorRole::Admin,
+    })
+    .unwrap();
+    repositories.ansible_jobs.save(&plan).await.unwrap();
+    assert!(
+        repositories
+            .ansible_jobs
+            .claim_next_queued()
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repositories
+            .ansible_jobs
+            .claim_next_windows_agent_job(lxcup_core::TargetId::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let claimed_plan = repositories
+        .ansible_jobs
+        .claim_next_windows_agent_job(target.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed_plan.id, plan.id);
+    assert_eq!(claimed_plan.status, AnsibleJobStatus::Checking);
+    let mut completed_plan = claimed_plan;
+    completed_plan
+        .transition_to(AnsibleJobStatus::Planned)
+        .unwrap();
+    completed_plan
+        .transition_to(AnsibleJobStatus::Succeeded)
+        .unwrap();
+    repositories
+        .ansible_jobs
+        .update(&completed_plan)
+        .await
+        .unwrap();
+
+    let apply = AnsibleJob::from_request(AnsibleJobRequest {
+        operation: AnsibleOperation::UpdatePackages,
+        target: target_ref,
+        lifecycle: ResourceLifecycle::Managed,
+        mode: ExecutionMode::Apply,
+        parameters: AnsibleParameters::UpdatePackages {
+            packages: vec!["7zip.7zip".to_owned()],
+        },
+        secret_refs: vec![target.agent_secret_ref],
+        idempotency_key: "windows-agent-apply".to_owned(),
+        confirmed: true,
+        actor_role: ActorRole::Admin,
+    })
+    .unwrap();
+    repositories.ansible_jobs.save(&apply).await.unwrap();
+    let claimed_apply = repositories
+        .ansible_jobs
+        .claim_next_windows_agent_job(target.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed_apply.status, AnsibleJobStatus::Applying);
+    assert_eq!(
+        repositories
+            .ansible_jobs
+            .events(apply.id)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let unsupported_target = Target::new_agent_only(
+        "windows-agent-unsupported-queue-target",
+        TargetKind::WindowsServer,
+        "192.0.2.61",
+        SecretId::new(),
+    )
+    .unwrap();
+    repositories
+        .targets
+        .save(&unsupported_target)
+        .await
+        .unwrap();
+    let unsupported = AnsibleJob::from_request(AnsibleJobRequest {
+        operation: AnsibleOperation::DeployAgent,
+        target: ResourceTarget::Target(unsupported_target.id),
+        lifecycle: ResourceLifecycle::Managed,
+        mode: ExecutionMode::Plan,
+        parameters: AnsibleParameters::DeployAgent {
+            agent_version: "0.5.0".to_owned(),
+        },
+        secret_refs: vec![unsupported_target.agent_secret_ref],
+        idempotency_key: "windows-agent-deploy-unsupported".to_owned(),
+        confirmed: true,
+        actor_role: ActorRole::Admin,
+    })
+    .unwrap();
+    repositories.ansible_jobs.save(&unsupported).await.unwrap();
+    assert!(
+        repositories
+            .ansible_jobs
+            .claim_next_windows_agent_job(unsupported_target.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     test_database.finish().await;
 }

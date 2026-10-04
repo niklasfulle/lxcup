@@ -232,22 +232,31 @@ fn package_inventory_parsers_normalize_linux_and_windows_fixtures() {
     let linux = parse_dpkg_packages("curl\t8.5.0-2\tamd64\ninvalid");
     assert_eq!(linux.len(), 1);
     assert_eq!(linux[0].source.as_deref(), Some("dpkg"));
-    let windows =
-        parse_windows_packages(r#"[{"Name":"7zip","Version":"24.0","ProviderName":"Programs"}]"#)
-            .unwrap();
-    assert_eq!(windows[0].name, "7zip");
-    assert_eq!(windows[0].source.as_deref(), Some("Programs"));
+    let windows = parse_windows_packages(
+        "Name                  Id                    Version  Available  Source\n--------------------------------------------------------------------------------\n7-Zip 24.09 (x64)      7zip.7zip             24.09    25.01      winget\n",
+    )
+    .unwrap();
+    assert_eq!(windows[0].name, "7zip.7zip");
+    assert_eq!(windows[0].candidate_version.as_deref(), Some("25.01"));
+    assert_eq!(windows[0].source.as_deref(), Some("winget"));
 }
 
 #[test]
 fn windows_package_parser_accepts_empty_and_rejects_bad_or_excessive_output() {
-    assert!(parse_windows_packages("[]").unwrap().is_empty());
+    assert!(
+        parse_windows_packages("Name  Id  Version  Source\n-------------------------\n")
+            .unwrap()
+            .is_empty()
+    );
     assert!(parse_windows_packages("").is_err());
     assert!(parse_windows_packages("null").is_err());
-    assert!(parse_windows_packages(r#"[{"Name":"","Version":"1"}]"#).is_err());
+    assert!(parse_windows_packages("winget failed to start").is_err());
     let excessive = format!(
-        "[{}]",
-        (0..=50_000).map(|_| "{}").collect::<Vec<_>>().join(",")
+        "Name  Id  Version  Source\n-------------------------\n{}",
+        (0..=50_000)
+            .map(|_| "Package  Vendor.Package  1.0  winget")
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     assert!(parse_windows_packages(&excessive).is_err());
 }
@@ -392,6 +401,43 @@ async fn authenticated_health_command_is_idempotent_and_updates_metrics() {
 }
 
 #[tokio::test]
+async fn local_windows_workflow_commands_are_cached_and_reject_unsafe_packages() {
+    let state = LocalAgentState::new(
+        AgentInfo {
+            agent_id: "windows-workflow-agent".to_owned(),
+            platform: AgentPlatform::Windows,
+            hostname: "windows-host".to_owned(),
+            version: "0.5.0".to_owned(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+        },
+        "agent-token",
+    );
+    let health_command = AgentWorkflowCommand {
+        job_id: uuid::Uuid::new_v4(),
+        action: AgentAction::Health,
+        packages: Vec::new(),
+    };
+
+    let first = execute_workflow_command(&state, &health_command).await;
+    let repeated = execute_workflow_command(&state, &health_command).await;
+    assert!(first.response.success);
+    assert_eq!(first.response.stdout, "healthy");
+    assert_eq!(first.response.request_id, repeated.response.request_id);
+
+    let unsafe_command = AgentWorkflowCommand {
+        job_id: uuid::Uuid::new_v4(),
+        action: AgentAction::Apply,
+        packages: vec!["--accept-all".to_owned()],
+    };
+    let rejected = execute_workflow_command(&state, &unsafe_command).await;
+    assert!(!rejected.response.success);
+    assert_eq!(rejected.response.exit_code, 2);
+    let metrics = state.metrics_snapshot().await;
+    assert_eq!(metrics.commands_total, 2);
+    assert_eq!(metrics.commands_failed, 1);
+}
+
+#[tokio::test]
 async fn inventory_routes_enforce_auth_and_report_platform_support() {
     let linux_state = LocalAgentState::new(
         AgentInfo {
@@ -478,7 +524,10 @@ async fn inventory_routes_enforce_auth_and_report_platform_support() {
         .unwrap();
     assert!(matches!(
         packages.status(),
-        StatusCode::OK | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
+        StatusCode::OK
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+            | StatusCode::BAD_GATEWAY
     ));
 }
 

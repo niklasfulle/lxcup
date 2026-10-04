@@ -1,6 +1,7 @@
 use super::*;
 use crate::{ContainerId, Enrollment, Target};
 use lxcup_ansible::{AnsibleContractError, CoordinatorError};
+use lxcup_core::{TargetKind, TargetTransport};
 use std::sync::{Mutex, OnceLock};
 
 fn test_request(key: &str) -> AnsibleJobRequest {
@@ -86,6 +87,32 @@ fn coordinator_errors_keep_stable_api_codes() {
     for (error, expected_code) in cases {
         assert_eq!(map_ansible_error(error).code, expected_code);
     }
+}
+
+#[tokio::test]
+async fn windows_workflows_require_the_local_agent_transport() {
+    let state = ApiState::new();
+    let target = Target::new(
+        "legacy-windows",
+        TargetKind::WindowsServer,
+        "192.0.2.90",
+        TargetTransport::Winrm,
+        SecretId::new(),
+        SecretId::new(),
+    )
+    .unwrap();
+    let target_id = target.id;
+    state.store.write().await.targets.push(target);
+
+    let error = validate_windows_agent_operation(
+        &state,
+        ResourceTarget::Target(target_id),
+        AnsibleOperation::HealthCheck,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "windows_local_setup_required");
 }
 
 #[tokio::test]

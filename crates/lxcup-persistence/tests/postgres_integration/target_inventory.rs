@@ -456,6 +456,7 @@ async fn postgres_repositories_cover_target_agent_and_inventory_crud() {
                 },
             ],
         },
+        package_inventory: None,
     };
     let historical_sample = SystemTelemetrySample {
         collected_at: telemetry_now - chrono::Duration::minutes(9),

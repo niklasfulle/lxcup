@@ -197,7 +197,13 @@ async fn load_terminal_connection(
         ));
     }
 
-    let credential_metadata = active_secret_metadata(state, target.credential_secret_ref)?;
+    let credential_secret_ref = target.credential_secret_ref.ok_or_else(|| {
+        ApiError::bad_request(
+            "terminal_ssh_profile_invalid",
+            "the resource has no registered SSH credential",
+        )
+    })?;
+    let credential_metadata = active_secret_metadata(state, credential_secret_ref)?;
     if !matches!(
         credential_metadata.metadata.kind,
         SecretKind::SshPassword | SecretKind::SshPrivateKey
@@ -225,7 +231,7 @@ async fn load_terminal_connection(
     }
     let credential = state
         .secrets
-        .read(target.credential_secret_ref)
+        .read(credential_secret_ref)
         .map_err(crate::map_secret_error)?;
     let known_hosts = state
         .secrets
@@ -525,5 +531,33 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_rejects_agent_only_targets_without_ssh_credentials() {
+        let state = ApiState::new();
+        let actor = AuthenticatedUser {
+            id: Uuid::new_v4(),
+            username: "terminal-admin".to_owned(),
+            role: AuthUserRole::Admin,
+            must_change_password: false,
+            token_hash: "session-hash".to_owned(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        };
+        let mut target = Target::new_agent_only(
+            "windows-agent-target",
+            TargetKind::WindowsServer,
+            "192.0.2.50",
+            SecretId::new(),
+        )
+        .unwrap();
+        target.mark_managed();
+
+        let error = load_terminal_connection(&state, actor, target)
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(error.code, "terminal_resource_unsupported");
     }
 }

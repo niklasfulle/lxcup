@@ -8,8 +8,10 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::{Duration, Timelike, Utc};
-use lxcup_agent::AgentHeartbeat;
-use lxcup_core::ActorRole;
+use lxcup_agent::{AgentHeartbeat, AgentPlatform};
+use lxcup_core::{
+    ActorRole, InstalledPackage, PackageInventorySnapshot, PackageName, PackageVersion,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -20,7 +22,8 @@ pub struct CreateTargetRequest {
     pub transport: TargetTransport,
     #[serde(default)]
     pub ssh_user: Option<String>,
-    pub credential_secret_ref: SecretId,
+    #[serde(default)]
+    pub credential_secret_ref: Option<SecretId>,
     #[serde(default)]
     pub ssh_known_hosts_secret_ref: Option<SecretId>,
     pub agent_secret_ref: SecretId,
@@ -39,7 +42,7 @@ pub struct TargetDto {
     pub address: String,
     pub transport: TargetTransport,
     pub ssh_user: Option<String>,
-    pub credential_secret_ref: SecretId,
+    pub credential_secret_ref: Option<SecretId>,
     pub ssh_known_hosts_secret_ref: Option<SecretId>,
     pub agent_secret_ref: SecretId,
     pub state: TargetState,
@@ -104,14 +107,36 @@ pub(super) async fn create_target(
     JsonBody(request): JsonBody<CreateTargetRequest>,
 ) -> Result<(StatusCode, Json<ApiEnvelope<TargetDto>>), ApiError> {
     require_permission(actor_role, Permission::Configure)?;
-    let mut target = Target::new(
-        request.name,
-        request.kind,
-        request.address,
-        request.transport,
-        request.credential_secret_ref,
-        request.agent_secret_ref,
-    )
+    let mut target = match (request.transport, request.credential_secret_ref) {
+        (TargetTransport::Agent, None) if request.kind == TargetKind::WindowsServer => {
+            Target::new_agent_only(
+                request.name,
+                request.kind,
+                request.address,
+                request.agent_secret_ref,
+            )
+        }
+        (TargetTransport::Agent, _) => {
+            return Err(ApiError::bad_request(
+                "invalid_target",
+                "agent transport is only supported for Windows targets without deployment credentials",
+            ));
+        }
+        (_, Some(secret_ref)) => Target::new(
+            request.name,
+            request.kind,
+            request.address,
+            request.transport,
+            secret_ref,
+            request.agent_secret_ref,
+        ),
+        (_, None) => {
+            return Err(ApiError::bad_request(
+                "invalid_target",
+                "deployment credential secret is required for this transport",
+            ));
+        }
+    }
     .map_err(|_| {
         ApiError::bad_request("invalid_target", "target fields or transport are invalid")
     })?;
@@ -280,8 +305,10 @@ pub(super) async fn receive_agent_heartbeat(
     if expected.expose() != token {
         return Err(ApiError::unauthorized());
     }
+    let package_inventory = sanitize_agent_package_inventory(&heartbeat, target.kind)?;
     let telemetry_summary = sanitize_telemetry_window(&mut heartbeat);
     sanitize_docker_telemetry_window(&mut heartbeat);
+    heartbeat.package_inventory = None;
     if telemetry_summary.rejected() > 0 || telemetry_summary.missing_samples > 0 {
         tracing::warn!(
             target: "lxcup_server::telemetry",
@@ -301,6 +328,11 @@ pub(super) async fn receive_agent_heartbeat(
     let persisted = target.clone();
     store.agent_reports.insert(persisted.id, heartbeat);
     let heartbeat_for_persistence = store.agent_reports.get(&persisted.id).cloned();
+    if let Some(snapshot) = package_inventory.as_ref() {
+        store
+            .package_inventories
+            .insert(persisted.id, snapshot.clone());
+    }
     drop(store);
     if let Some(repositories) = state.repositories.clone() {
         repositories
@@ -324,8 +356,100 @@ pub(super) async fn receive_agent_heartbeat(
                 return Err(ApiError::storage());
             }
         }
+        if let Some(snapshot) = package_inventory.as_ref() {
+            let latest = repositories
+                .package_inventory
+                .find_latest(persisted.id)
+                .await
+                .map_err(|_| ApiError::storage())?;
+            if latest.is_none_or(|current| current.snapshot.collected_at < snapshot.collected_at) {
+                repositories
+                    .package_inventory
+                    .replace(snapshot)
+                    .await
+                    .map_err(|_| ApiError::storage())?;
+            }
+        }
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn sanitize_agent_package_inventory(
+    heartbeat: &AgentHeartbeat,
+    target_kind: TargetKind,
+) -> Result<Option<PackageInventorySnapshot>, ApiError> {
+    let Some(inventory) = heartbeat.package_inventory.as_ref() else {
+        return Ok(None);
+    };
+    if target_kind != TargetKind::WindowsServer || heartbeat.info.platform != AgentPlatform::Windows
+    {
+        return Err(ApiError::bad_request(
+            "agent_inventory_platform_mismatch",
+            "package inventory does not match the registered Windows target",
+        ));
+    }
+    let now = Utc::now();
+    if inventory.packages.len() > 50_000
+        || inventory.collected_at > now + Duration::seconds(5)
+        || inventory.collected_at < now - Duration::hours(1)
+    {
+        return Err(ApiError::bad_request(
+            "agent_inventory_invalid",
+            "Windows package inventory is invalid or too old",
+        ));
+    }
+    let mut names = std::collections::HashSet::new();
+    let mut packages = Vec::with_capacity(inventory.packages.len());
+    for package in &inventory.packages {
+        if !lxcup_agent::safe_winget_id(&package.name)
+            || package.name.len() > 128
+            || package.installed_version.trim().is_empty()
+            || package.installed_version.len() > 128
+            || package
+                .candidate_version
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty() || value.len() > 128)
+            || package.source.as_deref() != Some("winget")
+            || !names.insert(package.name.to_ascii_lowercase())
+        {
+            return Err(ApiError::bad_request(
+                "agent_inventory_invalid",
+                "Windows package inventory contains an invalid package entry",
+            ));
+        }
+        packages.push(InstalledPackage {
+            name: PackageName::new(package.name.clone()).map_err(|_| {
+                ApiError::bad_request(
+                    "agent_inventory_invalid",
+                    "Windows package inventory contains an invalid package name",
+                )
+            })?,
+            version: PackageVersion::new(package.installed_version.clone()).map_err(|_| {
+                ApiError::bad_request(
+                    "agent_inventory_invalid",
+                    "Windows package inventory contains an invalid installed version",
+                )
+            })?,
+            candidate_version: package
+                .candidate_version
+                .as_ref()
+                .map(|value| PackageVersion::new(value.clone()))
+                .transpose()
+                .map_err(|_| {
+                    ApiError::bad_request(
+                        "agent_inventory_invalid",
+                        "Windows package inventory contains an invalid candidate version",
+                    )
+                })?,
+            architecture: package.architecture.clone(),
+            source: package.source.clone(),
+        });
+    }
+    Ok(Some(PackageInventorySnapshot {
+        target_id: TargetId::from_uuid(heartbeat.target_id),
+        collected_at: inventory.collected_at,
+        packages,
+    }))
 }
 
 fn sanitize_docker_telemetry_window(heartbeat: &mut AgentHeartbeat) {
@@ -509,6 +633,7 @@ mod telemetry_sanitization_tests {
                 partial: false,
             },
             docker_telemetry: Default::default(),
+            package_inventory: None,
         };
 
         let summary = sanitize_telemetry_window(&mut heartbeat);
@@ -559,6 +684,7 @@ mod telemetry_sanitization_tests {
                 partial: false,
             },
             docker_telemetry: Default::default(),
+            package_inventory: None,
         };
 
         let summary = sanitize_telemetry_window(&mut heartbeat);
@@ -604,6 +730,7 @@ mod telemetry_sanitization_tests {
                 partial: false,
             },
             docker_telemetry: Default::default(),
+            package_inventory: None,
         };
 
         let summary = sanitize_telemetry_window(&mut heartbeat);
@@ -632,154 +759,5 @@ pub(super) fn require_permission(role: ActorRole, permission: Permission) -> Res
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::Extension;
-
-    fn test_target() -> Target {
-        Target::new(
-            "removal-test",
-            TargetKind::Lxc,
-            "192.0.2.77",
-            TargetTransport::Ssh,
-            SecretId::new(),
-            SecretId::new(),
-        )
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn target_removal_requires_admin_confirmation_and_clears_scoped_state() {
-        let state = ApiState::new();
-        let target = test_target();
-        state.store.write().await.targets.push(target.clone());
-        state.store.write().await.agent_reports.insert(
-            target.id,
-            lxcup_agent::AgentHeartbeat {
-                target_id: target.id.as_uuid(),
-                info: lxcup_agent::AgentInfo {
-                    agent_id: "agent-removal-test".to_owned(),
-                    platform: lxcup_agent::AgentPlatform::Linux,
-                    hostname: "removal-test".to_owned(),
-                    version: "0.4.0".to_owned(),
-                    protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
-                },
-                metrics: lxcup_agent::AgentMetrics {
-                    collected_at: Utc::now(),
-                    commands_total: 0,
-                    commands_failed: 0,
-                    last_command_at: None,
-                },
-                sent_at: Utc::now(),
-                telemetry: Default::default(),
-                docker_telemetry: Default::default(),
-            },
-        );
-
-        let forbidden = delete_target(
-            State(state.clone()),
-            Extension(ActorRole::Operator),
-            Path(target.id.as_uuid().to_string()),
-            JsonBody(DeleteTargetRequest { confirmed: true }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(forbidden.status, StatusCode::FORBIDDEN);
-
-        let unconfirmed = delete_target(
-            State(state.clone()),
-            Extension(ActorRole::Admin),
-            Path(target.id.as_uuid().to_string()),
-            JsonBody(DeleteTargetRequest { confirmed: false }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(unconfirmed.code, "confirmation_required");
-
-        let status = delete_target(
-            State(state.clone()),
-            Extension(ActorRole::Admin),
-            Path(target.id.as_uuid().to_string()),
-            JsonBody(DeleteTargetRequest { confirmed: true }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        let store = state.store.read().await;
-        assert!(store.targets.is_empty());
-        assert!(!store.agent_reports.contains_key(&target.id));
-        assert!(store.update_policies.is_empty());
-    }
-
-    #[tokio::test]
-    async fn target_removal_is_rejected_while_a_workflow_is_active() {
-        let state = ApiState::new();
-        let mut target = test_target();
-        target.mark_managed();
-        let target_id = target.id;
-        state.store.write().await.targets.push(target);
-        let request = lxcup_ansible::AnsibleJobRequest {
-            operation: lxcup_ansible::AnsibleOperation::HealthCheck,
-            target: lxcup_core::ResourceTarget::Target(target_id),
-            lifecycle: lxcup_core::ResourceLifecycle::Managed,
-            mode: lxcup_ansible::ExecutionMode::Check,
-            parameters: lxcup_ansible::AnsibleParameters::HealthCheck,
-            secret_refs: Vec::new(),
-            idempotency_key: "remove-target-active-job".to_owned(),
-            confirmed: true,
-            actor_role: ActorRole::Admin,
-        };
-        let job = match state.ansible.write().await.submit(request).unwrap() {
-            lxcup_ansible::JobSubmission::Created(job) => job,
-            lxcup_ansible::JobSubmission::Duplicate(_) => unreachable!(),
-        };
-        state
-            .ansible
-            .write()
-            .await
-            .transition(job.id, lxcup_ansible::AnsibleJobStatus::Checking)
-            .unwrap();
-
-        let error = delete_target(
-            State(state.clone()),
-            Extension(ActorRole::Admin),
-            Path(target_id.as_uuid().to_string()),
-            JsonBody(DeleteTargetRequest { confirmed: true }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.status, StatusCode::CONFLICT);
-        assert_eq!(error.code, "target_busy");
-        assert_eq!(state.store.read().await.targets.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn creating_a_target_also_creates_its_standard_update_policy() {
-        let state = ApiState::new();
-        let request = CreateTargetRequest {
-            name: "onboarding-target".to_owned(),
-            kind: TargetKind::LinuxServer,
-            address: "192.0.2.80".to_owned(),
-            transport: TargetTransport::Ssh,
-            ssh_user: Some("lxcup".to_owned()),
-            credential_secret_ref: SecretId::new(),
-            ssh_known_hosts_secret_ref: Some(SecretId::new()),
-            agent_secret_ref: SecretId::new(),
-        };
-
-        let (_, response) = create_target(
-            State(state.clone()),
-            Extension(ActorRole::Admin),
-            JsonBody(request),
-        )
-        .await
-        .unwrap();
-
-        let target_id = response.0.data.id;
-        let policies = state.store.read().await.update_policies.clone();
-        assert_eq!(
-            policies,
-            vec![super::super::default_update_policy(vec![target_id])]
-        );
-    }
-}
+#[path = "targets_tests.rs"]
+mod tests;

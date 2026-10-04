@@ -225,6 +225,7 @@ fn support_diagnostics_summarize_heartbeat_resource_and_all_workflow_events() {
         sent_at: now,
         telemetry: SystemTelemetryWindow::default(),
         docker_telemetry: DockerTelemetryWindow::default(),
+        package_inventory: None,
     };
     let current = resource_info(&target, Some(&heartbeat), now);
     assert!(!current.heartbeat_stale);

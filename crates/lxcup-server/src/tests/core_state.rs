@@ -96,6 +96,33 @@ async fn schedule_dispatch_records_a_skipped_target_and_moves_to_the_next_slot()
     assert!(updated.next_run_at > now);
 }
 
+#[tokio::test]
+async fn scheduled_backup_without_a_passphrase_secret_fails_without_creating_a_backup() {
+    let state = ApiState::new();
+    let schedule = JobSchedule {
+        id: "backup-without-secret".to_owned(),
+        operation: "create_backup".to_owned(),
+        timezone: "UTC".to_owned(),
+        target_ids: Vec::new(),
+        frequency: ScheduleFrequency::EveryMinutes(60),
+        enabled: true,
+        threshold: None,
+        policy_id: None,
+        backup_secret_ref: None,
+        last_run_at: None,
+        next_run_at: chrono::Utc::now(),
+        last_error: None,
+    };
+
+    let (dispatched, failure) = state.execute_scheduled_backup(&schedule).await;
+
+    assert_eq!(dispatched, 0);
+    assert_eq!(
+        failure.as_deref(),
+        Some("scheduled backup has no passphrase secret configured")
+    );
+}
+
 #[test]
 fn schedule_thresholds_use_latest_samples_and_fail_closed_without_telemetry() {
     let now = chrono::Utc::now();
@@ -129,6 +156,7 @@ fn schedule_thresholds_use_latest_samples_and_fail_closed_without_telemetry() {
             partial: false,
         },
         docker_telemetry: Default::default(),
+        package_inventory: None,
     };
     for (metric, expected) in [
         (ThresholdMetric::CpuBasisPoints, 2500),

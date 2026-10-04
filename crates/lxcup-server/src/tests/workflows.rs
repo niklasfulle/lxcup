@@ -237,7 +237,9 @@ async fn onboarding_reconciliation_queues_health_then_inventory_idempotently() {
     )
     .unwrap();
     let target_id = target.id;
-    let credential_ref = target.credential_secret_ref;
+    let credential_ref = target
+        .credential_secret_ref
+        .expect("SSH target has deployment credentials");
     let agent_ref = target.agent_secret_ref;
     state.store.write().await.targets.push(target);
 
@@ -304,7 +306,9 @@ async fn enrollment_poll_resumes_after_deployment_without_holding_the_store_lock
     )
     .unwrap();
     let target_id = target.id;
-    let credential_ref = target.credential_secret_ref;
+    let credential_ref = target
+        .credential_secret_ref
+        .expect("SSH target has deployment credentials");
     let agent_ref = target.agent_secret_ref;
     let container = Container::new(
         ContainerId::new(184),

@@ -12,7 +12,7 @@ import { isTelemetryStale } from "../telemetryFreshness";
 const kinds: Array<{ value: TargetKind; label: string; transport: TargetTransport }> = [
   { value: "lxc", label: "LXC", transport: "ssh" },
   { value: "linux_server", label: "Linux-Server", transport: "ssh" },
-  { value: "windows_server", label: "Windows-System", transport: "winrm" },
+  { value: "windows_server", label: "Windows-System", transport: "agent" },
 ];
 
 type TargetArea = TargetKind | undefined;
@@ -21,7 +21,7 @@ type TargetState = "pending" | "managed" | "disabled";
 const areaContent: Record<Exclude<TargetArea, undefined>, { eyebrow: string; title: string; description: string; registrationTitle: string }> = {
   lxc: { eyebrow: "LXC-Container", title: "LXC-Container", description: "LXC-Container werden hier manuell als eigenständige Ressourcen angelegt und verwaltet.", registrationTitle: "LXC-Container hinzufügen" },
   linux_server: { eyebrow: "Server", title: "Linux-Server", description: "Linux-Server werden ausschließlich hier als eigenständige Ressourcen aufgenommen und verwaltet.", registrationTitle: "Serverzugang konfigurieren" },
-  windows_server: { eyebrow: "Windows", title: "Windows-Server", description: "Windows-Systeme werden ausschließlich hier über einen WinRM-Zugang aufgenommen und verwaltet.", registrationTitle: "Windows-Zugang konfigurieren" },
+  windows_server: { eyebrow: "Windows", title: "Windows-System", description: "Windows-Systeme werden lokal mit dem lxcup-Agenten verbunden; lxcup benötigt dafür weder WinRM noch eingehende Verwaltungsports.", registrationTitle: "Windows-Agent verbinden" },
 };
 
 const profileContent = { eyebrow: "Automatisierung", title: "Zugänge & Agenten", description: "Zugangsprofile verbinden Infrastrukturressourcen mit kontrollierten Automatisierungs-Workflows.", registrationTitle: "Zugangsprofil anlegen" };
@@ -56,7 +56,7 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
   const [newSecretValue, setNewSecretValue] = useState("");
   const [createdTargetId, setCreatedTargetId] = useState<string>();
   const [addFormOpenByArea, setAddFormOpenByArea] = useState<Partial<Record<TargetKind | "profiles", boolean>>>({});
-  const [startOnboarding, setStartOnboarding] = useState(true);
+  const [startOnboarding, setStartOnboarding] = useState(area !== "windows_server");
   const [deploymentJobId, setDeploymentJobId] = useState<string>();
   const [healthJobId, setHealthJobId] = useState<string>();
   const [bootstrapCopied, setBootstrapCopied] = useState(false);
@@ -105,8 +105,8 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
       address,
       kind,
       transport: selectedKind.transport,
-      ssh_user: sshUser.trim() || null,
-      credential_secret_ref: credentialSecret,
+      ssh_user: selectedKind.transport === "agent" ? null : sshUser.trim() || null,
+      credential_secret_ref: selectedKind.transport === "agent" ? null : credentialSecret,
       ssh_known_hosts_secret_ref: selectedKind.transport === "ssh" ? knownHostsSecret || null : null,
       agent_secret_ref: agentSecret,
     }),
@@ -152,12 +152,12 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
   }
 
   useEffect(() => {
-    if (startOnboarding === false || createdTarget === undefined || deploymentJob.data?.status !== "succeeded" || createdTarget.state !== "managed" || healthStartedFor.current === createdTarget.id) return;
+    if (startOnboarding === false || createdTarget === undefined || createdTarget.transport === "agent" || deploymentJob.data?.status !== "succeeded" || createdTarget.state !== "managed" || healthStartedFor.current === createdTarget.id) return;
     healthStartedFor.current = createdTarget.id;
     health.mutate(createdTarget.id);
   }, [createdTarget, deploymentJob.data, health, startOnboarding]);
   useEffect(() => {
-    if (startOnboarding === false || createdTarget === undefined || healthJob.data?.status !== "succeeded" || inventoryStartedFor.current === createdTarget.id) return;
+    if (startOnboarding === false || createdTarget === undefined || createdTarget.transport === "agent" || healthJob.data?.status !== "succeeded" || inventoryStartedFor.current === createdTarget.id) return;
     inventoryStartedFor.current = createdTarget.id;
     inventory.mutate(createdTarget.id);
   }, [createdTarget, healthJob.data, inventory, startOnboarding]);
@@ -196,18 +196,19 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
           <div className="min-w-0 p-4">
             <div className="mb-4 border-b border-[var(--line)] pb-3">
               <h3>Verbindungsdaten</h3>
-              <p className="text-sm text-[var(--muted)]">Der Worker verwendet diese Angaben für die Verbindung zum Ziel.</p>
+              <p className="text-sm text-[var(--muted)]">{selectedKind.transport === "agent" ? "Der Windows-Agent baut die Verbindung ausgehend und TLS-gesichert zum Controller auf." : "Der Worker verwendet diese Angaben für die Verbindung zum Ziel."}</p>
             </div>
-            <TargetForm availableKinds={availableKinds} selectedKind={selectedKind} activeSecrets={activeSecrets} name={name} address={address} sshUser={sshUser} kind={kind} credentialSecret={credentialSecret} agentSecret={agentSecret} knownHostsSecret={knownHostsSecret} newSecretFor={newSecretFor} newSecretName={newSecretName} newSecretKind={newSecretKind} newSecretValue={newSecretValue} startOnboarding={startOnboarding} onboardingAvailable={area !== "lxc"} submitLabel="Hinzufügen" inlineSecretPending={inlineSecret.isPending} inlineSecretError={inlineSecret.error instanceof Error ? inlineSecret.error.message : undefined} createPending={create.isPending} createError={create.error instanceof Error ? create.error.message : undefined} onSubmit={(event) => { event.preventDefault(); create.mutate(); }} onNameChange={setName} onAddressChange={setAddress} onSshUserChange={setSshUser} onKindChange={(value) => { setKind(value); setCredentialSecret(""); setNewSecretKind(value === "windows_server" ? "winrm_password" : "ssh_password"); setSshUser((current) => current === "lxcup" || current === "Administrator" ? (value === "windows_server" ? "Administrator" : "lxcup") : current); }} onCredentialChange={setCredentialSecret} onAgentChange={setAgentSecret} onKnownHostsChange={setKnownHostsSecret} onSecretForChange={setNewSecretFor} onSecretNameChange={setNewSecretName} onSecretKindChange={setNewSecretKind} onSecretValueChange={setNewSecretValue} onStartOnboardingChange={setStartOnboarding} onCreateSecret={() => inlineSecret.mutate()} />
+            <TargetForm availableKinds={availableKinds} selectedKind={selectedKind} activeSecrets={activeSecrets} name={name} address={address} sshUser={sshUser} kind={kind} credentialSecret={credentialSecret} agentSecret={agentSecret} knownHostsSecret={knownHostsSecret} newSecretFor={newSecretFor} newSecretName={newSecretName} newSecretKind={newSecretKind} newSecretValue={newSecretValue} startOnboarding={startOnboarding} onboardingAvailable={area !== "lxc" && selectedKind.transport !== "agent"} submitLabel="Hinzufügen" inlineSecretPending={inlineSecret.isPending} inlineSecretError={inlineSecret.error instanceof Error ? inlineSecret.error.message : undefined} createPending={create.isPending} createError={create.error instanceof Error ? create.error.message : undefined} onSubmit={(event) => { event.preventDefault(); create.mutate(); }} onNameChange={setName} onAddressChange={setAddress} onSshUserChange={setSshUser} onKindChange={(value) => { setKind(value); setCredentialSecret(""); setStartOnboarding(value !== "windows_server"); setNewSecretKind(value === "windows_server" ? "agent_token" : "ssh_password"); setSshUser((current) => current === "lxcup" || current === "Administrator" ? (value === "windows_server" ? "Administrator" : "lxcup") : current); }} onCredentialChange={setCredentialSecret} onAgentChange={setAgentSecret} onKnownHostsChange={setKnownHostsSecret} onSecretForChange={setNewSecretFor} onSecretNameChange={setNewSecretName} onSecretKindChange={setNewSecretKind} onSecretValueChange={setNewSecretValue} onStartOnboardingChange={setStartOnboarding} onCreateSecret={() => inlineSecret.mutate()} />
           </div>
           <div className="border-t border-[var(--line)] bg-[var(--paper-muted)] p-4 xl:border-l xl:border-t-0">
-            {selectedKind.transport === "ssh" ? <BootstrapCard copied={bootstrapCopied} onCopy={() => void copyBootstrapScript()} /> : <WindowsSetupCard />}
+            {selectedKind.transport === "ssh" ? <BootstrapCard copied={bootstrapCopied} onCopy={() => void copyBootstrapScript()} /> : selectedKind.transport === "agent" ? <WindowsSetupCard /> : <WindowsSetupCard />}
           </div>
         </div>
       </section> : null}
 
       {createdTarget ? <TargetLifecycle target={createdTarget} /> : null}
-      {createdTarget && startOnboarding ? <OnboardingActivities deployment={deployment} health={health} inventory={inventory} /> : null}
+      {createdTarget?.transport === "agent" ? <WindowsSetupCard target={createdTarget} /> : null}
+      {createdTarget && startOnboarding && createdTarget.transport !== "agent" ? <OnboardingActivities deployment={deployment} health={health} inventory={inventory} /> : null}
 
       {pendingTargets.length > 0 && <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]"><div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start"><div><h2>Offene Onboardings</h2><p className="text-[var(--muted)]">Diese Ziele warten noch auf Agent und Heartbeat.</p></div><span className={cn("inline-flex items-center px-2 py-0.5 text-xs font-bold", "bg-[var(--warning-soft)] text-[var(--warning)]")}>{pendingTargets.length} offen</span></div><div className="grid">{pendingTargets.map((target) => <TargetLifecycle key={target.id} target={target} />)}</div></section>}
 
@@ -260,16 +261,33 @@ function BootstrapCard({ copied, onCopy }: Readonly<{ copied: boolean; onCopy: (
   </aside>;
 }
 
-function WindowsSetupCard() {
-  return <aside className="grid content-start gap-3" aria-labelledby="windows-setup-title">
+function WindowsSetupCard({ target }: Readonly<{ target?: TargetDto }>) {
+  const [copied, setCopied] = useState(false);
+  const installCommand = target
+    ? `.\\windows-agent-setup.ps1 -ControllerUrl "${window.location.origin}" -TargetId "${target.id}" -Version "${target.latest_agent_version ?? ""}"`
+    : undefined;
+  async function copyInstallCommand() {
+    if (!installCommand) return;
+    await copyText(installCommand);
+    setCopied(true);
+    globalThis.setTimeout(() => setCopied(false), 2500);
+  }
+  return <aside className="grid content-start gap-3 border border-[var(--line)] bg-[var(--panel)] p-4" aria-labelledby="windows-setup-title">
     <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Windows vorbereiten</p>
-    <h3 id="windows-setup-title">WinRM-Zugang prüfen</h3>
-    <p className="text-[var(--muted)]">Stelle vor dem Speichern sicher, dass der Windows-Host über WinRM erreichbar ist und das ausgewählte Secret die hinterlegten Zugangsdaten enthält.</p>
-    <ol className="m-0 grid list-none gap-3 border-y border-[var(--line)] py-4 pl-0">
-      <li className="flex items-center gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center bg-[var(--panel)] text-[10px] font-bold text-lxcup-primary">1</span><span>WinRM auf dem Server aktivieren</span></li>
-      <li className="flex items-center gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center bg-[var(--panel)] text-[10px] font-bold text-lxcup-primary">2</span><span>Zugang als Deployment-Secret hinterlegen</span></li>
-      <li className="flex items-center gap-2"><span className="grid h-5 w-5 shrink-0 place-items-center bg-[var(--panel)] text-[10px] font-bold text-lxcup-primary">3</span><span>Windows-Server registrieren</span></li>
-    </ol>
+    <h3 id="windows-setup-title">Agent lokal installieren</h3>
+    <p className="text-[var(--muted)]">lxcup verbindet Windows ausschließlich über den lokal installierten Agenten. Es werden keine WinRM-Zugangsdaten und keine eingehenden Verwaltungsports benötigt. Der Agent baut nur ausgehende, TLS-validierte Verbindungen auf.</p>
+    {target && installCommand ? <>
+      <p className="m-0 text-sm">Lade das Skript herunter, führe PowerShell als Administrator aus und starte den Befehl. Das Skript fragt das Agent-Token geschützt ab.</p>
+      <code className="block overflow-x-auto border border-[var(--line)] bg-[var(--paper)] p-3 text-xs">{installCommand}</code>
+      <div className="flex flex-wrap gap-2">
+        <a className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 text-xs font-semibold hover:bg-[var(--primary-soft)]" href="/windows-agent-setup.ps1" download>Setup-Skript herunterladen</a>
+        <button className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 text-xs font-semibold hover:bg-[var(--primary-soft)]" type="button" onClick={() => void copyInstallCommand()}>{copied ? "Befehl kopiert" : "Installationsbefehl kopieren"}</button>
+      </div>
+      <p className="m-0 text-xs text-[var(--muted)]">Bewahre das beim Anlegen gewählte Agent-Token bereit auf. Es wird weder in den Befehl geschrieben noch an die Browserhistorie übergeben.</p>
+    </> : <>
+      <p className="m-0 text-sm">Nach dem Anlegen der Ressource stellt lxcup ein Setup-Skript bereit. Es prüft Plattform und SHA-256 des versionierten Agent-Artefakts, richtet den Windows-Dienst ein und sichert die Konfiguration mit restriktiven ACLs.</p>
+      <span className="text-xs text-[var(--muted)]">Benötigt Windows 11 x64 und lokale Administratorrechte.</span>
+    </>}
   </aside>;
 }
 
@@ -331,16 +349,16 @@ function TargetForm(props: TargetFormProps) {
       <label><span className="inline-flex items-center gap-1" title="Anzeigename des verwalteten Ziels.">Name</span><input name="target_name" autoComplete="off" value={props.name} onChange={(event) => props.onNameChange(event.target.value)} required /></label>
       <label><span className="inline-flex items-center gap-1" title="Plattform des Ziels. Sie bestimmt unter anderem das verwendete Ansible-Playbook.">Typ</span>{props.availableKinds.length === 1 ? <input name="target_kind" value={selectedKind.label} readOnly /> : <select name="target_kind" value={props.kind} onChange={(event) => props.onKindChange(event.target.value as TargetKind)}>{props.availableKinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>}</label>
       <label><span className="inline-flex items-center gap-1" title="IP-Adresse oder DNS-Name, unter dem der Worker das Ziel erreicht.">Adresse</span><input name="target_address" autoComplete="url" value={props.address} onChange={(event) => props.onAddressChange(event.target.value)} placeholder="IP oder DNS-Name …" required /></label>
-      <label><span className="inline-flex items-center gap-1" title={`Benutzername für die ${selectedKind.transport === "ssh" ? "SSH" : "WinRM"}-Verbindung zu diesem Ziel.`}>{selectedKind.transport === "ssh" ? "SSH-Benutzer" : "WinRM-Benutzer"}</span><input name="ssh_user" autoComplete="username" value={props.sshUser} onChange={(event) => props.onSshUserChange(event.target.value)} placeholder={selectedKind.transport === "ssh" ? "z. B. root oder lxcup …" : "z. B. Administrator …"} required /></label>
-      <SecretSelect label="Deployment-Secret" title={`Zugangsdaten für die ${selectedKind.transport === "ssh" ? "SSH" : "WinRM über HTTPS"}-Verbindung.`} value={props.credentialSecret} options={credentialSecrets} onChange={props.onCredentialChange} onNew={() => { props.onSecretForChange("credential"); props.onSecretKindChange(selectedKind.transport === "ssh" ? "ssh_password" : "winrm_password"); }} />
+      {selectedKind.transport !== "agent" ? <label><span className="inline-flex items-center gap-1" title={`Benutzername für die ${selectedKind.transport === "ssh" ? "SSH" : "WinRM"}-Verbindung zu diesem Ziel.`}>{selectedKind.transport === "ssh" ? "SSH-Benutzer" : "WinRM-Benutzer"}</span><input name="ssh_user" autoComplete="username" value={props.sshUser} onChange={(event) => props.onSshUserChange(event.target.value)} placeholder={selectedKind.transport === "ssh" ? "z. B. root oder lxcup …" : "z. B. Administrator …"} required /></label> : null}
+      {selectedKind.transport !== "agent" ? <SecretSelect label="Deployment-Secret" title={`Zugangsdaten für die ${selectedKind.transport === "ssh" ? "SSH" : "WinRM über HTTPS"}-Verbindung.`} value={props.credentialSecret} options={credentialSecrets} onChange={props.onCredentialChange} onNew={() => { props.onSecretForChange("credential"); props.onSecretKindChange(selectedKind.transport === "ssh" ? "ssh_password" : "winrm_password"); }} /> : null}
       {selectedKind.transport === "ssh" && <SecretSelect label="SSH-Host-Fingerprint" title="Bekannter SSH-Host-Fingerprint als known_hosts-Datei." value={props.knownHostsSecret} options={activeSecrets.filter((item) => item.metadata.metadata.kind === "ssh_known_hosts")} onChange={props.onKnownHostsChange} onNew={() => { props.onSecretForChange("known_hosts"); props.onSecretKindChange("ssh_known_hosts"); }} emptyLabel="Known-Hosts-Secret auswählen" />}
-      <SecretSelect label="Agent-Token" title="Geheimer Token, mit dem sich der installierte lxcup-Agent beim Controller authentifiziert." value={props.agentSecret} options={activeSecrets} onChange={props.onAgentChange} onNew={() => { props.onSecretForChange("agent"); props.onSecretKindChange("agent_token"); }} />
+      <SecretSelect label="Agent-Token" title="Geheimer Token, mit dem sich der installierte lxcup-Agent beim Controller authentifiziert." value={props.agentSecret} options={activeSecrets.filter((item) => item.metadata.metadata.kind === "agent_token")} onChange={props.onAgentChange} onNew={() => { props.onSecretForChange("agent"); props.onSecretKindChange("agent_token"); }} />
       <label><span className="inline-flex items-center gap-1" title="Verbindungsprotokoll, das automatisch aus dem Zieltyp abgeleitet wird.">Transport</span><input name="transport" value={selectedKind.transport.toUpperCase()} readOnly /></label>
     </div>
     {newSecretFor && <div className="col-span-full"><InlineSecretEditor newSecretFor={newSecretFor} name={newSecretName} kind={newSecretKind} value={newSecretValue} pending={inlineSecretPending} error={inlineSecretError} onCancel={() => props.onSecretForChange(null)} onNameChange={props.onSecretNameChange} onKindChange={props.onSecretKindChange} onValueChange={props.onSecretValueChange} onGenerate={() => props.onSecretValueChange(generateSecretValue())} onCreate={props.onCreateSecret} /></div>}
     {props.onboardingAvailable ? <label className="col-span-full flex min-w-0 items-start gap-3 border border-[var(--line)] bg-[var(--paper-muted)] p-4 text-sm font-medium"><input className="mt-0.5 h-4 w-4 shrink-0 p-0" type="checkbox" aria-label="Onboarding direkt starten" checked={props.startOnboarding} onChange={(event) => props.onStartOnboardingChange(event.target.checked)} /><span className="min-w-0 flex-1 break-words"><strong className="block">Onboarding direkt starten</strong><span className="block text-xs font-normal leading-relaxed text-[var(--muted)]">Agent installieren und nach erfolgreichem Heartbeat einen Healthcheck ausführen.</span></span></label> : null}
     <div className="col-span-full grid gap-2 border-t border-[var(--line)] pt-4">
-      <button className="mx-auto inline-flex min-h-10 w-full max-w-[15rem] items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={createPending || props.credentialSecret === "" || props.agentSecret === "" || (selectedKind.transport === "ssh" && props.knownHostsSecret === "")}>{createPending ? "Wird angelegt…" : props.submitLabel}</button>
+      <button className="mx-auto inline-flex min-h-10 w-full max-w-[15rem] items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={createPending || (selectedKind.transport !== "agent" && props.credentialSecret === "") || props.agentSecret === "" || (selectedKind.transport === "ssh" && props.knownHostsSecret === "")}>{createPending ? "Wird angelegt…" : props.submitLabel}</button>
       {createError && <p className="text-center font-semibold text-[var(--error)]" role="alert">{createError}</p>}
     </div>
   </form>;

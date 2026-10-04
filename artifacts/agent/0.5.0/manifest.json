@@ -1,20 +1,20 @@
 {
-  "artifacts": [
-    {
-      "file": "linux-amd64",
-      "sha256": "6351811ce4f4c0e144de9c1f39179f4a54443c3f2f6852ac3155e2a1c1b8b68c",
-      "platform": "linux-amd64"
-    },
-    {
-      "file": "linux-arm64",
-      "sha256": "b5493b007aa6fe7319d028c3a37d7fd66d7215cedc0c3229a18b1bdea3ebe58e",
-      "platform": "linux-arm64"
-    },
-    {
-      "file": "windows-amd64.exe",
-      "sha256": "008d66dabbb7ec9ec5d6ab9019223f34369c49823b94868b92edb6278c3d630e",
-      "platform": "windows-amd64"
-    }
-  ],
-  "version": "0.5.0"
+    "version":  "0.5.0",
+    "artifacts":  [
+                      {
+                          "platform":  "linux-amd64",
+                          "file":  "linux-amd64",
+                          "sha256":  "1f13ec4983d60998f05112e08bd3cbb22dc5202e50ae5a10389a57e97b742190"
+                      },
+                      {
+                          "platform":  "linux-arm64",
+                          "file":  "linux-arm64",
+                          "sha256":  "a52fca278769feaaddf02076530047ead61d38ad80deaded6cad684923eee2b5"
+                      },
+                      {
+                          "platform":  "windows-amd64",
+                          "file":  "windows-amd64.exe",
+                          "sha256":  "5d943274e59c188e1f024f728916c1027e77a9d925bdf8678fd090a7089a8ea8"
+                      }
+                  ]
 }

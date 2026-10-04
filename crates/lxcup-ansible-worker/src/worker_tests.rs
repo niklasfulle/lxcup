@@ -796,6 +796,27 @@ fn invocation_prepares_private_inventory_and_known_hosts_files() {
 }
 
 #[tokio::test]
+async fn ansible_invocation_rejects_agent_only_windows_targets_without_credentials() {
+    let root = std::env::temp_dir().join(format!("lxcup-worker-agent-only-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let (runtime, _, agent_ref, _) = runtime_with_secrets(&root);
+    let target = Target::new_agent_only(
+        "windows-agent-only",
+        TargetKind::WindowsServer,
+        "192.0.2.25",
+        agent_ref,
+    )
+    .unwrap();
+    let job = health_job(&target, "windows-agent-only-invocation");
+
+    assert!(matches!(
+        prepare_invocation(&runtime, &job, &target, &root).await,
+        Err(JobFailureCode::InvalidCredentials)
+    ));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn invocation_builds_apply_and_inventory_vars_with_private_key_credentials() {
     let root = std::env::temp_dir().join(format!("lxcup-worker-vars-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
@@ -1618,6 +1639,23 @@ async fn recovery_and_queue_processing_persist_all_worker_outcomes() {
     non_target_job.target = ResourceTarget::Container(lxcup_core::ContainerId::new(7));
     assert_eq!(
         run(&repos, &runtime, &mut non_target_job).await,
+        Err(JobFailureCode::PlaybookFailed)
+    );
+
+    let windows_agent_target = Target::new_agent_only(
+        "worker-windows-agent-target",
+        TargetKind::WindowsServer,
+        "192.0.2.24",
+        target.agent_secret_ref,
+    )
+    .unwrap();
+    repos.targets.save(&windows_agent_target).await.unwrap();
+    let mut windows_agent_job = health_job(
+        &windows_agent_target,
+        &format!("windows-agent-{}", Uuid::new_v4()),
+    );
+    assert_eq!(
+        run(&repos, &runtime, &mut windows_agent_job).await,
         Err(JobFailureCode::PlaybookFailed)
     );
 

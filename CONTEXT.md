@@ -25,7 +25,7 @@ _Avoid_: Windows-Ziel
 **Verbindungskonfiguration**: Adresse, Transport und Secret-Referenzen einer verwalteten Ressource. Sie wird gemeinsam mit der Ressource angelegt und ist kein eigener Navigationsbereich.
 _Avoid_: Target, Zugangsprofil
 
-**Transport**: Der Ansible-Verbindungsweg einer Ressource: SSH für LXC und Linux, WinRM für Windows. Zugangsdaten werden ausschließlich über Secret-Referenzen aufgelöst.
+**Transport**: Der Verwaltungsweg einer Ressource: SSH für LXC und Linux; Windows nutzt `Agent` ohne WinRM oder eingehende Verwaltungsschnittstelle. SSH-Zugangsdaten und Agent-Token werden ausschließlich über Secret-Referenzen verwaltet.
 
 **Secret**: Ein im Secret-Store verwalteter Wert, auf den eine Verbindungskonfiguration oder ein Agent über eine Referenz zugreift.
 

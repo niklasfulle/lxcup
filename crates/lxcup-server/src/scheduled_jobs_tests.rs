@@ -104,7 +104,14 @@ async fn scheduled_operations_map_registered_actions_and_validate_update_policy(
     .await
     .unwrap();
     assert_eq!(inventory.0, AnsibleOperation::CollectPackageInventory);
-    assert_eq!(inventory.3, vec![target.credential_secret_ref]);
+    assert_eq!(
+        inventory.3,
+        vec![
+            target
+                .credential_secret_ref
+                .expect("SSH target has deployment credentials")
+        ]
+    );
     assert!(
         scheduled_operation(
             &state,
@@ -175,7 +182,14 @@ async fn scheduled_operations_map_registered_actions_and_validate_update_policy(
         .unwrap();
     assert_eq!(package_update.0, AnsibleOperation::UpdatePackages);
     assert_eq!(package_update.2, ExecutionMode::Plan);
-    assert_eq!(package_update.3, vec![target.credential_secret_ref]);
+    assert_eq!(
+        package_update.3,
+        vec![
+            target
+                .credential_secret_ref
+                .expect("SSH target has deployment credentials")
+        ]
+    );
     assert_eq!(
         package_update.1,
         AnsibleParameters::UpdatePackages {

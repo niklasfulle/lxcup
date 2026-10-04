@@ -125,6 +125,7 @@ pub(super) fn parse_dpkg_packages(output: &str) -> Vec<AgentInstalledPackage> {
             Some(AgentInstalledPackage {
                 name: fields.next()?.trim().to_owned(),
                 installed_version: fields.next()?.trim().to_owned(),
+                candidate_version: None,
                 architecture: fields
                     .next()
                     .map(str::trim)
@@ -137,43 +138,110 @@ pub(super) fn parse_dpkg_packages(output: &str) -> Vec<AgentInstalledPackage> {
         .collect()
 }
 
-pub(super) fn parse_windows_packages(output: &str) -> Result<Vec<AgentInstalledPackage>, ()> {
-    let value: serde_json::Value = serde_json::from_str(output).map_err(|_| ())?;
-    let entries = match value {
-        serde_json::Value::Array(entries) => entries,
-        serde_json::Value::Object(_) => vec![value],
-        _ => return Err(()),
-    };
-    if entries.len() > 50_000 {
-        return Err(());
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowsPackageParseError {
+    InvalidOutput,
+}
+
+pub fn parse_windows_packages(
+    output: &str,
+) -> Result<Vec<AgentInstalledPackage>, WindowsPackageParseError> {
+    if output.trim().is_empty() {
+        return Err(WindowsPackageParseError::InvalidOutput);
     }
-    entries
-        .into_iter()
-        .map(|entry| {
-            let name = entry
-                .get("Name")
-                .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.trim().is_empty() && value.len() <= 256)
-                .ok_or(())?;
-            let version = entry
-                .get("Version")
-                .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.trim().is_empty() && value.len() <= 256)
-                .ok_or(())?;
-            let source = entry
-                .get("ProviderName")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty() && value.len() <= 256)
-                .map(str::to_owned);
-            Ok(AgentInstalledPackage {
-                name: name.to_owned(),
-                installed_version: version.to_owned(),
-                architecture: None,
-                source,
-            })
-        })
-        .collect()
+    let mut packages = Vec::new();
+    let mut has_table_separator = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.len() >= 3 && trimmed.bytes().all(|byte| byte == b'-') {
+            has_table_separator = true;
+            continue;
+        }
+        let columns = split_winget_columns(line);
+        if !has_table_separator || columns.len() < 4 {
+            continue;
+        }
+        if !safe_winget_id(columns[1]) {
+            return Err(WindowsPackageParseError::InvalidOutput);
+        }
+        if columns[0].is_empty()
+            || columns[0].len() > 256
+            || columns[2].is_empty()
+            || columns[2].len() > 128
+        {
+            return Err(WindowsPackageParseError::InvalidOutput);
+        }
+        let candidate_version = (columns.len() >= 5)
+            .then(|| columns[3].trim())
+            .filter(|value| !value.is_empty() && !matches!(*value, "-" | "Unknown" | "N/A"))
+            .filter(|value| value.len() <= 128)
+            .map(str::to_owned);
+        let source = columns
+            .last()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+            .map(str::to_owned);
+        packages.push(AgentInstalledPackage {
+            // The stable package identifier is the safe selector used by
+            // policy and exact winget upgrade operations.
+            name: columns[1].to_owned(),
+            installed_version: columns[2].to_owned(),
+            candidate_version,
+            architecture: None,
+            source,
+        });
+        if packages.len() > 50_000 {
+            return Err(WindowsPackageParseError::InvalidOutput);
+        }
+    }
+    if !has_table_separator {
+        return Err(WindowsPackageParseError::InvalidOutput);
+    }
+    Ok(packages)
+}
+
+fn split_winget_columns(line: &str) -> Vec<&str> {
+    let mut columns = Vec::new();
+    let mut start = None;
+    let mut whitespace = 0;
+    for (index, character) in line.char_indices() {
+        if character.is_whitespace() {
+            whitespace += character.len_utf8();
+            if whitespace >= 2 {
+                if let Some(column_start) = start.take() {
+                    columns.push(
+                        line[column_start..index - (whitespace - character.len_utf8())].trim(),
+                    );
+                }
+            }
+        } else {
+            if start.is_none() {
+                start = Some(index);
+            }
+            whitespace = 0;
+        }
+    }
+    if let Some(column_start) = start {
+        columns.push(line[column_start..].trim());
+    }
+    columns
+}
+
+pub fn safe_winget_id(value: &str) -> bool {
+    if value.is_empty() || value.len() > 128 || value.starts_with('-') {
+        return false;
+    }
+    let mut segment_has_character = false;
+    for character in value.chars() {
+        match character {
+            '.' if segment_has_character => segment_has_character = false,
+            character if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') => {
+                segment_has_character = true;
+            }
+            _ => return false,
+        }
+    }
+    segment_has_character && value.contains('.')
 }
 
 pub(super) fn parse_docker_containers(output: &str) -> Vec<DockerContainerInfo> {

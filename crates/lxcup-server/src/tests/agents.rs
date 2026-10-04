@@ -675,6 +675,7 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
                 memory_limit_bytes: Some(1_073_741_824),
             }],
         },
+        package_inventory: None,
     };
     let response = router(state.clone())
         .oneshot(
@@ -780,6 +781,137 @@ async fn agent_heartbeat_updates_target_state_without_activity_event() {
 }
 
 #[tokio::test]
+async fn windows_agent_heartbeat_persists_only_validated_winget_updates() {
+    use lxcup_secrets::{CreateSecret, SecretStore};
+
+    let agent_token = "windows-heartbeat-token";
+    let secret_store = InMemorySecretStore::default();
+    let secret = secret_store
+        .create(CreateSecret {
+            name: "windows-heartbeat-agent".to_owned(),
+            kind: lxcup_core::SecretKind::AgentToken,
+            scope: lxcup_core::SecretScope::Global,
+            value: lxcup_core::SecretValue::new(agent_token).unwrap(),
+        })
+        .unwrap();
+    let target = Target::new(
+        "windows-heartbeat-target",
+        TargetKind::WindowsServer,
+        "192.0.2.78",
+        TargetTransport::Winrm,
+        SecretId::new(),
+        secret.metadata.id,
+    )
+    .unwrap();
+    let target_id = target.id;
+    let state = ApiState::new()
+        .with_auth_config(AuthConfig::disabled())
+        .with_secret_store(Arc::new(secret_store));
+    state.store.write().await.targets.push(target);
+
+    let now = chrono::Utc::now();
+    let heartbeat = lxcup_agent::AgentHeartbeat {
+        target_id: target_id.as_uuid(),
+        info: lxcup_agent::AgentInfo {
+            agent_id: "windows-heartbeat-agent".to_owned(),
+            platform: lxcup_agent::AgentPlatform::Windows,
+            hostname: "windows-host".to_owned(),
+            version: "0.5.0".to_owned(),
+            protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
+        },
+        metrics: lxcup_agent::AgentMetrics {
+            collected_at: now,
+            commands_total: 0,
+            commands_failed: 0,
+            last_command_at: None,
+        },
+        sent_at: now,
+        telemetry: Default::default(),
+        docker_telemetry: Default::default(),
+        package_inventory: Some(lxcup_agent::AgentPackageInventory {
+            collected_at: now,
+            packages: vec![lxcup_agent::AgentInstalledPackage {
+                name: "Microsoft.PowerToys".to_owned(),
+                installed_version: "0.95.0".to_owned(),
+                candidate_version: Some("0.96.0".to_owned()),
+                architecture: None,
+                source: Some("winget".to_owned()),
+            }],
+        }),
+    };
+    let mut invalid_update_listing = heartbeat.clone();
+    invalid_update_listing
+        .package_inventory
+        .as_mut()
+        .unwrap()
+        .packages[0]
+        .candidate_version = Some(" ".to_owned());
+    let rejected = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/agents/heartbeat")
+                .header("authorization", format!("Bearer {agent_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&invalid_update_listing).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/agents/heartbeat")
+                .header("authorization", format!("Bearer {agent_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&heartbeat).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let store = state.store.read().await;
+    assert_eq!(store.agent_reports[&target_id].package_inventory, None);
+    assert_eq!(
+        store.package_inventories[&target_id].packages[0]
+            .candidate_version
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "0.96.0"
+    );
+    drop(store);
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/targets/{}/package-inventory",
+                    target_id.as_uuid()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["packages"].as_array().unwrap().len(), 1);
+    assert_eq!(json["data"]["packages"][0]["name"], "Microsoft.PowerToys");
+    assert_eq!(json["data"]["packages"][0]["source"], "winget");
+    assert_eq!(json["data"]["packages"][0]["candidate_version"], "0.96.0");
+}
+
+#[tokio::test]
 async fn package_inventory_endpoint_reports_an_uncollected_target_without_packages() {
     let target = Target::new(
         "inventory-target",
@@ -863,6 +995,7 @@ async fn telemetry_alert_endpoint_returns_sustained_load_with_resource_context()
             partial: false,
         },
         docker_telemetry: Default::default(),
+        package_inventory: None,
     };
     let state = ApiState::new();
     {

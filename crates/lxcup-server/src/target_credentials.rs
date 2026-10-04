@@ -38,7 +38,7 @@ pub(crate) async fn reset_targets_for_secret(
     let mut affected = Vec::new();
     let mut changed = Vec::new();
     for target in &mut store.targets {
-        let affected_by_secret = target.credential_secret_ref == secret_id
+        let affected_by_secret = target.credential_secret_ref == Some(secret_id)
             || target.agent_secret_ref == secret_id
             || target.ssh_known_hosts_secret_ref == Some(secret_id);
         if !affected_by_secret {

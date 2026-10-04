@@ -17,6 +17,7 @@ pub enum TargetKind {
 pub enum TargetTransport {
     Ssh,
     Winrm,
+    Agent,
 }
 
 impl TargetTransport {
@@ -25,6 +26,7 @@ impl TargetTransport {
             (self, kind),
             (Self::Ssh, TargetKind::Lxc | TargetKind::LinuxServer)
                 | (Self::Winrm, TargetKind::WindowsServer)
+                | (Self::Agent, TargetKind::WindowsServer)
         )
     }
 }
@@ -46,7 +48,8 @@ pub struct Target {
     pub transport: TargetTransport,
     #[serde(default)]
     pub ssh_user: Option<String>,
-    pub credential_secret_ref: SecretId,
+    #[serde(default)]
+    pub credential_secret_ref: Option<SecretId>,
     #[serde(default)]
     pub ssh_known_hosts_secret_ref: Option<SecretId>,
     pub agent_secret_ref: SecretId,
@@ -64,6 +67,40 @@ impl Target {
         credential_secret_ref: SecretId,
         agent_secret_ref: SecretId,
     ) -> Result<Self, DomainError> {
+        Self::new_with_credentials(
+            name,
+            kind,
+            address,
+            transport,
+            Some(credential_secret_ref),
+            agent_secret_ref,
+        )
+    }
+
+    pub fn new_agent_only(
+        name: impl Into<String>,
+        kind: TargetKind,
+        address: impl Into<String>,
+        agent_secret_ref: SecretId,
+    ) -> Result<Self, DomainError> {
+        Self::new_with_credentials(
+            name,
+            kind,
+            address,
+            TargetTransport::Agent,
+            None,
+            agent_secret_ref,
+        )
+    }
+
+    fn new_with_credentials(
+        name: impl Into<String>,
+        kind: TargetKind,
+        address: impl Into<String>,
+        transport: TargetTransport,
+        credential_secret_ref: Option<SecretId>,
+        agent_secret_ref: SecretId,
+    ) -> Result<Self, DomainError> {
         let name = name.into().trim().to_owned();
         let address = address.into().trim().to_owned();
         if name.is_empty() {
@@ -79,6 +116,11 @@ impl Target {
         if !transport.supports(kind) {
             return Err(DomainError::InvalidStateTransition(
                 "target kind does not support transport",
+            ));
+        }
+        if (transport == TargetTransport::Agent) != credential_secret_ref.is_none() {
+            return Err(DomainError::InvalidStateTransition(
+                "agent transport must not require deployment credentials",
             ));
         }
         let now = Utc::now();
@@ -101,6 +143,21 @@ impl Target {
     pub fn mark_managed(&mut self) {
         self.state = TargetState::Managed;
         self.updated_at = Utc::now();
+    }
+
+    pub fn workflow_auth_secret_ref(&self) -> Option<SecretId> {
+        if self.transport == TargetTransport::Agent {
+            Some(self.agent_secret_ref)
+        } else {
+            self.credential_secret_ref
+        }
+    }
+
+    pub fn deployment_secret_refs(&self) -> Vec<SecretId> {
+        self.credential_secret_ref
+            .into_iter()
+            .chain(std::iter::once(self.agent_secret_ref))
+            .collect()
     }
 }
 

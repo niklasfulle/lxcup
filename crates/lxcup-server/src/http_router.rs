@@ -1,22 +1,23 @@
 use super::{
     ApiState, abort_execution, adopt_docker_container, apply_target_docker_image_update,
     auth_login, auth_session, auth_status, change_password, check_target_docker_image_update,
-    confirm_plan, create_ansible_job, create_backup, create_enrollment, create_plan,
-    create_schedule, create_secret, create_target, create_update_policy, create_user,
-    delete_secret, delete_target, delete_update_policy, delete_user, discover_docker_containers,
-    discover_target_docker, download_backup, get_agent_health, get_agent_metrics, get_ansible_job,
-    get_ansible_job_events, get_docker_discovery, get_enrollment, get_execution,
-    get_execution_result, get_package_inventory, get_plan, get_safety, get_secret,
-    get_support_diagnostics, get_target, get_target_docker_inventory, get_target_docker_telemetry,
-    get_target_telemetry, get_worker_availability, list_ansible_jobs, list_backups,
-    list_container_plans, list_containers, list_docker_containers, list_scans, list_schedules,
-    list_secret_audit, list_secrets, list_targets, list_telemetry_alerts, list_update_policies,
-    list_user_audit, list_users, live_health, logout, metrics, middleware, openapi_document,
+    claim_windows_agent_workflow, confirm_plan, create_ansible_job, create_backup,
+    create_enrollment, create_plan, create_schedule, create_secret, create_target,
+    create_update_policy, create_user, delete_secret, delete_target, delete_update_policy,
+    delete_user, discover_docker_containers, discover_target_docker, download_backup,
+    get_agent_health, get_agent_metrics, get_ansible_job, get_ansible_job_events,
+    get_docker_discovery, get_enrollment, get_execution, get_execution_result,
+    get_package_inventory, get_plan, get_safety, get_secret, get_support_diagnostics, get_target,
+    get_target_docker_inventory, get_target_docker_telemetry, get_target_telemetry,
+    get_worker_availability, list_ansible_jobs, list_backups, list_container_plans,
+    list_containers, list_docker_containers, list_scans, list_schedules, list_secret_audit,
+    list_secrets, list_targets, list_telemetry_alerts, list_update_policies, list_user_audit,
+    list_users, live_health, logout, metrics, middleware, openapi_document,
     operate_target_docker_container, ready_health, receive_agent_heartbeat, reconcile_ansible_job,
-    reconcile_execution, register_agent, remove_docker_container, request_middleware,
-    reset_user_password, retry_ansible_job, revoke_agent, revoke_secret, rotate_secret,
-    run_execution, run_scan, set_schedule_enabled, start_scan, stream_events, terminal_session,
-    update_user,
+    reconcile_execution, register_agent, remove_docker_container, report_windows_agent_workflow,
+    request_middleware, reset_user_password, retry_ansible_job, revoke_agent, revoke_secret,
+    rotate_secret, run_execution, run_scan, set_schedule_enabled, start_scan, stream_events,
+    terminal_session, update_user,
 };
 use axum::{
     Router,
@@ -98,6 +99,14 @@ pub fn router(state: ApiState) -> Router {
             delete(delete_update_policy),
         )
         .route("/api/v1/agents/heartbeat", post(receive_agent_heartbeat))
+        .route(
+            "/api/v1/agents/workflows/claim",
+            post(claim_windows_agent_workflow),
+        )
+        .route(
+            "/api/v1/agents/workflows/{job_id}/result",
+            post(report_windows_agent_workflow),
+        )
         .route("/api/v1/secrets", get(list_secrets).post(create_secret))
         .route("/api/v1/secrets/audit", get(list_secret_audit))
         .route(

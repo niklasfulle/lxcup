@@ -215,10 +215,13 @@ async fn run(
         .await
         .map_err(|_| JobFailureCode::WorkerUnavailable)?
         .ok_or(JobFailureCode::Unreachable)?;
+    if target.transport == TargetTransport::Agent {
+        return Err(JobFailureCode::PlaybookFailed);
+    }
     if job
         .secret_refs
         .iter()
-        .any(|s| *s != target.credential_secret_ref && *s != target.agent_secret_ref)
+        .any(|s| Some(*s) != target.credential_secret_ref && *s != target.agent_secret_ref)
     {
         return Err(JobFailureCode::InvalidCredentials);
     };
@@ -361,13 +364,16 @@ async fn prepare_invocation(
     target: &Target,
     dir: &Path,
 ) -> Result<InvocationContext, JobFailureCode> {
+    let credential_secret_ref = target
+        .credential_secret_ref
+        .ok_or(JobFailureCode::InvalidCredentials)?;
     let credential = r
         .secrets
-        .read(target.credential_secret_ref)
+        .read(credential_secret_ref)
         .map_err(|_| JobFailureCode::InvalidCredentials)?;
     let kind = r
         .secrets
-        .metadata(target.credential_secret_ref)
+        .metadata(credential_secret_ref)
         .map_err(|_| JobFailureCode::InvalidCredentials)?
         .metadata
         .kind;

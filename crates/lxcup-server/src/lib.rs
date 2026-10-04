@@ -19,14 +19,16 @@ use axum::{
     },
 };
 use lxcup_agent::{
-    AgentClient, AgentClientConfig, AgentHealth, AgentHeartbeat, AgentMetrics, DockerContainerInfo,
+    AgentClient, AgentClientConfig, AgentHealth, AgentHeartbeat, AgentMetrics,
+    AgentWorkflowClaimRequest, AgentWorkflowCommand, AgentWorkflowResult, DockerContainerInfo,
 };
 use lxcup_ansible::AnsibleJobCoordinator;
 use lxcup_core::{
     ActorRole, AgentRegistration, Container, ContainerId, DockerWorkload,
     DockerWorkloadManagementState, Enrollment, EnrollmentId, EnrollmentState, Execution,
-    ExecutionId, Permission, Scan, ScanId, SecretId, SecretKind, SecretScope, SecretValue, Target,
-    TargetId, TargetKind, TargetState, TargetTransport, UpdatePlan,
+    ExecutionId, PackageInventorySnapshot, Permission, Scan, ScanId, SecretId, SecretKind,
+    SecretScope, SecretValue, Target, TargetId, TargetKind, TargetState, TargetTransport,
+    UpdatePlan,
 };
 use lxcup_execution::ExecutionCoordinator;
 use lxcup_persistence::Repositories;
@@ -41,6 +43,10 @@ mod targets;
 pub(crate) use targets::{
     create_target, delete_target, get_target, list_targets, receive_agent_heartbeat,
     require_permission,
+};
+mod windows_agent_workflows;
+pub(crate) use windows_agent_workflows::{
+    claim_windows_agent_workflow, report_windows_agent_workflow,
 };
 mod workflows;
 pub(crate) use workflows::{
@@ -595,6 +601,7 @@ impl Default for ApiState {
 struct ApiStore {
     targets: Vec<Target>,
     agent_reports: HashMap<TargetId, AgentHeartbeat>,
+    package_inventories: HashMap<TargetId, PackageInventorySnapshot>,
     containers: Vec<Container>,
     enrollments: Vec<Enrollment>,
     enrollment_keys: HashMap<String, EnrollmentId>,
@@ -728,6 +735,8 @@ pub const OPENAPI_CONTRACT: &str = r#"{
     "/api/v1/enrollments/{enrollment_id}": {"get": {"responses": {"200": {"description": "Enrollment status"}}}},
     "/api/v1/ansible/jobs": {"post": {"responses": {"202": {"description": "Ansible job accepted"}}}},
     "/api/v1/ansible/jobs/{job_id}": {"get": {"responses": {"200": {"description": "Ansible job status"}}}},
+    "/api/v1/agents/workflows/claim": {"post": {"description": "Windows agents claim one allowlisted job for their authenticated target; the server never initiates WinRM"}},
+    "/api/v1/agents/workflows/{job_id}/result": {"post": {"description": "Windows agent reports a bounded local winget/health result using its per-target agent token"}},
     "/api/v1/ansible/jobs/{job_id}/events": {"get": {"responses": {"200": {"description": "Audit-safe Ansible job events"}}}},
     "/api/v1/admin/support-diagnostics": {"get": {"description": "Admin-only, bounded local support diagnostics; excludes secrets and raw worker output", "parameters": [{"name": "days", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7}}], "responses": {"200": {"description": "Locally downloadable support diagnostics"}, "403": {"description": "Admin role required"}}}},
     "/api/v1/admin/backups": {"get": {"description": "Admin-only list of retained encrypted database and secret-store backups"}, "post": {"description": "Create an explicitly confirmed age passphrase-encrypted backup, retain it in the configured backup volume, and return its metadata", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["confirmed", "passphrase"], "properties": {"confirmed": {"type": "boolean"}, "passphrase": {"type": "string", "minLength": 12, "maxLength": 1024, "description": "Human-selected age encryption passphrase; never stored"}}}}}}, "responses": {"200": {"description": "Encrypted backup created"}, "400": {"description": "Confirmation or passphrase is invalid"}, "403": {"description": "Admin role required"}, "502": {"description": "Backup tools or configuration unavailable"}}}},

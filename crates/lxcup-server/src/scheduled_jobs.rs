@@ -170,21 +170,28 @@ async fn scheduled_operation(
             AnsibleOperation::CollectPackageInventory,
             AnsibleParameters::CollectPackageInventory,
             ExecutionMode::Check,
-            vec![target.credential_secret_ref],
+            vec![scheduled_connection_secret(target)?],
         )),
         "update_packages" => Ok((
             AnsibleOperation::UpdatePackages,
-            scheduled_update_parameters(state, schedule, target_id, now).await?,
+            scheduled_update_parameters(state, schedule, target, target_id, now).await?,
             ExecutionMode::Plan,
-            vec![target.credential_secret_ref],
+            vec![scheduled_connection_secret(target)?],
         )),
         _ => Err("schedule operation is no longer registered".to_owned()),
     }
 }
 
+fn scheduled_connection_secret(target: &Target) -> Result<SecretId, String> {
+    target
+        .workflow_auth_secret_ref()
+        .ok_or_else(|| "target has no workflow authentication secret".to_owned())
+}
+
 async fn scheduled_update_parameters(
     state: &ApiState,
     schedule: &lxcup_core::JobSchedule,
+    target: &Target,
     target_id: TargetId,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<AnsibleParameters, String> {
@@ -204,6 +211,15 @@ async fn scheduled_update_parameters(
     let packages = policy.allowed_packages.clone();
     if packages.is_empty() {
         return Err("scheduled package updates require an explicit package allowlist".to_owned());
+    }
+    if target.kind == TargetKind::WindowsServer
+        && packages
+            .iter()
+            .any(|package| !lxcup_agent::safe_winget_id(package))
+    {
+        return Err(
+            "Windows update schedules require an allowlist of exact winget package IDs".to_owned(),
+        );
     }
     if !policy.enabled
         || !policy.allowed_targets.contains(&target_id)
