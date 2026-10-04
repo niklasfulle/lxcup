@@ -170,6 +170,7 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
           <h1>{content.title}</h1>
           <p className="text-[var(--muted)]">{content.description}</p>
         </div>
+        {area === "windows_server" && visibleTargets.length === 0 ? <a className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" href="/windows-agent-setup.ps1" download>Setup-Skript herunterladen</a> : null}
         <button
           className={addFormOpen ? "inline-flex min-h-9 items-center justify-center gap-2 border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" : "inline-flex min-h-9 items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"}
           type="button"
@@ -207,7 +208,7 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
       </section> : null}
 
       {createdTarget ? <TargetLifecycle target={createdTarget} /> : null}
-      {createdTarget?.transport === "agent" ? <WindowsSetupCard target={createdTarget} /> : null}
+      {createdTarget?.transport === "agent" && !visibleTargets.some((target) => target.id === createdTarget.id) ? <WindowsSetupCard target={createdTarget} /> : null}
       {createdTarget && startOnboarding && createdTarget.transport !== "agent" ? <OnboardingActivities deployment={deployment} health={health} inventory={inventory} /> : null}
 
       {pendingTargets.length > 0 && <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]"><div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start"><div><h2>Offene Onboardings</h2><p className="text-[var(--muted)]">Diese Ziele warten noch auf Agent und Heartbeat.</p></div><span className={cn("inline-flex items-center px-2 py-0.5 text-xs font-bold", "bg-[var(--warning-soft)] text-[var(--warning)]")}>{pendingTargets.length} offen</span></div><div className="grid">{pendingTargets.map((target) => <TargetLifecycle key={target.id} target={target} />)}</div></section>}
@@ -263,20 +264,21 @@ function BootstrapCard({ copied, onCopy }: Readonly<{ copied: boolean; onCopy: (
 
 function WindowsSetupCard({ target }: Readonly<{ target?: TargetDto }>) {
   const [copied, setCopied] = useState(false);
-  const installCommand = target
-    ? `.\\windows-agent-setup.ps1 -ControllerUrl "${window.location.origin}" -TargetId "${target.id}" -Version "${target.latest_agent_version ?? ""}"`
+  const installCommand = target?.latest_agent_version
+    ? `.\\windows-agent-setup.ps1 -ControllerUrl "${window.location.origin}" -TargetId "${target.id}" -Version "${target.latest_agent_version}"`
     : undefined;
+  const titleId = target ? `windows-setup-title-${target.id}` : "windows-setup-title";
   async function copyInstallCommand() {
     if (!installCommand) return;
     await copyText(installCommand);
     setCopied(true);
     globalThis.setTimeout(() => setCopied(false), 2500);
   }
-  return <aside className="grid content-start gap-3 border border-[var(--line)] bg-[var(--panel)] p-4" aria-labelledby="windows-setup-title">
+  return <aside className="grid content-start gap-3 border border-[var(--line)] bg-[var(--panel)] p-4" aria-labelledby={titleId}>
     <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Windows vorbereiten</p>
-    <h3 id="windows-setup-title">Agent lokal installieren</h3>
+    <h3 id={titleId}>Agent lokal installieren</h3>
     <p className="text-[var(--muted)]">lxcup verbindet Windows ausschließlich über den lokal installierten Agenten. Es werden keine WinRM-Zugangsdaten und keine eingehenden Verwaltungsports benötigt. Der Agent baut nur ausgehende, TLS-validierte Verbindungen auf.</p>
-    {target && installCommand ? <>
+    {installCommand ? <>
       <p className="m-0 text-sm">Lade das Skript herunter, führe PowerShell als Administrator aus und starte den Befehl. Das Skript fragt das Agent-Token geschützt ab.</p>
       <code className="block overflow-x-auto border border-[var(--line)] bg-[var(--paper)] p-3 text-xs">{installCommand}</code>
       <div className="flex flex-wrap gap-2">
@@ -285,7 +287,9 @@ function WindowsSetupCard({ target }: Readonly<{ target?: TargetDto }>) {
       </div>
       <p className="m-0 text-xs text-[var(--muted)]">Bewahre das beim Anlegen gewählte Agent-Token bereit auf. Es wird weder in den Befehl geschrieben noch an die Browserhistorie übergeben.</p>
     </> : <>
-      <p className="m-0 text-sm">Nach dem Anlegen der Ressource stellt lxcup ein Setup-Skript bereit. Es prüft Plattform und SHA-256 des versionierten Agent-Artefakts, richtet den Windows-Dienst ein und sichert die Konfiguration mit restriktiven ACLs.</p>
+      <p className="m-0 text-sm">Lade das Skript jetzt herunter. Nach dem Anlegen des Windows-Ziels zeigt lxcup den passenden Installationsbefehl an. Das Skript lädt anschließend das versionierte Agent-Artefakt und prüft Plattform sowie SHA-256, bevor es den Dienst installiert.</p>
+      <a className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700" href="/windows-agent-setup.ps1" download>Setup-Skript herunterladen</a>
+      {target ? <p className="m-0 text-xs text-[var(--warning)]">Die aktuelle Agent-Version ist noch nicht verfügbar. Lade die Zielseite neu, sobald der Controller die Version meldet.</p> : null}
       <span className="text-xs text-[var(--muted)]">Benötigt Windows 11 x64 und lokale Administratorrechte.</span>
     </>}
   </aside>;
@@ -447,6 +451,7 @@ function TargetInventoryCard({ target, jobs, removing, onRemove }: Readonly<{ ta
             <TargetSignalLink to={`/targets/${target.id}`} label="Systemauslastung" value={telemetrySummary} status={telemetrySignalStatus(telemetry, telemetryStale, telemetryTime)} accessibleName={`Systemauslastung für ${target.name}`} details={<TelemetryReadings sample={latestSample} />} />
           </div>
         </div>
+        {target.transport === "agent" ? <div className="mt-3"><WindowsSetupCard target={target} /></div> : null}
       </article>
     </li>;
 }

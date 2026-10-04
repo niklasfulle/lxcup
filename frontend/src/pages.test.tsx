@@ -1012,6 +1012,31 @@ describe("onboarding and secret pages", () => {
     expect(screen.queryByRole("checkbox", { name: "Onboarding direkt starten" })).not.toBeInTheDocument();
   });
 
+  it("offers the Windows setup script before the first Windows target is registered", () => {
+    mocks.targets.data = [];
+    renderPage(<TargetsPage area="windows_server" />);
+
+    expect(screen.getByRole("link", { name: "Setup-Skript herunterladen" }))
+      .toHaveAttribute("href", "/windows-agent-setup.ps1");
+  });
+
+  it("keeps the Windows setup script available for an existing target after page reload", () => {
+    mocks.targets.data = [{
+      ...target,
+      kind: "windows_server",
+      transport: "agent",
+      ssh_user: null,
+      credential_secret_ref: null,
+      ssh_known_hosts_secret_ref: null,
+      latest_agent_version: "0.5.0",
+    }];
+    renderPage(<TargetsPage area="windows_server" />);
+
+    expect(screen.getByRole("link", { name: "Setup-Skript herunterladen" }))
+      .toHaveAttribute("href", "/windows-agent-setup.ps1");
+    expect(screen.getByText(/-TargetId "target-1".*-Version "0.5.0"/)).toBeInTheDocument();
+  });
+
   it("copies the complete target host preparation script including curl installation", async () => {
     const script = '#!/usr/bin/env bash\ninstall_package() { apt-get install --yes "$package"; }\nuseradd --create-home --shell /bin/bash "${username}"\n';
     const fetchScript = vi.fn(async () => ({ ok: true, text: async () => script }));
