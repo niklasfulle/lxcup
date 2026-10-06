@@ -197,7 +197,13 @@ async fn load_terminal_connection(
         ));
     }
 
-    let credential_metadata = active_secret_metadata(state, target.credential_secret_ref)?;
+    let credential_id = target.credential_secret_ref.ok_or_else(|| {
+        ApiError::bad_request(
+            "terminal_ssh_profile_invalid",
+            "the resource SSH profile is incomplete or invalid",
+        )
+    })?;
+    let credential_metadata = active_secret_metadata(state, credential_id)?;
     if !matches!(
         credential_metadata.metadata.kind,
         SecretKind::SshPassword | SecretKind::SshPrivateKey
@@ -225,7 +231,7 @@ async fn load_terminal_connection(
     }
     let credential = state
         .secrets
-        .read(target.credential_secret_ref)
+        .read(credential_id)
         .map_err(crate::map_secret_error)?;
     let known_hosts = state
         .secrets
@@ -511,6 +517,13 @@ mod tests {
         assert_eq!(connection.username, "terminal-test");
         assert_eq!(connection.credential_kind, SecretKind::SshPassword);
         assert_eq!(connection.credential.expose(), "test-password");
+
+        target.credential_secret_ref = None;
+        let error = load_terminal_connection(&state, actor.clone(), target.clone())
+            .await
+            .err()
+            .expect("SSH resources without a credential must be rejected");
+        assert_eq!(error.code, "terminal_ssh_profile_invalid");
 
         target.state = TargetState::Pending;
         assert!(
