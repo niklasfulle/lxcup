@@ -50,27 +50,55 @@ schemas and route availability.
   raw stdout/stderr, secret values, credentials, and environment variables are
   excluded. The UI downloads it locally and does not upload it anywhere.
 - The agent heartbeat authenticates separately using the target's agent token.
+- Target names are display labels and need not be unique. Use the target UUID
+  to address a resource; when presenting target choices, include kind and
+  address to distinguish resources with the same name.
 - Windows targets use the `agent` transport and do not have a deployment
-  credential or WinRM connection. The locally run PowerShell installer is
-  served by the frontend; it downloads `/agent/<version>/manifest.json` and the
-  matching `windows-amd64.exe` from the same controller origin. The installer
-  prompts for the agent token instead of putting it in a URL, command argument,
-  or browser history. Windows workflow claim and result routes accept only
+  credential or WinRM connection. The target page downloads one PowerShell
+  setup script; when run locally it downloads the requested version's manifest
+  and Windows amd64 executable directly from `/agent/<version>/`, then checks
+  version, platform, PE32+ architecture, and SHA-256 before installation. It
+  prompts for the agent token instead of putting it in the script, command
+  argument, or browser history. After the initial local install, the existing
+  `update_agent` workflow can check, plan, and apply an agent update through the
+  authenticated outbound Windows-agent queue. The agent downloads and verifies
+  the same versioned artifact, stages it beside the running binary, switches
+  the Windows service, verifies the new local health/version, and restores the
+  old service binary if activation fails. Windows workflow claim and result routes accept only
   Windows targets registered with the `agent` transport; legacy WinRM targets
   cannot use the local agent workflow API.
-- A Windows agent collects installed software with local `winget list` and
-  available upgrades with `winget list --upgrade-available`, then includes the
-  bounded inventory in its authenticated heartbeat. Windows update plans are
-  refreshed by a local `winget list --upgrade-available` command. After an
-  approved plan and explicit Apply confirmation, the agent installs each exact
-  selected ID with `winget upgrade --id <id> --exact`; wildcard/`--all` updates
-  are rejected. The Windows agent claims allowlisted jobs over its outbound
+- A Windows agent collects installed software and available upgrades locally
+  with Microsoft's `Microsoft.WinGet.Client` PowerShell module, then includes
+  the bounded inventory in its authenticated heartbeat. Windows setup ensures
+  PowerShell 7.4 or later is installed (using WinGet when needed), then installs
+  that module for all users from PowerShell Gallery with PSResourceGet so the
+  `LocalSystem` service can use it without the legacy NuGet provider; WinGet
+  CLI commands are not supported in that service context.
+  Inventory entries from the `winget` and `msstore` sources are retained with
+  their available-update metadata. Installed entries whose `ARP\` or `MSIX\`
+  identifiers cannot be correlated to a WinGet source are retained as
+  read-only inventory rows, with candidate updates removed. Other invalid or
+  unsupported individual entries are discarded. An invalid or stale optional
+  inventory snapshot is ignored without rejecting the heartbeat, so agent
+  connection state and system telemetry continue to update. A requested Windows
+  inventory workflow refreshes the full package list locally and sends it
+  immediately in a heartbeat without first running the separate update-listing
+  command. Inventory failures use stable, allowlisted diagnostic codes for an
+  unavailable WinGet module, timeout, excessive output, or invalid package data;
+  arbitrary agent stderr is not included in workflow summaries. Windows
+  update plans are refreshed with `Get-WinGetPackage` and its available-update
+  metadata. After an approved plan
+  and explicit Apply confirmation, the agent updates each exact selected ID
+  with `Update-WinGetPackage`; wildcard/`--all` updates are rejected. These
+  module operations are limited to machine-wide packages visible to the
+  `LocalSystem` service. The Windows agent claims allowlisted jobs over its outbound
   authenticated connection at `POST /api/v1/agents/workflows/claim` and reports
   results to `POST /api/v1/agents/workflows/{job_id}/result`. The controller
   never connects to Windows through WinRM or runs winget remotely.
 - Target responses include `agent_version` and `agent_last_seen_at` from the last authenticated heartbeat and `latest_agent_version` from the running controller build. The UI warns when versions differ and uses the real heartbeat timestamp for stale-connection warnings; onboarding and update workflows use the controller-reported version rather than a frontend constant.
 - Telemetry sample times are interpreted relative to the authenticated heartbeat's `sent_at` and normalized to controller time. This preserves the rolling window when an agent and controller have modest clock skew; samples outside that window remain rejected.
 - Linux agents collect telemetry every five seconds and include the rolling last 60 seconds with each 30-second heartbeat. The overlap lets the controller recover samples when a heartbeat is delayed or lost; duplicate normalized timestamps are ignored by persistence. The controller persists samples for 30 days and returns only the last 10 minutes for charts (about 120 samples at the normal interval). A daily cleanup removes expired records. Heartbeats include `missing_samples` for detected gaps and `partial: true` when samples are missing, rejected, or lack metrics, so operators can distinguish gaps from a quiet system.
+- Windows agents also attempt host telemetry collection every five seconds and include the rolling samples in authenticated heartbeats. CPU, memory, fixed-disk storage, network counters, and process count are collected independently, so an unavailable Windows collector leaves only its own metric absent instead of discarding the rest of the sample.
 - `GET /api/v1/telemetry-alerts` evaluates those stored samples. CPU warns above 90% for 5 minutes and becomes critical above 98% for 2 minutes; RAM warns above 90% for 5 minutes and becomes critical above 95% for 2 minutes; storage warns above 85% for 10 minutes and becomes critical above 95% for 5 minutes. A gap greater than 7 seconds breaks a sustained-load streak. A managed target also reports stale telemetry after 2 minutes without a fresh metric sample. Alerts include target identity, current value, threshold, firing time, and observation time; the UI polls every 15 seconds and retains observed recovery notices in browser storage.
 - Linux agents also sample Docker CPU and memory usage every 10 seconds and include an overlapping 60-second window in each heartbeat. The controller validates IDs/timestamps, ignores duplicates, persists samples for 30 days, and returns the last 10 minutes. `GET /api/v1/targets/{target_id}/docker/telemetry` returns these per-container samples; Docker is optional and unsupported platforms simply return an empty series.
 - Docker inventory lifecycle events are retained for 180 days (subject to the per-target 200-event cap) and pruned daily. The current container inventory is not subject to this event-history retention.

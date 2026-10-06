@@ -360,7 +360,7 @@ fn playbook_registry_is_explicit_for_supported_operations() {
             AnsibleOperation::CollectPackageInventory,
             TargetKind::WindowsServer
         ),
-        Some("playbooks/package-inventory-windows.yml")
+        None
     );
     assert_eq!(
         playbook(AnsibleOperation::HealthCheck, TargetKind::WindowsServer),

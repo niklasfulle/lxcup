@@ -3,12 +3,13 @@ use tokio::process::Command;
 
 #[cfg(windows)]
 mod windows_service;
+mod workflow_client;
 
 use lxcup_agent::{
-    AgentHeartbeat, AgentInfo, AgentPlatform, AgentWorkflowClaimRequest, AgentWorkflowCommand,
-    AgentWorkflowResult, LocalAgentState, SystemTelemetrySample, agent_router,
-    execute_workflow_command, parse_docker_stats,
+    AgentInfo, AgentPlatform, LocalAgentState, SystemTelemetrySample, agent_router,
+    parse_docker_stats,
 };
+use workflow_client::{heartbeat_endpoint, send_agent_heartbeat};
 
 fn value_or_default(value: Option<String>, default: &str) -> String {
     value.unwrap_or_else(|| default.to_owned())
@@ -36,27 +37,6 @@ async fn collect_docker_telemetry(
         _ => return Vec::new(),
     };
     parse_docker_stats(&String::from_utf8_lossy(&output), chrono::Utc::now())
-}
-
-fn heartbeat_endpoint(controller_url: &str) -> String {
-    format!(
-        "{}/api/v1/agents/heartbeat",
-        controller_url.trim_end_matches('/')
-    )
-}
-
-fn workflow_claim_endpoint(controller_url: &str) -> String {
-    format!(
-        "{}/api/v1/agents/workflows/claim",
-        controller_url.trim_end_matches('/')
-    )
-}
-
-fn workflow_result_endpoint(controller_url: &str, job_id: uuid::Uuid) -> String {
-    format!(
-        "{}/api/v1/agents/workflows/{job_id}/result",
-        controller_url.trim_end_matches('/')
-    )
 }
 
 async fn collect_telemetry_with_cpu(
@@ -132,14 +112,78 @@ async fn collect_telemetry_with_cpu(
 
 #[cfg(target_os = "windows")]
 async fn collect_windows_telemetry(now: chrono::DateTime<chrono::Utc>) -> SystemTelemetrySample {
-    const COMMAND: &str = r#"$ErrorActionPreference='Stop'; $os=Get-CimInstance Win32_OperatingSystem; $processors=@(Get-CimInstance Win32_Processor); $disks=@(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Where-Object { $_.Size -gt 0 }); $diskTotal=($disks | Measure-Object -Property Size -Sum).Sum; $diskFree=($disks | Measure-Object -Property FreeSpace -Sum).Sum; $net=@(Get-NetAdapterStatistics -ErrorAction SilentlyContinue); [ordered]@{ cpu_percent=($processors | Measure-Object -Property LoadPercentage -Average).Average; memory_percent=100*($os.TotalVisibleMemorySize-$os.FreePhysicalMemory)/[math]::Max(1,$os.TotalVisibleMemorySize); storage_percent=100*($diskTotal-$diskFree)/[math]::Max(1,$diskTotal); rx_bytes=($net | Measure-Object -Property ReceivedBytes -Sum).Sum; tx_bytes=($net | Measure-Object -Property SentBytes -Sum).Sum; process_count=(Get-Process).Count } | ConvertTo-Json -Compress"#;
+    const COMMAND: &str = r#"$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+function Get-SafeMetric([scriptblock]$Collect) {
+    try { & $Collect } catch { $null }
+}
+$cpu = Get-SafeMetric {
+    $processors = @(Get-CimInstance Win32_Processor -ErrorAction Stop)
+    if ($processors.Count -gt 0) {
+        $average = ($processors | Measure-Object -Property LoadPercentage -Average).Average
+        if ($null -ne $average) { $average }
+    }
+}
+$memory = Get-SafeMetric {
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+    if ($os.TotalVisibleMemorySize -gt 0) {
+        100 * ($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / $os.TotalVisibleMemorySize
+    }
+}
+$storage = Get-SafeMetric {
+    $disks = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop | Where-Object { $_.Size -gt 0 })
+    $total = ($disks | Measure-Object -Property Size -Sum).Sum
+    $free = ($disks | Measure-Object -Property FreeSpace -Sum).Sum
+    if ($total -gt 0) { 100 * ($total - $free) / $total }
+}
+$network = Get-SafeMetric {
+    $adapters = @(Get-NetAdapterStatistics -ErrorAction Stop)
+    if ($adapters.Count -gt 0) {
+        [ordered]@{
+            rx = [uint64](($adapters | Measure-Object -Property ReceivedBytes -Sum).Sum)
+            tx = [uint64](($adapters | Measure-Object -Property SentBytes -Sum).Sum)
+        }
+    }
+}
+$processes = Get-SafeMetric { @(Get-Process -ErrorAction Stop).Count }
+[ordered]@{
+    cpu_percent = $cpu
+    memory_percent = $memory
+    storage_percent = $storage
+    rx_bytes = if ($null -ne $network) { $network.rx } else { $null }
+    tx_bytes = if ($null -ne $network) { $network.tx } else { $null }
+    process_count = $processes
+} | ConvertTo-Json -Compress -Depth 3"#;
     let output = tokio::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", COMMAND])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            COMMAND,
+        ])
         .output()
-        .await
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok());
+        .await;
+    match output {
+        Ok(output) => {
+            if !output.status.success() {
+                tracing::warn!(status = ?output.status.code(), "Windows telemetry PowerShell exited unsuccessfully; retaining available metrics");
+            }
+            telemetry_from_windows_json(&String::from_utf8_lossy(&output.stdout), now)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Windows telemetry PowerShell could not be started");
+            telemetry_from_windows_json("{}", now)
+        }
+    }
+}
+
+fn telemetry_from_windows_json(
+    output: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> SystemTelemetrySample {
+    let output = serde_json::from_str::<serde_json::Value>(output).ok();
     let get = |name: &str| output.as_ref()?.get(name)?.as_f64();
     let integer = |name: &str| output.as_ref()?.get(name)?.as_u64();
     let percent =
@@ -382,9 +426,33 @@ async fn main() {
 }
 
 #[cfg(windows)]
-fn main() {
+#[tokio::main]
+async fn main() {
     lxcup_observability::init("lxcup-agent");
-    windows_service::start().expect("agent service dispatcher must start");
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--apply-agent-update")
+    {
+        if arguments.len() != 3 {
+            eprintln!("invalid internal agent updater invocation");
+            std::process::exit(2);
+        }
+        let job_id = match uuid::Uuid::parse_str(&arguments[1]) {
+            Ok(job_id) => job_id,
+            Err(_) => {
+                eprintln!("invalid agent update workflow id");
+                std::process::exit(2);
+            }
+        };
+        let exit_code =
+            windows_service::run_agent_update_helper(job_id, arguments[2].clone()).await;
+        std::process::exit(exit_code);
+    }
+    if let Err(error) = windows_service::start() {
+        windows_service::record_startup_failure("service dispatcher", &error);
+        panic!("agent service dispatcher must start: {error}");
+    }
 }
 
 async fn run(
@@ -436,101 +504,30 @@ async fn run(
         let reporter_info = config.info.clone();
         let reporter_token = config.token.clone();
         let reporter_state = state.clone();
+        let reporter_target_id = target_id;
         tokio::spawn(async move {
             let endpoint = heartbeat_endpoint(&reporter_controller);
             loop {
-                let heartbeat = AgentHeartbeat {
-                    target_id,
-                    info: reporter_info.clone(),
-                    metrics: reporter_state.metrics_snapshot().await,
-                    sent_at: chrono::Utc::now(),
-                    telemetry: reporter_state.telemetry_window().await,
-                    docker_telemetry: reporter_state.docker_telemetry_window().await,
-                    package_inventory: reporter_state.package_inventory_snapshot().await,
-                };
-                let inventory_collected_at = heartbeat
-                    .package_inventory
-                    .as_ref()
-                    .map(|inventory| inventory.collected_at);
-                let sample_count = heartbeat.telemetry.samples.len();
-                match reporter
-                    .post(&endpoint)
-                    .bearer_auth(&reporter_token)
-                    .json(&heartbeat)
-                    .send()
-                    .await
-                {
-                    Ok(response) if response.status().is_success() => {
-                        if let Some(collected_at) = inventory_collected_at {
-                            reporter_state
-                                .acknowledge_package_inventory(collected_at)
-                                .await;
-                        }
-                    }
-                    Ok(response) => {
-                        tracing::warn!(
-                            target: "lxcup_agent::telemetry",
-                            samples = sample_count,
-                            status = %response.status(),
-                            "agent heartbeat rejected by controller"
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "lxcup_agent::telemetry",
-                            samples = sample_count,
-                            %error,
-                            "outbound agent heartbeat failed"
-                        );
-                    }
-                }
+                send_agent_heartbeat(
+                    &reporter,
+                    &endpoint,
+                    &reporter_token,
+                    reporter_target_id,
+                    &reporter_info,
+                    &reporter_state,
+                )
+                .await;
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }
         });
         if config.info.platform == AgentPlatform::Windows {
-            let token = config.token.clone();
-            let workflow_state = state.clone();
-            tokio::spawn(async move {
-                let client = reqwest::Client::new();
-                let endpoint = workflow_claim_endpoint(&workflow_controller);
-                loop {
-                    let claim = client
-                        .post(&endpoint)
-                        .bearer_auth(&token)
-                        .json(&AgentWorkflowClaimRequest { target_id })
-                        .send()
-                        .await;
-                    match claim {
-                        Ok(response) if response.status().is_success() => {
-                            match response.json::<WorkflowClaimEnvelope>().await {
-                                Ok(envelope) => {
-                                    if let Some(command) = envelope.data {
-                                        report_claimed_workflow(
-                                            &client,
-                                            &workflow_controller,
-                                            &token,
-                                            &workflow_state,
-                                            command,
-                                        )
-                                        .await;
-                                    }
-                                }
-                                Err(error) => {
-                                    tracing::warn!(%error, "Windows workflow claim response was invalid")
-                                }
-                            }
-                        }
-                        Ok(response) if response.status() == reqwest::StatusCode::NO_CONTENT => {}
-                        Ok(response) => {
-                            tracing::warn!(status = %response.status(), "Windows workflow claim was rejected")
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "outbound Windows workflow claim failed")
-                        }
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                }
-            });
+            tokio::spawn(workflow_client::run_windows_workflow_poller(
+                workflow_controller,
+                config.token.clone(),
+                state.clone(),
+                target_id,
+                config.info.clone(),
+            ));
         }
     }
     axum::serve(listener, agent_router(state))
@@ -538,80 +535,12 @@ async fn run(
         .await
 }
 
-#[derive(serde::Deserialize)]
-struct WorkflowClaimEnvelope {
-    data: Option<AgentWorkflowCommand>,
-}
-
-async fn report_claimed_workflow(
-    client: &reqwest::Client,
-    controller: &str,
-    token: &str,
-    state: &LocalAgentState,
-    command: AgentWorkflowCommand,
-) {
-    let result = execute_workflow_command(state, &command).await;
-    if result.response.success && command.action == lxcup_agent::AgentAction::Apply {
-        match lxcup_agent::collect_package_inventory(AgentPlatform::Windows).await {
-            Ok(inventory) => state.record_package_inventory(inventory).await,
-            Err(error) => tracing::warn!(?error, "post-update winget inventory collection failed"),
-        }
-    }
-    let endpoint = workflow_result_endpoint(controller, command.job_id);
-    loop {
-        match client
-            .post(&endpoint)
-            .bearer_auth(token)
-            .json(&AgentWorkflowResult {
-                response: result.response.clone(),
-            })
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => break,
-            Ok(response) => {
-                tracing::warn!(job_id = %command.job_id, status = %response.status(), "Windows workflow result was rejected; retrying")
-            }
-            Err(error) => {
-                tracing::warn!(job_id = %command.job_id, %error, "Windows workflow result delivery failed; retrying")
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ProcTelemetryInput, heartbeat_endpoint, parse_agent_environment, run,
-        startup_config_from_values, telemetry_from_proc, value_or_default, workflow_claim_endpoint,
-        workflow_result_endpoint,
+        ProcTelemetryInput, parse_agent_environment, run, startup_config_from_values,
+        telemetry_from_proc, value_or_default,
     };
-
-    #[test]
-    fn heartbeat_endpoint_normalizes_controller_slashes() {
-        assert_eq!(
-            heartbeat_endpoint("http://controller/"),
-            "http://controller/api/v1/agents/heartbeat"
-        );
-        assert_eq!(
-            heartbeat_endpoint("http://controller"),
-            "http://controller/api/v1/agents/heartbeat"
-        );
-    }
-
-    #[test]
-    fn outbound_workflow_endpoints_normalize_controller_slashes() {
-        let job_id = uuid::Uuid::nil();
-        assert_eq!(
-            workflow_claim_endpoint("https://controller/"),
-            "https://controller/api/v1/agents/workflows/claim"
-        );
-        assert_eq!(
-            workflow_result_endpoint("https://controller/", job_id),
-            format!("https://controller/api/v1/agents/workflows/{job_id}/result")
-        );
-    }
 
     #[test]
     fn environment_values_fall_back_only_when_missing() {

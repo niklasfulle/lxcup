@@ -208,7 +208,7 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
       </section> : null}
 
       {createdTarget ? <TargetLifecycle target={createdTarget} /> : null}
-      {createdTarget?.transport === "agent" && !visibleTargets.some((target) => target.id === createdTarget.id) ? <WindowsSetupCard target={createdTarget} /> : null}
+      {createdTarget?.transport === "agent" && !isAgentOnboarded(createdTarget) && !visibleTargets.some((target) => target.id === createdTarget.id) ? <WindowsSetupCard target={createdTarget} /> : null}
       {createdTarget && startOnboarding && createdTarget.transport !== "agent" ? <OnboardingActivities deployment={deployment} health={health} inventory={inventory} /> : null}
 
       {pendingTargets.length > 0 && <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]"><div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start"><div><h2>Offene Onboardings</h2><p className="text-[var(--muted)]">Diese Ziele warten noch auf Agent und Heartbeat.</p></div><span className={cn("inline-flex items-center px-2 py-0.5 text-xs font-bold", "bg-[var(--warning-soft)] text-[var(--warning)]")}>{pendingTargets.length} offen</span></div><div className="grid">{pendingTargets.map((target) => <TargetLifecycle key={target.id} target={target} />)}</div></section>}
@@ -264,35 +264,146 @@ function BootstrapCard({ copied, onCopy }: Readonly<{ copied: boolean; onCopy: (
 
 function WindowsSetupCard({ target }: Readonly<{ target?: TargetDto }>) {
   const [copied, setCopied] = useState(false);
-  const installCommand = target?.latest_agent_version
-    ? `.\\windows-agent-setup.ps1 -ControllerUrl "${window.location.origin}" -TargetId "${target.id}" -Version "${target.latest_agent_version}"`
+  const [controllerUrl, setControllerUrl] = useState(() => {
+    const configured = import.meta.env.VITE_BOOTSTRAP_BASE_URL?.trim();
+    if (configured) return configured;
+    return isLoopbackHost(window.location.hostname) ? "" : window.location.origin;
+  });
+  const controllerUrlInput = useRef<HTMLInputElement>(null);
+  const normalizedControllerUrl = controllerUrl.trim().replace(/\/+$/, "");
+  const controllerUrlAvailable = canWindowsTargetReachController(normalizedControllerUrl, target?.address);
+  const installCommand = target?.latest_agent_version && normalizedControllerUrl
+    ? buildWindowsInstallCommand(normalizedControllerUrl, target.id, target.latest_agent_version)
     : undefined;
+  const cleanInstallCommand = target?.latest_agent_version && controllerUrlAvailable
+    ? buildWindowsCleanInstallCommand(normalizedControllerUrl, target.id, target.latest_agent_version)
+    : undefined;
+  const setupScriptUrl = "/windows-agent-setup.ps1";
   const titleId = target ? `windows-setup-title-${target.id}` : "windows-setup-title";
+  const [cleanCommandCopied, setCleanCommandCopied] = useState(false);
+  const [copyError, setCopyError] = useState("");
   async function copyInstallCommand() {
-    if (!installCommand) return;
-    await copyText(installCommand);
-    setCopied(true);
-    globalThis.setTimeout(() => setCopied(false), 2500);
+    if (!target?.latest_agent_version) return;
+    const enteredControllerUrl = (controllerUrlInput.current?.value ?? controllerUrl).trim().replace(/\/+$/, "");
+    setControllerUrl(enteredControllerUrl);
+    if (!canWindowsTargetReachController(enteredControllerUrl, target.address)) {
+      setCopyError(windowsControllerAddressWarning(enteredControllerUrl, target.address));
+      return;
+    }
+    try {
+      await copyText(buildWindowsInstallCommand(enteredControllerUrl, target.id, target.latest_agent_version));
+      setCopied(true);
+      setCopyError("");
+      globalThis.setTimeout(() => setCopied(false), 2500);
+    } catch {
+      setCopyError("Der Befehl konnte nicht kopiert werden. Bitte markiere ihn und kopiere ihn manuell.");
+    }
+  }
+  async function copyCleanInstall() {
+    if (!cleanInstallCommand) return;
+    try {
+      await copyText(cleanInstallCommand);
+      setCleanCommandCopied(true);
+      setCopyError("");
+      globalThis.setTimeout(() => setCleanCommandCopied(false), 2500);
+    } catch {
+      setCopyError("Der Befehl konnte nicht kopiert werden. Bitte markiere ihn und kopiere ihn manuell.");
+    }
   }
   return <aside className="grid content-start gap-3 border border-[var(--line)] bg-[var(--panel)] p-4" aria-labelledby={titleId}>
     <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Windows vorbereiten</p>
     <h3 id={titleId}>Agent lokal installieren</h3>
     <p className="text-[var(--muted)]">lxcup verbindet Windows ausschließlich über den lokal installierten Agenten. Es werden keine WinRM-Zugangsdaten und keine eingehenden Verwaltungsports benötigt. Der Agent baut nur ausgehende, TLS-validierte Verbindungen auf.</p>
-    {installCommand ? <>
-      <p className="m-0 text-sm">Lade das Skript herunter, führe PowerShell als Administrator aus und starte den Befehl. Das Skript fragt das Agent-Token geschützt ab.</p>
-      <code className="block overflow-x-auto border border-[var(--line)] bg-[var(--paper)] p-3 text-xs">{installCommand}</code>
+    {target?.latest_agent_version ? <>
+      <p className="m-0 text-sm">Lade das einzelne Setup-Skript herunter. Öffne PowerShell als Administrator und führe den kopierten Befehl aus. Das Skript lädt Agent und Manifest direkt aus dem Artifact-Store, prüft SHA-256 und PE-Architektur und fragt das Token geschützt ab.</p>
+      <label className="grid gap-1 text-xs font-semibold text-[var(--muted)]">Vom Windows-System erreichbare Controller-Adresse<input ref={controllerUrlInput} aria-label="Vom Windows-System erreichbare Controller-Adresse" value={controllerUrl} onChange={(event) => setControllerUrl(event.target.value)} onBlur={(event) => setControllerUrl(event.currentTarget.value)} placeholder="https://lxcup.example.org" /></label>
+      {!controllerUrlAvailable ? <p className="m-0 text-xs text-[var(--warning)]">{windowsControllerAddressWarning(normalizedControllerUrl, target?.address)}</p> : null}
+      {installCommand ? <code className="block overflow-x-auto border border-[var(--line)] bg-[var(--paper)] p-3 text-xs">{installCommand}</code> : null}
       <div className="flex flex-wrap gap-2">
-        <a className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 text-xs font-semibold hover:bg-[var(--primary-soft)]" href="/windows-agent-setup.ps1" download>Setup-Skript herunterladen</a>
-        <button className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 text-xs font-semibold hover:bg-[var(--primary-soft)]" type="button" onClick={() => void copyInstallCommand()}>{copied ? "Befehl kopiert" : "Installationsbefehl kopieren"}</button>
+        <a className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 text-xs font-semibold hover:bg-[var(--primary-soft)]" href={setupScriptUrl} download>Setup-Skript herunterladen</a>
+        {target?.latest_agent_version ? <button className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 text-xs font-semibold hover:bg-[var(--primary-soft)]" type="button" onClick={() => void copyInstallCommand()}>{copied ? "Befehl kopiert" : "Befehl kopieren"}</button> : null}
       </div>
+      {copied ? <p className="m-0 text-xs text-[var(--success)]" aria-live="polite">Startbefehl mit Controller, Ziel-ID und Version kopiert. Führe ihn in einer PowerShell als Administrator aus; das Token wird dort verdeckt abgefragt.</p> : null}
+      {cleanInstallCommand ? <section className="grid gap-2 border-t border-[var(--line)] pt-3" aria-label="Saubere Neuinstallation">
+        <h4>Sauberer Testlauf</h4>
+        <p className="m-0 text-xs text-[var(--warning)]">Entfernt den vorhandenen Agent-Dienst, seine Dateien und die lokale Token-Konfiguration auf diesem Windows-System. Das Ziel in lxcup bleibt erhalten; anschließend wird der Agent neu installiert.</p>
+        <pre className="max-h-48 overflow-auto border border-[var(--line)] bg-[var(--paper)] p-2 text-[11px] leading-relaxed">{cleanInstallCommand}</pre>
+        <button className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs font-semibold hover:bg-[var(--primary-soft)]" type="button" onClick={() => void copyCleanInstall()}>{cleanCommandCopied ? "Befehl kopiert" : "Saubere Neuinstallation kopieren"}</button>
+        <span className="min-h-4 text-xs font-medium text-[var(--success)]" aria-live="polite">{cleanCommandCopied ? "Der Bereinigungs- und Installationsbefehl liegt in der Zwischenablage." : ""}</span>
+      </section> : null}
+      {copyError ? <p className="m-0 text-xs text-[var(--error)]" role="alert">{copyError}</p> : null}
       <p className="m-0 text-xs text-[var(--muted)]">Bewahre das beim Anlegen gewählte Agent-Token bereit auf. Es wird weder in den Befehl geschrieben noch an die Browserhistorie übergeben.</p>
     </> : <>
-      <p className="m-0 text-sm">Lade das Skript jetzt herunter. Nach dem Anlegen des Windows-Ziels zeigt lxcup den passenden Installationsbefehl an. Das Skript lädt anschließend das versionierte Agent-Artefakt und prüft Plattform sowie SHA-256, bevor es den Dienst installiert.</p>
+      <p className="m-0 text-sm">Lade das einzelne Skript herunter. Nach dem Anlegen des Windows-Ziels zeigt lxcup den passenden Befehl an. Das Skript lädt das versionierte Agent-Artefakt samt Manifest aus dem Artifact-Store und prüft SHA-256 sowie PE-Architektur, bevor es den Dienst installiert.</p>
       <a className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700" href="/windows-agent-setup.ps1" download>Setup-Skript herunterladen</a>
       {target ? <p className="m-0 text-xs text-[var(--warning)]">Die aktuelle Agent-Version ist noch nicht verfügbar. Lade die Zielseite neu, sobald der Controller die Version meldet.</p> : null}
       <span className="text-xs text-[var(--muted)]">Benötigt Windows 11 x64 und lokale Administratorrechte.</span>
     </>}
   </aside>;
+}
+
+function buildWindowsCleanInstallCommand(controllerUrl: string, targetId: string, version: string) {
+  const escapePowerShellLiteral = (value: string) => value.replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$controller = '${escapePowerShellLiteral(controllerUrl)}'`,
+    `$targetId = '${escapePowerShellLiteral(targetId)}'`,
+    `$version = '${escapePowerShellLiteral(version)}'`,
+    "$setup = Join-Path $env:USERPROFILE 'Downloads\\windows-agent-setup.ps1'",
+    "if (-not (Test-Path -LiteralPath $setup)) { throw \"Setup-Skript nicht gefunden: $setup\" }",
+    "$principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())",
+    "if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'PowerShell als Administrator starten.' }",
+    "$agentService = Get-Service -Name lxcup-agent -ErrorAction SilentlyContinue",
+    "if ($agentService) {",
+    "    if ($agentService.Status -ne 'Stopped') { Stop-Service -Name lxcup-agent -Force -ErrorAction Stop }",
+    "    $null = & sc.exe delete lxcup-agent",
+    "    if ($LASTEXITCODE -ne 0) { throw 'Der lxcup-Agent-Dienst konnte nicht entfernt werden.' }",
+    "    for ($attempt = 0; $attempt -lt 30 -and (Get-Service -Name lxcup-agent -ErrorAction SilentlyContinue); $attempt++) { Start-Sleep -Seconds 1 }",
+    "    if (Get-Service -Name lxcup-agent -ErrorAction SilentlyContinue) { throw 'Der Dienst ist noch zur Löschung vorgemerkt. Windows neu starten und erneut versuchen.' }",
+    "}",
+    "Remove-Item -LiteralPath 'C:\\Program Files\\lxcup','C:\\ProgramData\\lxcup' -Recurse -Force -ErrorAction SilentlyContinue",
+    "& $setup -ControllerUrl $controller -TargetId $targetId -Version $version",
+  ].join("\n");
+}
+
+function buildWindowsInstallCommand(controllerUrl: string, targetId: string, version: string) {
+  const escapePowerShellLiteral = (value: string) => value.replace(/'/g, "''");
+  return `& (Join-Path $env:USERPROFILE 'Downloads\\windows-agent-setup.ps1') -ControllerUrl '${escapePowerShellLiteral(controllerUrl)}' -TargetId "${targetId}" -Version "${version}"`;
+}
+
+function isLoopbackHost(host: string) {
+  const normalized = host.replace(/^\[|\]$/g, "").toLowerCase();
+  return normalized === "localhost" || normalized === "::1" || normalized.startsWith("127.");
+}
+
+function canWindowsTargetReachController(controller: string, targetAddress: string | undefined) {
+  if (!controller) return false;
+  try {
+    const url = new URL(controller);
+    if (url.username || url.password || url.search || url.hash || url.pathname !== "/") return false;
+    if (isLoopbackHost(url.hostname)) {
+      return isLoopbackHost(targetAddress ?? "") && (url.protocol === "https:" || url.protocol === "http:");
+    }
+    return url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function windowsControllerAddressWarning(controller: string, targetAddress: string | undefined) {
+  if (!controller) return "Gib eine vom Windows-System erreichbare Controller-Adresse ein.";
+  try {
+    const url = new URL(controller);
+    if (url.username || url.password || url.search || url.hash || url.pathname !== "/") {
+      return "Verwende nur die Controller-Adresse ohne Zugangsdaten, Pfad oder Zusatzparameter.";
+    }
+    if (isLoopbackHost(url.hostname) && !isLoopbackHost(targetAddress ?? "")) {
+      return "localhost wird auf dem Windows-System selbst aufgelöst. Für ein anderes System verwende die erreichbare HTTPS-Adresse des Controllers.";
+    }
+    return "Verwende HTTPS. HTTP ist nur für Loopback-Tests auf demselben Rechner erlaubt.";
+  } catch {
+    return "Gib eine gültige Controller-Adresse ein, die vom Windows-System erreichbar ist.";
+  }
 }
 
 function ResourceRelationshipMap() {
@@ -451,9 +562,13 @@ function TargetInventoryCard({ target, jobs, removing, onRemove }: Readonly<{ ta
             <TargetSignalLink to={`/targets/${target.id}`} label="Systemauslastung" value={telemetrySummary} status={telemetrySignalStatus(telemetry, telemetryStale, telemetryTime)} accessibleName={`Systemauslastung für ${target.name}`} details={<TelemetryReadings sample={latestSample} />} />
           </div>
         </div>
-        {target.transport === "agent" ? <div className="mt-3"><WindowsSetupCard target={target} /></div> : null}
+        {target.transport === "agent" && !isAgentOnboarded(target) ? <div className="mt-3"><WindowsSetupCard target={target} /></div> : null}
       </article>
     </li>;
+}
+
+function isAgentOnboarded(target: TargetDto): boolean {
+  return target.state === "managed" && Boolean(target.agent_version);
 }
 
 function TelemetryReadings({ sample }: Readonly<{ sample: NonNullable<ReturnType<typeof useTargetTelemetry>["data"]>["samples"][number] | undefined }>) {
@@ -545,9 +660,20 @@ function targetStateStatusClass(state: TargetState) {
 function TargetOnboardingProtocols({ target, jobs }: Readonly<{ target: import("../api").TargetDto; jobs: import("../api").AnsibleJobDto[] }>) {
   const targetJobs = jobs.filter((job) => "target" in job.target && job.target.target === target.id);
   const deployment = targetJobs.find((job) => job.operation === "deploy_agent");
-  const laterJobs = deployment ? targetJobs.filter((job) => job.created_at >= deployment.created_at) : [];
-  const health = laterJobs.find((job) => job.operation === "health_check");
-  const inventory = laterJobs.find((job) => job.operation === "collect_package_inventory");
+  const laterJobs = target.transport === "agent"
+    ? targetJobs
+    : deployment ? targetJobs.filter((job) => job.created_at >= deployment.created_at) : [];
+  const health = latestTargetJob(laterJobs, "health_check");
+  const inventory = latestTargetJob(laterJobs, "collect_package_inventory");
+  if (target.transport === "agent") {
+    const connected = target.state === "managed" && Boolean(target.agent_version);
+    const agentStatus = connected ? "Erfolgreich" : "Heartbeat ausstehend";
+    return <ol className="m-0 flex flex-wrap gap-2 p-0" aria-label={`Onboarding-Status für ${target.name}`}>
+      <li className="list-none"><span className={cn("inline-flex items-center border px-2 py-1 text-xs", connected ? "border-transparent bg-[var(--success-soft)] font-semibold text-[var(--success)]" : "border-[var(--line)] text-[var(--muted)]")}>Agent · {agentStatus}</span></li>
+      {health ? <li className="list-none"><Link className={cn("inline-flex items-center border border-transparent px-2 py-1 text-xs font-semibold hover:border-[var(--primary)] hover:underline", jobStatusBadgeClass(health.status))} to={`/workflows/${health.id}`}>Healthcheck · {jobStatusLabel(health.status)}</Link></li> : null}
+      {inventory ? <li className="list-none"><Link className={cn("inline-flex items-center border border-transparent px-2 py-1 text-xs font-semibold hover:border-[var(--primary)] hover:underline", jobStatusBadgeClass(inventory.status))} to={`/workflows/${inventory.id}`}>Paketinventar · {jobStatusLabel(inventory.status)}</Link></li> : null}
+    </ol>;
+  }
   const steps = [
     ["Agent", deployment, "Nicht gestartet"],
     ["Healthcheck", health, "Ausstehend"],
@@ -558,6 +684,12 @@ function TargetOnboardingProtocols({ target, jobs }: Readonly<{ target: import("
       {job ? <Link className={cn("inline-flex items-center border border-transparent px-2 py-1 text-xs font-semibold hover:border-[var(--primary)] hover:underline", jobStatusBadgeClass(job.status))} to={`/workflows/${job.id}`} title={`${label}: ${jobStatusLabel(job.status)}`}>{label} · {jobStatusLabel(job.status)}</Link> : <span className="inline-flex items-center border border-[var(--line)] px-2 py-1 text-xs text-[var(--muted)]">{label} · {pendingLabel}</span>}
     </li>)}
   </ol>;
+}
+
+function latestTargetJob(jobs: AnsibleJobDto[], operation: AnsibleJobDto["operation"]) {
+  return jobs
+    .filter((job) => job.operation === operation)
+    .reduce<AnsibleJobDto | undefined>((latest, job) => !latest || job.created_at > latest.created_at ? job : latest, undefined);
 }
 
 function targetStateClass(state: TargetState) {

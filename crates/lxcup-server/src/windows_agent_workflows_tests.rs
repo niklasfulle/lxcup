@@ -107,7 +107,7 @@ fn windows_plan_summary_is_derived_from_local_winget_listing() {
                 request_id: Uuid::new_v4(),
                 success: true,
                 exit_code: 0,
-                stdout: "Name                  Id                    Version  Available  Source\n--------------------------------------------------------------------------------\n7-Zip 24.09 (x64)      7zip.7zip             24.09    25.01      winget\n".to_owned(),
+                stdout: r#"[{"id":"7zip.7zip","name":"7-Zip 24.09 (x64)","version":"24.09","candidate_version":"25.01","source":"winget"}]"#.to_owned(),
                 stderr: String::new(),
                 reboot_required: false,
                 duration_ms: 15,
@@ -126,9 +126,7 @@ fn windows_plan_without_a_selected_update_fails_closed() {
             request_id: Uuid::new_v4(),
             success: true,
             exit_code: 0,
-            stdout:
-                "Name  Id  Version  Available  Source\n--------------------------------------\n"
-                    .to_owned(),
+            stdout: "[]".to_owned(),
             stderr: String::new(),
             reboot_required: false,
             duration_ms: 15,
@@ -163,7 +161,7 @@ fn windows_agent_result_summaries_fail_closed_for_bad_or_unselected_updates() {
             .contains("invalid or unsupported")
     );
 
-    result.response.stdout = "Name Id Version Available Source\n--------------------------------\n7-Zip 7zip.7zip 24.09 25.01 winget\n".to_owned();
+    result.response.stdout = r#"[{"id":"7zip.7zip","name":"7-Zip","version":"24.09","candidate_version":"25.01","source":"winget"}]"#.to_owned();
     job.parameters = AnsibleParameters::HealthCheck;
     assert!(
         result_summary(&job, &result)
@@ -179,6 +177,51 @@ fn windows_agent_result_summaries_fail_closed_for_bad_or_unselected_updates() {
             .0
             .contains("no available updates")
     );
+}
+
+#[test]
+fn windows_inventory_failure_summary_uses_only_safe_diagnostic_codes() {
+    let mut job = package_job(&[], ExecutionMode::Check);
+    job.operation = AnsibleOperation::CollectPackageInventory;
+    job.parameters = AnsibleParameters::CollectPackageInventory;
+    let mut result = AgentWorkflowResult {
+        response: lxcup_agent::AgentCommandResponse {
+            request_id: Uuid::new_v4(),
+            success: false,
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: String::new(),
+            reboot_required: false,
+            duration_ms: 1,
+        },
+    };
+
+    for (error, expected) in [
+        (
+            lxcup_agent::PackageInventoryError::ManagerUnavailable,
+            "Microsoft.WinGet.Client",
+        ),
+        (lxcup_agent::PackageInventoryError::Timeout, "timed out"),
+        (
+            lxcup_agent::PackageInventoryError::TooLarge,
+            "response limit",
+        ),
+        (
+            lxcup_agent::PackageInventoryError::InvalidOutput,
+            "invalid or unsupported",
+        ),
+    ] {
+        result.response.stderr = error.code().to_owned();
+        let (summary, usable) = result_summary(&job, &result);
+        assert!(!usable);
+        assert!(summary.contains(expected));
+    }
+
+    result.response.stderr = "token=must-not-be-shown".to_owned();
+    let (summary, usable) = result_summary(&job, &result);
+    assert!(!usable);
+    assert!(summary.contains("local command failure"));
+    assert!(!summary.contains("must-not-be-shown"));
 }
 
 #[test]
@@ -271,7 +314,7 @@ async fn authenticated_windows_agent_claims_and_completes_a_local_winget_plan() 
                 request_id: Uuid::new_v4(),
                 success: true,
                 exit_code: 0,
-                stdout: "Name                  Id                    Version  Available  Source\n--------------------------------------------------------------------------------\n7-Zip 24.09 (x64)      7zip.7zip             24.09    25.01      winget\n".to_owned(),
+                stdout: r#"[{"id":"7zip.7zip","name":"7-Zip 24.09 (x64)","version":"24.09","candidate_version":"25.01","source":"winget"}]"#.to_owned(),
                 stderr: String::new(),
                 reboot_required: false,
                 duration_ms: 10,
@@ -285,6 +328,76 @@ async fn authenticated_windows_agent_claims_and_completes_a_local_winget_plan() 
     )
     .await
     .unwrap();
+    assert_eq!(response, StatusCode::NO_CONTENT);
+    assert_eq!(
+        state.ansible.read().await.job(job.id).unwrap().status,
+        AnsibleJobStatus::Succeeded
+    );
+}
+
+#[test]
+fn windows_agent_update_claim_contains_only_the_controller_selected_version() {
+    let mut job = package_job(&[], ExecutionMode::Plan);
+    job.operation = AnsibleOperation::UpdateAgent;
+    job.parameters = AnsibleParameters::UpdateAgent {
+        agent_version: "0.6.0".to_owned(),
+    };
+    let plan = workflow_command(job.clone()).unwrap();
+    assert_eq!(plan.action, AgentAction::Health);
+    assert_eq!(plan.agent_version.as_deref(), Some("0.6.0"));
+
+    job.mode = ExecutionMode::Apply;
+    job.status = AnsibleJobStatus::Applying;
+    let apply = workflow_command(job).unwrap();
+    assert_eq!(apply.action, AgentAction::UpdateAgent);
+    assert_eq!(apply.agent_version.as_deref(), Some("0.6.0"));
+}
+
+#[tokio::test]
+async fn authenticated_windows_agent_claims_and_completes_package_inventory_collection() {
+    let (state, target, token) = windows_agent_state().await;
+    let JobSubmission::Created(job) = state
+        .ansible
+        .write()
+        .await
+        .submit(AnsibleJobRequest {
+            operation: AnsibleOperation::CollectPackageInventory,
+            target: ResourceTarget::Target(target.id),
+            lifecycle: ResourceLifecycle::Managed,
+            mode: ExecutionMode::Check,
+            parameters: AnsibleParameters::CollectPackageInventory,
+            secret_refs: vec![target.agent_secret_ref],
+            idempotency_key: "package-inventory:windows-agent".to_owned(),
+            confirmed: true,
+            actor_role: ActorRole::Admin,
+        })
+        .unwrap()
+    else {
+        panic!("inventory workflow should be created")
+    };
+    let headers = agent_headers(&token);
+    let JsonBody(claimed) = claim_windows_agent_workflow(
+        State(state.clone()),
+        headers.clone(),
+        JsonBody(AgentWorkflowClaimRequest {
+            target_id: target.id.as_uuid(),
+        }),
+    )
+    .await
+    .unwrap();
+    let command = claimed.data.expect("Windows agent should claim inventory");
+    assert_eq!(command.action, AgentAction::Scan);
+    assert!(command.packages.is_empty());
+
+    let response = report_windows_agent_workflow(
+        State(state.clone()),
+        headers,
+        Path(job.id.as_uuid().to_string()),
+        JsonBody(successful_health_result()),
+    )
+    .await
+    .unwrap();
+
     assert_eq!(response, StatusCode::NO_CONTENT);
     assert_eq!(
         state.ansible.read().await.job(job.id).unwrap().status,

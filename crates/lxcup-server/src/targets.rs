@@ -305,7 +305,33 @@ pub(super) async fn receive_agent_heartbeat(
     if expected.expose() != token {
         return Err(ApiError::unauthorized());
     }
-    let package_inventory = sanitize_agent_package_inventory(&heartbeat, target.kind)?;
+    let reported_package_count = heartbeat
+        .package_inventory
+        .as_ref()
+        .map(|inventory| inventory.packages.len());
+    let package_inventory = match sanitize_agent_package_inventory(&heartbeat, target.kind) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            tracing::warn!(
+                target: "lxcup_server::agent",
+                target_id = %target.id.as_uuid(),
+                error_code = %error.code,
+                "discarding invalid optional package inventory while accepting agent heartbeat"
+            );
+            None
+        }
+    };
+    if let (Some(reported), Some(snapshot)) = (reported_package_count, package_inventory.as_ref()) {
+        if snapshot.packages.len() < reported {
+            tracing::warn!(
+                target: "lxcup_server::agent",
+                target_id = %heartbeat.target_id,
+                reported_packages = reported,
+                accepted_packages = snapshot.packages.len(),
+                "discarded invalid Windows package inventory entries"
+            );
+        }
+    }
     let telemetry_summary = sanitize_telemetry_window(&mut heartbeat);
     sanitize_docker_telemetry_window(&mut heartbeat);
     heartbeat.package_inventory = None;
@@ -401,7 +427,16 @@ fn sanitize_agent_package_inventory(
     let mut names = std::collections::HashSet::new();
     let mut packages = Vec::with_capacity(inventory.packages.len());
     for package in &inventory.packages {
-        if !lxcup_agent::safe_winget_id(&package.name)
+        let source = package.source.as_deref();
+        let safe_identifier = match source {
+            Some("winget") => lxcup_agent::safe_winget_id(&package.name),
+            Some("msstore") => lxcup_agent::safe_msstore_id(&package.name),
+            Some(source @ ("arp" | "msix")) => {
+                lxcup_agent::safe_read_only_windows_package_id(&package.name, source)
+            }
+            _ => false,
+        };
+        if !safe_identifier
             || package.name.len() > 128
             || package.installed_version.trim().is_empty()
             || package.installed_version.len() > 128
@@ -409,41 +444,38 @@ fn sanitize_agent_package_inventory(
                 .candidate_version
                 .as_ref()
                 .is_some_and(|value| value.trim().is_empty() || value.len() > 128)
-            || package.source.as_deref() != Some("winget")
             || !names.insert(package.name.to_ascii_lowercase())
         {
-            return Err(ApiError::bad_request(
-                "agent_inventory_invalid",
-                "Windows package inventory contains an invalid package entry",
-            ));
+            continue;
         }
-        packages.push(InstalledPackage {
-            name: PackageName::new(package.name.clone()).map_err(|_| {
-                ApiError::bad_request(
-                    "agent_inventory_invalid",
-                    "Windows package inventory contains an invalid package name",
-                )
-            })?,
-            version: PackageVersion::new(package.installed_version.clone()).map_err(|_| {
-                ApiError::bad_request(
-                    "agent_inventory_invalid",
-                    "Windows package inventory contains an invalid installed version",
-                )
-            })?,
-            candidate_version: package
+        let Ok(name) = PackageName::new(package.name.clone()) else {
+            continue;
+        };
+        let Ok(version) = PackageVersion::new(package.installed_version.clone()) else {
+            continue;
+        };
+        let candidate_version = if matches!(source, Some("winget" | "msstore")) {
+            package
                 .candidate_version
                 .as_ref()
                 .map(|value| PackageVersion::new(value.clone()))
                 .transpose()
-                .map_err(|_| {
-                    ApiError::bad_request(
-                        "agent_inventory_invalid",
-                        "Windows package inventory contains an invalid candidate version",
-                    )
-                })?,
+        } else {
+            Ok(None)
+        };
+        let Ok(candidate_version) = candidate_version else {
+            continue;
+        };
+        packages.push(InstalledPackage {
+            name,
+            version,
+            candidate_version,
             architecture: package.architecture.clone(),
             source: package.source.clone(),
         });
+    }
+    if packages.is_empty() && !inventory.packages.is_empty() {
+        return Ok(None);
     }
     Ok(Some(PackageInventorySnapshot {
         target_id: TargetId::from_uuid(heartbeat.target_id),

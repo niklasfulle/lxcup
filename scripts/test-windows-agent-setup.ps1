@@ -12,6 +12,33 @@ if ($parseErrors.Count -gt 0) {
     $parseErrors | ForEach-Object { Write-Error $_.Message }
     throw 'Windows setup script has PowerShell syntax errors.'
 }
+$setupSource = Get-Content -LiteralPath $setupPath -Raw
+foreach ($requiredArtifactMarker in @('$artifactBase/manifest.json', '$artifactBase/windows-amd64.exe', 'Get-FileHash', 'Assert-WindowsAmd64Pe')) {
+    if (-not $setupSource.Contains($requiredArtifactMarker)) {
+        throw "Windows setup script does not download and validate artifacts directly: $requiredArtifactMarker"
+    }
+}
+
+foreach ($wingetModuleMarker in @('pwsh.exe', 'Microsoft.PowerShell --exact', '& $winget.Source install', "'PowerShell\Modules'", 'Install-PSResource -Name Microsoft.WinGet.Client', '-Scope AllUsers', 'PSGallery')) {
+    if (-not $setupSource.Contains($wingetModuleMarker)) {
+        throw "Windows setup does not provision the LocalSystem-compatible WinGet module: $wingetModuleMarker"
+    }
+}
+if ($setupSource.Contains('Install-PackageProvider')) {
+    throw 'Windows setup must not require the legacy NuGet PackageManagement provider.'
+}
+
+foreach ($startupMarker in @('-StartupType Automatic', "'start=' 'auto'", 'Start-Service -Name $serviceName', 'agent-startup.log', 'Agent startup detail')) {
+    if (-not $setupSource.Contains($startupMarker)) {
+        throw "Windows setup does not configure the agent to start automatically: $startupMarker"
+    }
+}
+if (-not $setupSource.Contains('& sc.exe config $serviceName ''binPath='' ')) {
+    throw 'Windows setup must pass the service binary path as a separate sc.exe argument.'
+}
+if ($setupSource.Contains('$serviceBinaryPath =')) {
+    throw 'Windows setup must not combine the binPath key and its value in one sc.exe argument.'
+}
 
 $peFunction = $scriptAst.Find({
     param($node)

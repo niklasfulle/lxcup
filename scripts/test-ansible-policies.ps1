@@ -33,6 +33,15 @@ foreach ($playbook in $playbooks) {
     }
 }
 
+$linuxAgentTasks = Get-Content -LiteralPath (Join-Path $ansibleRoot "roles/lxcup_agent_linux/tasks/main.yml") -Raw
+$linuxAgentUnit = Get-Content -LiteralPath (Join-Path $ansibleRoot "roles/lxcup_agent_linux/templates/lxcup-agent.service.j2") -Raw
+$linuxAgentHandler = Get-Content -LiteralPath (Join-Path $ansibleRoot "roles/lxcup_agent_linux/handlers/main.yml") -Raw
+if ($linuxAgentUnit -notmatch '(?m)^WantedBy=multi-user\.target\s*$' -or
+    $linuxAgentHandler -notmatch '(?m)^\s*enabled:\s*true\s*$' -or
+    $linuxAgentTasks -notmatch '(?s)- name: Enable and start the agent service.*?state: started.*?enabled: true') {
+    $failures.Add("Linux-Agent ist nicht dauerhaft für den Systemstart aktiviert.")
+}
+
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Error $_ }
     throw "Ansible-Policyprüfung fehlgeschlagen."

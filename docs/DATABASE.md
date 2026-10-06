@@ -21,8 +21,9 @@ The current schema is represented by the ordered SQL migrations. At a domain
 level it stores:
 
 - **Targets** — registered existing Linux, LXC, or Windows resources, their
-  connection metadata, lifecycle, and secret references. Secret values are
-  not stored in PostgreSQL.
+  connection metadata, lifecycle, and secret references. Display names may be
+  reused; each target's UUID is its identity. Secret values are not stored in
+  PostgreSQL.
 - **Ansible jobs and job events** — registered operation, validated parameters,
   target, status, timestamps, idempotency information, and the ordered
   execution log used by the UI and audit trail.

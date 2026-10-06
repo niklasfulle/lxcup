@@ -71,11 +71,17 @@ to the target, and builds a temporary Ansible inventory and variables file.
   non-authenticating CSRF value is readable by the frontend.
 - Agent heartbeats use the target's agent token, independently of user-session
   tokens. Rotate or revoke credentials using the supported secret lifecycle.
-- Windows update workflows are outbound agent claims only. The controller
+- Windows workflows are outbound agent claims only. The controller
   authenticates each claim/result with the target's agent token and permits only
-  allowlisted workflow actions. Update installs use validated exact winget IDs
-  locally; Windows package changes must never fall back to WinRM or caller-built
-  commands.
+  allowlisted workflow actions. Windows software updates use validated exact
+  winget IDs locally; agent-binary updates download the requested version from
+  the artifact service and verify its manifest, SHA-256, and PE32+ amd64 format
+  before changing the service. Neither path may fall back to WinRM or caller-
+  built commands.
+  Windows package inventory may include bounded, validated `ARP\` and
+  `MSIX\` identifiers as read-only rows; only safe package IDs reported by the
+  `winget` or `msstore` sources can carry candidate versions or enter update
+  plans.
 - The Windows setup script verifies the versioned manifest, SHA-256, PE32+
   format, and amd64 machine type before replacing the local executable. It
   restricts the ProgramData configuration directory and token file to SYSTEM

@@ -43,7 +43,7 @@ describe("SchedulesPage", () => {
       next_run_at: "2026-01-01T01:00:00Z",
       last_error: null,
     }] });
-    mocks.targets.mockReturnValue({ data: [{ id: "target-lxc", name: "test-lxc", kind: "lxc" }] });
+    mocks.targets.mockReturnValue({ data: [{ id: "target-lxc", name: "test-lxc", kind: "lxc", address: "192.0.2.10" }] });
     mocks.policies.mockReturnValue({ data: [] });
   });
 

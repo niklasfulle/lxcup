@@ -108,11 +108,49 @@ async fn windows_workflows_require_the_local_agent_transport() {
         &state,
         ResourceTarget::Target(target_id),
         AnsibleOperation::HealthCheck,
+        &AnsibleParameters::HealthCheck,
     )
     .await
     .unwrap_err();
 
     assert_eq!(error.code, "windows_local_setup_required");
+}
+
+#[tokio::test]
+async fn windows_agent_update_must_target_the_current_controller_version() {
+    let state = ApiState::new();
+    let target = Target::new_agent_only(
+        "windows-update-target",
+        TargetKind::WindowsServer,
+        "192.0.2.91",
+        SecretId::new(),
+    )
+    .unwrap();
+    let target_id = target.id;
+    state.store.write().await.targets.push(target);
+
+    let accepted = validate_windows_agent_operation(
+        &state,
+        ResourceTarget::Target(target_id),
+        AnsibleOperation::UpdateAgent,
+        &AnsibleParameters::UpdateAgent {
+            agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+    )
+    .await;
+    assert!(accepted.is_ok());
+
+    let rejected = validate_windows_agent_operation(
+        &state,
+        ResourceTarget::Target(target_id),
+        AnsibleOperation::UpdateAgent,
+        &AnsibleParameters::UpdateAgent {
+            agent_version: "0.4.0".to_owned(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(rejected.code, "windows_agent_version_unsupported");
 }
 
 #[tokio::test]

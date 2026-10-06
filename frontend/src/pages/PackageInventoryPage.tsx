@@ -117,11 +117,12 @@ function InventorySection({ inventory, inventoryJob, target, hasActiveJob, colle
   onSortChange: (value: "name" | "version") => void;
   packages: NonNullable<ReturnType<typeof usePackageInventory>["data"]>["packages"];
 }>) {
+  const windowsAgent = target?.kind === "windows_server" && target.transport === "agent";
   const collectionDisabled = collectionPending || hasActiveJob || target?.state !== "managed";
   return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]">
     <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
       <div className="grid gap-1"><span className="text-[var(--muted)]">Erhebungsstatus: {inventoryStatusLabel(inventory.data?.status, inventory.isLoading)}</span>
-        {inventoryJob ? <Link className={cn("inline-flex w-fit items-center border border-transparent px-2 py-1 text-xs font-semibold hover:border-[var(--primary)] hover:underline", jobStatusBadgeClass(inventoryJob.status))} to={`/workflows/${inventoryJob.id}`}>Inventarisierungs-Workflow · {jobStatusLabel(inventoryJob.status)}</Link> : <span className="text-xs text-[var(--muted)]">Kein Inventarisierungs-Workflow vorhanden</span>}
+        {inventoryJob ? <Link className={cn("inline-flex w-fit items-center border border-transparent px-2 py-1 text-xs font-semibold hover:border-[var(--primary)] hover:underline", jobStatusBadgeClass(inventoryJob.status))} to={`/workflows/${inventoryJob.id}`}>{windowsAgent ? "Agent-Inventarisierung" : "Inventarisierungs-Workflow"} · {jobStatusLabel(inventoryJob.status)}</Link> : <span className="text-xs text-[var(--muted)]">Kein Inventarisierungs-Workflow vorhanden</span>}
       </div>
       {target ? <button className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={collectionDisabled} onClick={onCollect}>{collectionButtonLabel}</button> : null}
     </div>
@@ -129,7 +130,8 @@ function InventorySection({ inventory, inventoryJob, target, hasActiveJob, colle
     {collectionError instanceof Error ? <p className="font-semibold text-[var(--error)]" role="alert">Inventarisierung konnte nicht gestartet werden: {collectionError.message}</p> : null}
     {inventory.isLoading ? <p className="text-[var(--muted)]">Paketinventar wird geladen…</p> : null}
     {inventory.error ? <p className="font-semibold text-[var(--error)]" role="alert">{inventory.error.message}</p> : null}
-    {inventory.data?.status === "not_collected" ? <div className={cn("border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-[var(--ink)]", "border-[#bad0fa] bg-[var(--primary-soft)]")}><strong>Noch kein Paketinventar</strong><p>Die erste Inventarisierung wird nach dem Onboarding eingereiht. Anschließend erscheint hier die vollständige, durchsuchbare Paketliste.</p></div> : null}
+    {windowsAgent ? <p className="m-0 text-xs text-[var(--muted)]">Der Windows-Agent erhebt das Paketinventar lokal mit winget und meldet es über seine ausgehende Verbindung. lxcup verwendet dafür weder WinRM noch einen Ansible-Worker.</p> : null}
+    {inventory.data?.status === "not_collected" ? <div className={cn("border border-[var(--line)] bg-[var(--paper-muted)] p-3 text-[var(--ink)]", "border-[#bad0fa] bg-[var(--primary-soft)]")}><strong>Noch kein Paketinventar</strong><p>{windowsAgent ? "Starte die Erfassung; der verbundene Windows-Agent aktualisiert den Bestand und meldet ihn direkt an lxcup." : "Die erste Inventarisierung wird nach dem Onboarding eingereiht. Anschließend erscheint hier die vollständige, durchsuchbare Paketliste."}</p></div> : null}
     {inventory.data?.status === "complete" ? <PackageTable inventory={inventory.data} packages={packages} query={query} onQueryChange={onQueryChange} sortBy={sortBy} onSortChange={onSortChange} /> : null}
   </section>;
 }

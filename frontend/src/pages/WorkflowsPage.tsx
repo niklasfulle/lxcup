@@ -244,7 +244,7 @@ function workflowSubmitLabel(targetCount: number, pending: boolean) {
 function WorkflowControlPanel(props: WorkflowControlPanelProps) {
   const { targets, targetIds, onTargetToggle, bulkMode, onBulkModeChange, onSingleTargetChange, onSelectAllTargets, onClearTargets, operation, onOperationChange, mode, onModeChange, packagesByTarget, onPackagesChange, packageInventories, policies, policyId, onPolicyChange, approvedPlanJobIds, onApprovedPlanChange, packagePlansByTarget, modifying, confirmed, onConfirmedChange, pendingTargets, selectedOperation, selectedMode, pending, error, results, canSubmit, onSubmit } = props;
   const windowsSelected = targets.some((target) => targetIds.includes(target.id) && target.kind === "windows_server");
-  const windowsOnlyOperations: AnsibleOperation[] = ["health_check", "collect_package_inventory", "update_packages"];
+  const windowsOnlyOperations: AnsibleOperation[] = ["health_check", "collect_package_inventory", "update_packages", "update_agent"];
   const selectedPolicy = policies.find((policy) => policy.id === policyId && policy.enabled);
   const policyCoversTargets = selectedPolicy !== undefined && targetIds.every((targetId) => selectedPolicy.allowed_targets.includes(targetId));
   const policyWarning = operation === "update_packages" && policyId && targetIds.length > 0 && !policyCoversTargets;
@@ -431,7 +431,7 @@ function canSubmitWorkflow({ targetIds, allTargetsExist, isModifyingOperation, c
   packagesByTarget: Record<string, string[]>;
 }) {
   if (!targetIds.length || !allTargetsExist || !supportedModes.includes(mode) || (isModifyingOperation && !confirmed)) return false;
-  if (windowsTargetIds.length > 0 && !["health_check", "collect_package_inventory", "update_packages"].includes(operation)) return false;
+  if (windowsTargetIds.length > 0 && !["health_check", "collect_package_inventory", "update_packages", "update_agent"].includes(operation)) return false;
   if (operation !== "update_packages") return true;
   if (!policyId || !targetIds.every((targetId) => policyTargetIds.includes(targetId))) return false;
   if (windowsTargetIds.some((targetId) => (packagesByTarget[targetId] ?? []).length === 0)) return false;

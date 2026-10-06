@@ -89,9 +89,17 @@ the frontend does not become a policy authority.
 6. The controller can then enqueue health and package-inventory jobs. Their
    status and ordered logs appear in workflow history and activity UI.
 
-Windows installation is agent-first: the setup script verifies the
-versioned Windows artifact against its manifest, installs the local service,
-and stores its token-protected configuration. The agent initiates HTTPS
+Windows installation is agent-first: one locally run PowerShell setup script
+downloads the Windows executable and manifest directly from the versioned
+artifact service, verifies format and checksum, installs the local service
+with automatic startup, and stores its token-protected configuration. Later
+Windows agent updates are allowlisted outbound workflow commands; the running
+agent downloads and verifies the approved artifact, stages a versioned binary,
+switches the service, validates its health/version, and restores the previous
+binary if activation fails. Linux agents run as an enabled systemd service
+with `WantedBy=multi-user.target`; deployment ensures
+the service is enabled and started even when the unit itself did not change.
+The agent initiates HTTPS
 heartbeats and claims allowlisted Windows workflows; the controller does not
 open a WinRM connection or accept a caller-supplied shell command.
 
@@ -112,9 +120,15 @@ stdout/stderr only after credential redaction.
 Agents initiate authenticated heartbeats; the controller does not poll agents
 to establish presence. Windows agents additionally claim allowlisted workflows
 from the controller over their outbound authenticated connection; this is not
-an inbound controller connection or WinRM. Windows software and updates are
-searched and installed locally with winget, using explicit package IDs for
-approved updates. Heartbeat freshness is computed from persisted agent signals.
+an inbound controller connection or WinRM. Windows software inventory and
+approved updates use Microsoft's `Microsoft.WinGet.Client` PowerShell module
+locally. Windows setup ensures PowerShell 7.4 or later is present and installs
+the module for all users with PSResourceGet because the agent service runs as
+`LocalSystem` and the WinGet CLI is unsupported in that context;
+approved updates are restricted to exact package IDs. Windows telemetry
+collectors fail independently so one unavailable CIM/network source does not
+discard other measured values. Heartbeat freshness is computed from persisted
+agent signals.
 Telemetry samples are associated with their target and exposed through the
 target API; current UI depicts a rolling recent window. Docker containers
 are workloads discovered by an agent on a managed Linux host, not standalone

@@ -20,7 +20,10 @@ frontend package metadata and Cargo lockfile. The onboarding E2E script and
 Sonar project metadata read the version from Cargo, and the artifact-store
 healthcheck checks the local Nginx service without embedding a release number.
 Run `.\scripts\build-agent-artifact.ps1` to build Linux amd64/arm64 and
-Windows x64 agents and regenerate the versioned SHA-256 manifest. Docker
+Windows x64 agents and regenerate the versioned SHA-256 manifest. The Windows
+setup script is downloaded separately and fetches the executable and manifest
+directly from the artifact service.
+Docker
 Buildx and the pinned Rust build images are required. The script creates only
 a local artifact; it does not create a Git tag or GitHub release. No GitHub
 Actions workflow is used for building or testing these artifacts.
@@ -55,21 +58,28 @@ protokolliert `worker_unavailable`; er behauptet keinen Erfolg.
 ## Windows-Agent lokal installieren
 
 Windows 11 x64 wird ohne WinRM-Zugangsdaten eingebunden. In lxcup ein
-Windows-System mit Agent-Token anlegen, das angebotene
-`windows-agent-setup.ps1` herunterladen und den angezeigten Befehl in einer
-als Administrator gestarteten PowerShell ausführen. Das Skript fragt das
-Agent-Token verdeckt ab, lädt ausschließlich die Version aus dem Controller
-Manifest und prüft Plattform, PE32+-Architektur und SHA-256, bevor es den
-automatisch startenden Windows-Dienst aktualisiert. Es öffnet keine Firewall
-und benötigt keine Hilfsdatei auf dem Controller.
+Windows-System mit Agent-Token anlegen, das einzelne
+`windows-agent-setup.ps1` in den Downloads-Ordner laden und den angezeigten
+Befehl in einer als Administrator gestarteten PowerShell ausführen. Das Skript
+fragt das Agent-Token verdeckt ab und lädt Version, Manifest und Binärdatei
+direkt aus dem Artifact-Store. Es prüft Plattform, PE32+-Architektur und
+SHA-256, bevor es den automatisch startenden Windows-Dienst installiert.
+Es öffnet keine Firewall. Die konfigurierte öffentliche Controller-URL muss
+vom Windows-System erreichbar sein und HTTPS mit gültigem Zertifikat
+verwenden. Unverschlüsseltes HTTP ist im Setup-Skript ausschließlich für
+Loopback-Tests auf demselben Rechner zulässig. In der lokalen Entwicklung ist
+die erreichbare URL über `LXCUP_PUBLIC_URL` konfigurierbar.
 
 Der Agent meldet Heartbeats, Telemetrie und das lokale `winget`-Inventar über
 ausgehendes HTTPS. Windows-Workflows werden ebenfalls vom Agenten über die
-authentifizierte Claim-/Result-API abgeholt. Updates werden ausschließlich mit
-`winget list --upgrade-available` geplant und pro genehmigter exakter ID mit
-`winget upgrade --id <ID> --exact` angewendet. Controller-Policy, erfolgreicher
-Plan und erneute Bestätigung sind weiterhin erforderlich; direkter Apply über
-den Agent-Endpunkt ist gesperrt.
+authentifizierte Claim-/Result-API abgeholt. Windows-Softwareupdates werden
+mit `winget list --upgrade-available` geplant und pro genehmigter exakter ID
+mit `winget upgrade --id <ID> --exact` angewendet. Das Agent-Binary selbst
+wird über den bestätigten Workflow „Agent aktualisieren“ aus dem Artifact-Store
+bezogen; Hash und PE-Architektur werden vor der Dienstumschaltung geprüft, und
+ein fehlgeschlagener Healthcheck stellt den vorherigen Dienstpfad wieder her.
+Controller-Policy, erfolgreicher Plan und erneute Bestätigung gelten weiterhin
+für Softwareupdates; direkter Apply über den Agent-Endpunkt ist gesperrt.
 
 Das Setup-Skript legt Token und Konfiguration in
 `%ProgramData%\lxcup\agent.env` ab. Das Verzeichnis ist auf `SYSTEM` und lokale

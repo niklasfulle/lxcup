@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createSchedule, listSecrets, setScheduleEnabled, type CreateScheduleRequest, type SecretMetadata } from "../api";
 import { queryKeys, useSchedules, useTargets, useUpdatePolicies } from "../queries";
 import { cn } from "../classnames";
+import { targetDisplayLabel } from "../targetLabel";
 
 const panelClass = "border border-[var(--line)] bg-[var(--panel)] p-5 text-[var(--ink)] shadow-sm";
 const fieldClass = "grid content-start min-w-0 gap-1.5 text-xs font-semibold text-[var(--muted)]";
@@ -137,7 +138,7 @@ function canSubmitSchedule(values: { id: string; operation: string; backupSecret
 
 function ScheduleTargetField({ hidden, targetId, targets, onChange }: Readonly<{ hidden: boolean; targetId: string; targets: ScheduleTarget[]; onChange: (targetId: string) => void }>) {
   if (hidden) return null;
-  return <label className={fieldClass}><span>Ziel</span><select className={inputClass} value={targetId} onChange={(event) => onChange(event.target.value)} required><option value="">Ziel auswählen</option>{targets.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>;
+  return <label className={fieldClass}><span>Ziel</span><select className={inputClass} value={targetId} onChange={(event) => onChange(event.target.value)} required><option value="">Ziel auswählen</option>{targets.map((target) => <option key={target.id} value={target.id}>{targetDisplayLabel(target)}</option>)}</select></label>;
 }
 
 function ScheduleOperationField({ operation, isAdmin, hasLxcTarget, onChange }: Readonly<{ operation: string; isAdmin: boolean; hasLxcTarget: boolean; onChange: (operation: string) => void }>) {
@@ -196,7 +197,7 @@ function ScheduleContent({ schedules, targets, onToggle, pending }: Readonly<{ s
       {schedules.data.map((schedule) => <tr key={schedule.id}>
         <td><strong>{schedule.id}</strong><span className="mt-1 block text-xs text-[var(--muted)]">{schedule.timezone}</span></td>
         <td>{operationLabel(schedule.operation)}</td>
-        <td>{schedule.operation === "create_backup" ? "Controller · Backup-Secret hinterlegt" : schedule.target_ids.map((targetId) => targets.find((target) => target.id === targetId)?.name ?? targetId).join(", ")}</td>
+        <td>{schedule.operation === "create_backup" ? "Controller · Backup-Secret hinterlegt" : schedule.target_ids.map((targetId) => { const target = targets.find((item) => item.id === targetId); return target ? targetDisplayLabel(target) : targetId; }).join(", ")}</td>
         <td>Alle {schedule.every_minutes} Min.</td>
         <td>{new Date(schedule.next_run_at).toLocaleString()}</td>
         <td>{schedule.last_run_at ? new Date(schedule.last_run_at).toLocaleString() : "Noch nicht ausgeführt"}</td>

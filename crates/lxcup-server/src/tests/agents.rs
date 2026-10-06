@@ -106,7 +106,7 @@ async fn compose_image_update_requires_and_uses_a_fresh_successful_check() {
                 }
             }),
         );
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 8090))
+    let listener = tokio::net::TcpListener::bind(("127.0.0.2", 8090))
         .await
         .expect("test agent port should be available");
     let mock_agent_task = tokio::spawn(async move {
@@ -125,7 +125,7 @@ async fn compose_image_update_requires_and_uses_a_fresh_successful_check() {
     let mut target = Target::new(
         "compose-target",
         TargetKind::Lxc,
-        "127.0.0.1",
+        "127.0.0.2",
         TargetTransport::Ssh,
         SecretId::new(),
         agent_secret.metadata.id,
@@ -846,7 +846,7 @@ async fn windows_agent_heartbeat_persists_only_validated_winget_updates() {
         .unwrap()
         .packages[0]
         .candidate_version = Some(" ".to_owned());
-    let rejected = router(state.clone())
+    let accepted_without_inventory = router(state.clone())
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -860,7 +860,8 @@ async fn windows_agent_heartbeat_persists_only_validated_winget_updates() {
         )
         .await
         .unwrap();
-    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(accepted_without_inventory.status(), StatusCode::NO_CONTENT);
+    assert!(state.store.read().await.package_inventories.is_empty());
 
     let response = router(state.clone())
         .oneshot(

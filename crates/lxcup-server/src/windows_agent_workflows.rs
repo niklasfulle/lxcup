@@ -5,7 +5,9 @@ use super::{
 };
 use axum::http::{HeaderMap, StatusCode};
 use chrono::Utc;
-use lxcup_agent::{AgentAction, parse_windows_packages, safe_winget_id};
+use lxcup_agent::{
+    AgentAction, PackageInventoryError, parse_windows_packages_json, safe_winget_id,
+};
 use lxcup_ansible::{
     AnsibleJob, AnsibleJobStatus, AnsibleOperation, AnsibleParameters, ExecutionMode, JobEvent,
     JobEventKind,
@@ -35,6 +37,7 @@ pub(crate) async fn claim_windows_agent_workflow(
                     AnsibleOperation::HealthCheck
                         | AnsibleOperation::CollectPackageInventory
                         | AnsibleOperation::UpdatePackages
+                        | AnsibleOperation::UpdateAgent
                 )
         });
         if let Some(candidate) = candidate {
@@ -144,6 +147,11 @@ fn workflow_command(job: AnsibleJob) -> Result<AgentWorkflowCommand, ApiError> {
     let action = match (job.operation, job.mode) {
         (AnsibleOperation::HealthCheck, _) => AgentAction::Health,
         (AnsibleOperation::CollectPackageInventory, _) => AgentAction::Scan,
+        (AnsibleOperation::UpdateAgent, ExecutionMode::Apply) => AgentAction::UpdateAgent,
+        (
+            AnsibleOperation::UpdateAgent,
+            ExecutionMode::Check | ExecutionMode::Plan | ExecutionMode::Reconcile,
+        ) => AgentAction::Health,
         (AnsibleOperation::UpdatePackages, ExecutionMode::Apply) => AgentAction::Apply,
         (AnsibleOperation::UpdatePackages, ExecutionMode::Plan | ExecutionMode::Reconcile) => {
             AgentAction::Scan
@@ -154,6 +162,21 @@ fn workflow_command(job: AnsibleJob) -> Result<AgentWorkflowCommand, ApiError> {
                 "this operation is not supported by the local Windows agent",
             ));
         }
+    };
+    let agent_version = match &job.parameters {
+        AnsibleParameters::UpdateAgent { agent_version }
+            if job.operation == AnsibleOperation::UpdateAgent
+                && valid_agent_version(agent_version) =>
+        {
+            Some(agent_version.clone())
+        }
+        AnsibleParameters::UpdateAgent { .. } if job.operation == AnsibleOperation::UpdateAgent => {
+            return Err(ApiError::bad_request(
+                "invalid_agent_version",
+                "agent update version is invalid",
+            ));
+        }
+        _ => None,
     };
     let packages = match job.parameters {
         AnsibleParameters::UpdatePackages { packages } => {
@@ -171,7 +194,18 @@ fn workflow_command(job: AnsibleJob) -> Result<AgentWorkflowCommand, ApiError> {
         job_id: job.id.as_uuid(),
         action,
         packages,
+        agent_version,
     })
+}
+
+fn valid_agent_version(version: &str) -> bool {
+    let mut parts = version.split('.');
+    let numeric = (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    });
+    numeric && parts.next().is_none() && version.len() <= 50
 }
 
 async fn authorize_windows_agent(
@@ -225,6 +259,32 @@ async fn load_job(state: &ApiState, id: lxcup_core::AnsibleJobId) -> Result<Ansi
 
 fn result_summary(job: &AnsibleJob, result: &AgentWorkflowResult) -> (String, bool) {
     if !result.response.success {
+        if job.operation == AnsibleOperation::CollectPackageInventory {
+            let message = match PackageInventoryError::from_code(&result.response.stderr) {
+                Some(PackageInventoryError::ManagerUnavailable) => {
+                    "Windows package inventory failed: Microsoft.WinGet.Client is unavailable to the LocalSystem service. Check its all-users installation."
+                }
+                Some(PackageInventoryError::Timeout) => {
+                    "Windows package inventory timed out after 30 seconds."
+                }
+                Some(PackageInventoryError::TooLarge) => {
+                    "Windows package inventory exceeded the supported response limit."
+                }
+                Some(PackageInventoryError::InvalidOutput) => {
+                    "Windows package inventory returned invalid or unsupported package data."
+                }
+                None => {
+                    return (
+                        format!(
+                            "Windows agent reported a local command failure (exit code {}).",
+                            result.response.exit_code
+                        ),
+                        false,
+                    );
+                }
+            };
+            return (message.to_owned(), false);
+        }
         return (
             format!(
                 "Windows agent reported a local command failure (exit code {}).",
@@ -234,7 +294,7 @@ fn result_summary(job: &AnsibleJob, result: &AgentWorkflowResult) -> (String, bo
         );
     }
     if job.operation == AnsibleOperation::UpdatePackages && job.mode == ExecutionMode::Plan {
-        let Ok(packages) = parse_windows_packages(&result.response.stdout) else {
+        let Ok(packages) = parse_windows_packages_json(&result.response.stdout) else {
             return (
                 "winget update scan returned an invalid or unsupported listing.".to_owned(),
                 false,
@@ -275,6 +335,13 @@ fn result_summary(job: &AnsibleJob, result: &AgentWorkflowResult) -> (String, bo
         AnsibleOperation::CollectPackageInventory => {
             "Windows software inventory collected locally with winget."
         }
+        AnsibleOperation::UpdateAgent if job.mode == ExecutionMode::Plan => {
+            "Windows agent reported its installed version for comparison with the selected target version."
+        }
+        AnsibleOperation::UpdateAgent if job.mode == ExecutionMode::Apply => {
+            "Windows agent binary was verified and updated from the artifact store."
+        }
+        AnsibleOperation::UpdateAgent => "Windows agent version was checked locally.",
         AnsibleOperation::UpdatePackages if job.mode == ExecutionMode::Apply => {
             "Selected updates were installed locally by winget."
         }

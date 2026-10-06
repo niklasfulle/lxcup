@@ -52,6 +52,16 @@ describe("ApiClient", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("does not retry non-idempotent requests after a transient server failure", async () => {
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: "internal_error", message: "temporary" }, request_id: "req-post-1" }), { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { id: "created" }, request_id: "req-post-2" }), { status: 201 })));
+
+    await expect(new ApiClient().post("/api/v1/targets", { name: "duplicate-label" }))
+      .rejects.toEqual(expect.objectContaining({ status: 503, code: "internal_error" }));
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects successful responses without the versioned data envelope", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not-json", { status: 200 })));
 

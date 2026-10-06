@@ -186,7 +186,8 @@ pub(crate) async fn create_ansible_job(
     JsonBody(request): JsonBody<CreateAnsibleJobRequest>,
 ) -> Result<(StatusCode, Json<ApiEnvelope<AnsibleJobDto>>), ApiError> {
     let (target, lifecycle, target_secret_ref) = resolve_ansible_target(&state, &request).await?;
-    validate_windows_agent_operation(&state, target, request.operation).await?;
+    validate_windows_agent_operation(&state, target, request.operation, &request.parameters)
+        .await?;
     validate_package_update(&state, &request, target).await?;
     let secret_refs = resolve_job_secret_refs(request.operation, target_secret_ref)?;
     let job_request = AnsibleJobRequest {
@@ -263,6 +264,7 @@ async fn validate_windows_agent_operation(
     state: &ApiState,
     target: ResourceTarget,
     operation: AnsibleOperation,
+    parameters: &AnsibleParameters,
 ) -> Result<(), ApiError> {
     let ResourceTarget::Target(target_id) = target else {
         return Ok(());
@@ -271,21 +273,52 @@ async fn validate_windows_agent_operation(
     let Some(target) = store.targets.iter().find(|target| target.id == target_id) else {
         return Err(ApiError::not_found("target not found"));
     };
-    if target.kind == lxcup_core::TargetKind::WindowsServer
-        && (target.transport != lxcup_core::TargetTransport::Agent
+    if target.kind == lxcup_core::TargetKind::WindowsServer {
+        if target.transport != lxcup_core::TargetTransport::Agent
             || !matches!(
                 operation,
                 AnsibleOperation::HealthCheck
                     | AnsibleOperation::CollectPackageInventory
                     | AnsibleOperation::UpdatePackages
-            ))
-    {
-        return Err(ApiError::bad_request(
-            "windows_local_setup_required",
-            "Windows agent installation and maintenance must use the local setup package; remote WinRM workflows are not supported",
-        ));
+                    | AnsibleOperation::UpdateAgent
+            )
+        {
+            return Err(ApiError::bad_request(
+                "windows_local_setup_required",
+                "Windows agent installation and maintenance must use the local setup script or authenticated local-agent workflow; remote WinRM workflows are not supported",
+            ));
+        }
+        if operation == AnsibleOperation::UpdateAgent
+            && !matches!(
+                parameters,
+                AnsibleParameters::UpdateAgent { agent_version }
+                    if agent_version == env!("CARGO_PKG_VERSION")
+                        && valid_windows_agent_version(agent_version)
+            )
+        {
+            return Err(ApiError::bad_request(
+                "windows_agent_version_unsupported",
+                "Windows agent workflows may update only to the controller's current version",
+            ));
+        }
     }
     Ok(())
+}
+
+fn valid_windows_agent_version(version: &str) -> bool {
+    let (release, prerelease) = version.split_once('-').unwrap_or((version, ""));
+    let mut components = release.split('.');
+    version.len() <= 50
+        && (0..3).all(|_| {
+            components.next().is_some_and(|part| {
+                !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        })
+        && components.next().is_none()
+        && (prerelease.is_empty()
+            || prerelease
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))
 }
 
 pub(crate) async fn persist_created_job(

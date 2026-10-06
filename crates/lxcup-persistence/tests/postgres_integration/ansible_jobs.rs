@@ -413,6 +413,49 @@ async fn postgres_windows_agent_claims_only_allowlisted_jobs_and_persists_apply_
         .await
         .unwrap();
 
+    let inventory = AnsibleJob::from_request(AnsibleJobRequest {
+        operation: AnsibleOperation::CollectPackageInventory,
+        target: target_ref,
+        lifecycle: ResourceLifecycle::Managed,
+        mode: ExecutionMode::Check,
+        parameters: AnsibleParameters::CollectPackageInventory,
+        secret_refs: vec![target.agent_secret_ref],
+        idempotency_key: "windows-agent-inventory".to_owned(),
+        confirmed: true,
+        actor_role: ActorRole::Admin,
+    })
+    .unwrap();
+    repositories.ansible_jobs.save(&inventory).await.unwrap();
+    assert!(
+        repositories
+            .ansible_jobs
+            .claim_next_queued()
+            .await
+            .unwrap()
+            .is_none(),
+        "Windows package inventory must never be claimed by the Ansible worker"
+    );
+    let claimed_inventory = repositories
+        .ansible_jobs
+        .claim_next_windows_agent_job(target.id)
+        .await
+        .unwrap()
+        .expect("the Windows agent should claim package inventory");
+    assert_eq!(claimed_inventory.id, inventory.id);
+    assert_eq!(claimed_inventory.status, AnsibleJobStatus::Checking);
+    let mut completed_inventory = claimed_inventory;
+    completed_inventory
+        .transition_to(AnsibleJobStatus::Planned)
+        .unwrap();
+    completed_inventory
+        .transition_to(AnsibleJobStatus::Succeeded)
+        .unwrap();
+    repositories
+        .ansible_jobs
+        .update(&completed_inventory)
+        .await
+        .unwrap();
+
     let apply = AnsibleJob::from_request(AnsibleJobRequest {
         operation: AnsibleOperation::UpdatePackages,
         target: target_ref,

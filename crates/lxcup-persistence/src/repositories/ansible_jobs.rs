@@ -263,7 +263,7 @@ impl AnsibleJobRepository {
              JOIN targets AS target ON target.id = candidate.target_id \
              WHERE candidate.target_id = $1 AND target.kind = 'windowsserver' \
                AND candidate.status = 'queued' \
-               AND candidate.payload->>'operation' IN ('health_check', 'collect_package_inventory', 'update_packages') \
+               AND candidate.payload->>'operation' IN ('health_check', 'collect_package_inventory', 'update_packages', 'update_agent') \
                AND NOT EXISTS (SELECT 1 FROM ansible_jobs AS active \
                                WHERE active.target_id = candidate.target_id \
                                  AND active.status IN ('checking', 'planned', 'applying')) \

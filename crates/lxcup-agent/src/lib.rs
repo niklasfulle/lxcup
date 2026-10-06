@@ -20,7 +20,10 @@ use uuid::Uuid;
 mod docker;
 mod package_inventory;
 mod parsers;
-pub use package_inventory::{PackageInventoryError, collect_package_inventory};
+pub use package_inventory::{
+    PackageInventoryError, collect_package_inventory, parse_windows_packages_json, safe_msstore_id,
+    safe_read_only_windows_package_id,
+};
 pub use parsers::{
     WindowsPackageParseError, is_safe_docker_container_id, parse_docker_stats,
     parse_remote_image_config_digest, parse_windows_packages, safe_winget_id,
@@ -28,6 +31,20 @@ pub use parsers::{
 use parsers::{normalize_apt_list, parse_dpkg_packages, safe_detail, safe_package};
 
 pub const PROTOCOL_VERSION: &str = "v1";
+
+pub(crate) fn windows_powershell_program() -> std::path::PathBuf {
+    let program_files = std::env::var_os("ProgramW6432")
+        .or_else(|| std::env::var_os("ProgramFiles"))
+        .unwrap_or_else(|| "C:\\Program Files".into());
+    windows_powershell_program_at(&program_files)
+}
+
+fn windows_powershell_program_at(program_files: &std::ffi::OsStr) -> std::path::PathBuf {
+    std::path::Path::new(program_files)
+        .join("PowerShell")
+        .join("7")
+        .join("pwsh.exe")
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -51,6 +68,7 @@ pub enum AgentAction {
     Scan,
     Apply,
     Health,
+    UpdateAgent,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -80,6 +98,8 @@ pub struct AgentWorkflowCommand {
     pub action: AgentAction,
     #[serde(default)]
     pub packages: Vec<String>,
+    #[serde(default)]
+    pub agent_version: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

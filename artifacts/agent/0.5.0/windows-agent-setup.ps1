@@ -78,32 +78,6 @@ try {
     if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
         throw 'Only Windows amd64 is supported by this release.'
     }
-    $powerShellPath = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
-    if (-not (Test-Path -LiteralPath $powerShellPath -PathType Leaf)) {
-        $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
-        if (-not $winget) {
-            throw 'PowerShell 7 is required for Windows package workflows. Install Microsoft.PowerShell with WinGet, then run setup again.'
-        }
-        & $winget.Source install --id Microsoft.PowerShell --exact --scope machine --silent --accept-source-agreements --accept-package-agreements --disable-interactivity
-        if ($LASTEXITCODE -ne 0) { throw 'WinGet could not install the required PowerShell 7 runtime.' }
-    }
-    if (-not (Test-Path -LiteralPath $powerShellPath -PathType Leaf)) { throw 'PowerShell 7 was installed but pwsh.exe is not available at its machine-wide path.' }
-    $systemModuleRoot = Join-Path $env:ProgramFiles 'PowerShell\Modules'
-    $systemWinGetModule = Join-Path $systemModuleRoot 'Microsoft.WinGet.Client'
-    if (-not (Test-Path -LiteralPath $systemWinGetModule -PathType Container)) {
-        $moduleSetup = @"
-`$ErrorActionPreference = 'Stop'
-if (-not (Get-Command Install-PSResource -ErrorAction SilentlyContinue)) {
-    throw 'PowerShell 7.4 or later is required to install the WinGet module without the legacy NuGet provider.'
-}
-Install-PSResource -Name Microsoft.WinGet.Client -Repository PSGallery -Scope AllUsers -TrustRepository -AcceptLicense -Quiet
-"@
-        & $powerShellPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $moduleSetup
-        if ($LASTEXITCODE -ne 0) { throw 'The Microsoft.WinGet.Client module could not be installed from PowerShell Gallery.' }
-    }
-    if (-not (Test-Path -LiteralPath $systemWinGetModule -PathType Container)) {
-        throw 'The Microsoft.WinGet.Client module was not installed for all users. Windows package inventory and updates require this module under LocalSystem.'
-    }
     if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
         throw 'The requested agent version is invalid.'
     }
@@ -118,7 +92,17 @@ Install-PSResource -Name Microsoft.WinGet.Client -Repository PSGallery -Scope Al
     }
 
     $artifactBase = "$($controller.AbsoluteUri.TrimEnd('/'))/agent/$Version"
-    $manifest = Invoke-RestMethod -Uri "$artifactBase/manifest.json" -Method Get
+    $packageDirectory = Split-Path -Parent $PSCommandPath
+    $packagedManifestPath = Join-Path $packageDirectory 'manifest.json'
+    $packagedArtifactPath = Join-Path $packageDirectory 'windows-amd64.exe'
+    $usesPackagedArtifact = (Test-Path -LiteralPath $packagedManifestPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $packagedArtifactPath -PathType Leaf)
+    if ($usesPackagedArtifact) {
+        $manifest = Get-Content -LiteralPath $packagedManifestPath -Raw | ConvertFrom-Json
+    }
+    else {
+        $manifest = Invoke-RestMethod -Uri "$artifactBase/manifest.json" -Method Get
+    }
     if ($manifest.version -ne $Version -or -not $manifest.artifacts) {
         throw 'The controller returned a manifest for a different or unsupported version.'
     }
@@ -130,7 +114,12 @@ Install-PSResource -Name Microsoft.WinGet.Client -Repository PSGallery -Scope Al
     $temporaryDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "lxcup-agent-$([guid]::NewGuid().ToString('N'))"
     [void](New-Item -ItemType Directory -Path $temporaryDirectory)
     $downloadPath = Join-Path $temporaryDirectory 'windows-amd64.exe'
-    Invoke-WebRequest -Uri "$artifactBase/windows-amd64.exe" -OutFile $downloadPath -Method Get
+    if ($usesPackagedArtifact) {
+        Copy-Item -LiteralPath $packagedArtifactPath -Destination $downloadPath
+    }
+    else {
+        Invoke-WebRequest -Uri "$artifactBase/windows-amd64.exe" -OutFile $downloadPath -Method Get
+    }
     $actualHash = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256).Hash
     if (-not [string]::Equals($actualHash, $artifact[0].sha256, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'The downloaded agent checksum does not match the manifest.'
@@ -186,7 +175,8 @@ Install-PSResource -Name Microsoft.WinGet.Client -Repository PSGallery -Scope Al
             $serviceCreated = $true
         }
         else {
-            & sc.exe config $serviceName 'binPath=' "`"$agentPath`"" 'start=' 'auto' 'obj=' 'LocalSystem' | Out-Null
+            $serviceBinaryPath = "binPath= `"$agentPath`""
+            & sc.exe config $serviceName $serviceBinaryPath start= auto obj= LocalSystem | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'Could not update the lxcup agent service configuration.' }
         }
         $startupLogPath = Join-Path $dataDirectory 'agent-startup.log'

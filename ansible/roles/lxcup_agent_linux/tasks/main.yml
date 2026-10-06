@@ -146,6 +146,13 @@
 - name: Flush service handlers before healthcheck
   ansible.builtin.meta: flush_handlers
 
+- name: Enable and start the agent service
+  ansible.builtin.systemd_service:
+    name: lxcup-agent.service
+    state: started
+    enabled: true
+    daemon_reload: true
+
 - name: Check agent health
   ansible.builtin.uri:
     url: "http://127.0.0.1:{{ lxcup_agent_bind_address.rsplit(':', 1)[1] }}/health"

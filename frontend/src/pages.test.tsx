@@ -483,6 +483,15 @@ describe("inventory pages", () => {
     expect(screen.getByRole("button", { name: "Inventarisierung läuft" })).toBeDisabled();
   });
 
+  it("explains that Windows package inventory runs through the local agent", () => {
+    mocks.targets.data = [{ ...target, kind: "windows_server", transport: "agent" }];
+    mocks.packageInventory.data = { target_id: target.id, status: "not_collected", collected_at: null, packages: [] };
+    renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
+
+    expect(screen.getByText(/Der Windows-Agent erhebt das Paketinventar lokal/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Inventarisierung starten" })).toBeEnabled();
+  });
+
   it("shows job submission failures and blocks inventory on an unconnected target", async () => {
     mocks.targets.data = [{ ...target, state: "pending" }];
     renderPage(<PackageInventoryPage />, "/targets/target-1/packages");
@@ -604,7 +613,7 @@ describe("inventory pages", () => {
     mocks.updatePolicies.data = [{ id: "security", enabled: true, allowed_targets: [target.id], allowed_packages: ["curl", "openssl"], maintenance_start_minute: 60, maintenance_end_minute: 120, timezone: "UTC", maximum_risk: "medium" }];
     renderPage(<UpdatePoliciesPage />);
     expect(screen.getByRole("heading", { name: "Update-Policies" })).toBeInTheDocument();
-    expect(screen.getAllByText("test-target").length).toBeGreaterThan(0);
+    expect(screen.getByText("test-target · LXC-Container · 192.0.2.10", { selector: "p" })).toBeInTheDocument();
     expect(screen.getByText("curl, openssl")).toBeInTheDocument();
     expect(screen.getByText((_text, element) => element?.tagName === "DD" && element.textContent === "01:00–02:00")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Zu den Zeitplänen/ })).toHaveAttribute("href", "/schedules");
@@ -1020,7 +1029,7 @@ describe("onboarding and secret pages", () => {
       .toHaveAttribute("href", "/windows-agent-setup.ps1");
   });
 
-  it("keeps the Windows setup script available for an existing target after page reload", () => {
+  it("shows the parameterized setup action and explains loopback controller addresses", async () => {
     mocks.targets.data = [{
       ...target,
       kind: "windows_server",
@@ -1034,7 +1043,62 @@ describe("onboarding and secret pages", () => {
 
     expect(screen.getByRole("link", { name: "Setup-Skript herunterladen" }))
       .toHaveAttribute("href", "/windows-agent-setup.ps1");
-    expect(screen.getByText(/-TargetId "target-1".*-Version "0.5.0"/)).toBeInTheDocument();
+    expect(screen.getByText(/Gib eine vom Windows-System erreichbare Controller-Adresse ein/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Befehl kopieren" })).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("Vom Windows-System erreichbare Controller-Adresse"), "https://lxcup.example.test");
+    const installCommand = screen.getByText(/Downloads\\windows-agent-setup\.ps1/, { selector: "code" });
+    expect(installCommand).toBeInTheDocument();
+    expect(installCommand).toHaveTextContent("https://lxcup.example.test");
+    expect(screen.getByText(/-TargetId "target-1".*-Version "0\.5\.0"/)).toBeInTheDocument();
+    expect(installCommand).not.toHaveTextContent("-AgentToken");
+
+    const controllerInput = screen.getByLabelText("Vom Windows-System erreichbare Controller-Adresse");
+    fireEvent.change(controllerInput, { target: { value: "https://localhost" } });
+    expect(screen.getByText(/localhost wird auf dem Windows-System selbst aufgelöst/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Befehl kopieren" })).toBeInTheDocument();
+    fireEvent.change(controllerInput, { target: { value: "https://lxcup.example.test/o'hare" } });
+    expect(screen.getByText(/-ControllerUrl 'https:\/\/lxcup\.example\.test\/o''hare'/)).toBeInTheDocument();
+  });
+
+  it("keeps setup download separate from copying Windows agent commands", async () => {
+    mocks.targets.data = [{
+      ...target,
+      kind: "windows_server",
+      transport: "agent",
+      ssh_user: null,
+      credential_secret_ref: null,
+      ssh_known_hosts_secret_ref: null,
+      latest_agent_version: "0.5.0",
+    }];
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    const downloadClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    renderPage(<TargetsPage area="windows_server" />);
+    await userEvent.type(screen.getByLabelText("Vom Windows-System erreichbare Controller-Adresse"), "https://lxcup.example.test");
+
+    expect(screen.getByRole("link", { name: "Setup-Skript herunterladen" }))
+      .toHaveAttribute("download", "");
+    expect(writeText).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Befehl kopieren" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("-TargetId \"target-1\" -Version \"0.5.0\"")));
+    expect(downloadClick).not.toHaveBeenCalled();
+    downloadClick.mockRestore();
+    expect(screen.getByText(/Startbefehl mit Controller, Ziel-ID und Version kopiert/)).toBeInTheDocument();
+
+    expect(screen.getByText(/Das Ziel in lxcup bleibt erhalten/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Saubere Neuinstallation kopieren" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("Remove-Item -LiteralPath 'C:\\Program Files\\lxcup','C:\\ProgramData\\lxcup'")));
+    const copiedCommand = String(writeText.mock.calls[1]?.[0]);
+    expect(copiedCommand).toContain("https://lxcup.example.test");
+    expect(copiedCommand).toContain("$targetId = 'target-1'");
+    expect(copiedCommand).toContain("$version = '0.5.0'");
+    expect(copiedCommand).toContain("-TargetId $targetId -Version $version");
+    expect(copiedCommand).toContain("if ($agentService.Status -ne 'Stopped')");
+    expect(copiedCommand).not.toContain("-AgentToken");
+    expect(copiedCommand).toContain("\n");
+    expect(screen.getByText(/liegt in der Zwischenablage/)).toBeInTheDocument();
   });
 
   it("copies the complete target host preparation script including curl installation", async () => {
@@ -1078,6 +1142,45 @@ describe("onboarding and secret pages", () => {
     expect(screen.getByRole("link", { name: "Agent · Erfolgreich" })).toHaveAttribute("href", "/workflows/job-deploy");
     expect(screen.getByRole("link", { name: "Healthcheck · Erfolgreich" })).toHaveAttribute("href", "/workflows/job-health");
     expect(screen.getByRole("link", { name: "Paketinventar · Wartet" })).toHaveAttribute("href", "/workflows/job-inventory");
+  });
+
+  it("shows an installed Windows agent as connected without an Ansible deployment job", () => {
+    mocks.targets.data = [{ ...target, kind: "windows_server", transport: "agent", agent_version: "0.5.0" }];
+    mocks.jobs.data = [
+      { id: "windows-health", operation: "health_check", target: { target: target.id }, status: "succeeded", created_at: "2026-01-01T00:01:00Z" },
+      { id: "windows-inventory", operation: "collect_package_inventory", target: { target: target.id }, status: "queued", created_at: "2026-01-01T00:02:00Z" },
+    ];
+    renderPage(<TargetsPage area="windows_server" />);
+
+    expect(screen.getByText("Agent · Erfolgreich")).toBeInTheDocument();
+    expect(screen.getByText("Agent · Erfolgreich")).toHaveClass("bg-[var(--success-soft)]");
+    expect(screen.getByText("Agent · Erfolgreich")).toHaveClass("border", "border-transparent");
+    expect(screen.queryByText("Agent · Nicht gestartet")).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Agent lokal installieren" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Healthcheck · Erfolgreich" })).toHaveAttribute("href", "/workflows/windows-health");
+    expect(screen.getByRole("link", { name: "Paketinventar · Wartet" })).toHaveAttribute("href", "/workflows/windows-inventory");
+  });
+
+  it("keeps Windows setup instructions visible until the agent reports a version", () => {
+    mocks.targets.data = [{ ...target, kind: "windows_server", transport: "agent", state: "pending", agent_version: undefined }];
+    renderPage(<TargetsPage area="windows_server" />);
+
+    expect(screen.getByRole("complementary", { name: "Agent lokal installieren" })).toBeInTheDocument();
+  });
+
+  it("shows the three successful Windows onboarding stages without an extra completion badge", () => {
+    mocks.targets.data = [{ ...target, kind: "windows_server", transport: "agent", agent_version: "0.5.0" }];
+    mocks.jobs.data = [
+      { id: "windows-health", operation: "health_check", target: { target: target.id }, status: "succeeded", created_at: "2026-10-06T21:40:00Z" },
+      { id: "windows-inventory", operation: "collect_package_inventory", target: { target: target.id }, status: "succeeded", created_at: "2026-10-06T21:41:00Z" },
+    ];
+    renderPage(<TargetsPage area="windows_server" />);
+
+    const onboarding = screen.getByRole("region", { name: "Onboarding für test-target" });
+    expect(within(onboarding).getByText("Agent · Erfolgreich")).toBeInTheDocument();
+    expect(within(onboarding).getByRole("link", { name: "Healthcheck · Erfolgreich" })).toHaveAttribute("href", "/workflows/windows-health");
+    expect(within(onboarding).getByRole("link", { name: "Paketinventar · Erfolgreich" })).toHaveAttribute("href", "/workflows/windows-inventory");
+    expect(within(onboarding).getAllByRole("listitem")).toHaveLength(3);
   });
 
   it("shows the version reported by a connected target agent", () => {

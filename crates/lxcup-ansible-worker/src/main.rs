@@ -574,9 +574,10 @@ fn playbook(o: AnsibleOperation, k: TargetKind) -> Option<&'static str> {
             Some("playbooks/health-check-windows.yml")
         }
         (AnsibleOperation::HealthCheck, _) => Some("playbooks/health-check-linux.yml"),
-        (AnsibleOperation::CollectPackageInventory, TargetKind::WindowsServer) => {
-            Some("playbooks/package-inventory-windows.yml")
-        }
+        // Windows package inventory is collected locally by the Windows agent
+        // through its authenticated workflow claim endpoint. Never fall back to
+        // remote Ansible/WinRM for this operation.
+        (AnsibleOperation::CollectPackageInventory, TargetKind::WindowsServer) => None,
         (AnsibleOperation::CollectPackageInventory, _) => {
             Some("playbooks/package-inventory-linux.yml")
         }

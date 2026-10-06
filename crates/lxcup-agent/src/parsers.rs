@@ -235,7 +235,9 @@ pub fn safe_winget_id(value: &str) -> bool {
     for character in value.chars() {
         match character {
             '.' if segment_has_character => segment_has_character = false,
-            character if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') => {
+            character
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '+') =>
+            {
                 segment_has_character = true;
             }
             _ => return false,

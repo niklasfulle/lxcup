@@ -354,7 +354,8 @@ export class ApiClient {
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const maxAttempts = 3;
+    const method = (init?.method ?? "GET").toUpperCase();
+    const maxAttempts = method === "GET" || method === "HEAD" ? 3 : 1;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
         return await this.requestAttempt<T>(path, init, attempt, maxAttempts);
@@ -383,7 +384,7 @@ export class ApiClient {
       const error = payload as ApiErrorBody | undefined;
       const retryable = response.status >= 500;
       if (response.status === 401) this.unauthorizedHandler?.();
-      if (retryable && attempt + 1 < maxAttempts) {
+      if ((method === "GET" || method === "HEAD") && retryable && attempt + 1 < maxAttempts) {
         await delay(attempt);
         return this.requestAttempt<T>(path, init, attempt + 1, maxAttempts);
       }

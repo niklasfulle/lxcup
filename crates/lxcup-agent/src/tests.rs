@@ -416,6 +416,7 @@ async fn local_windows_workflow_commands_are_cached_and_reject_unsafe_packages()
         job_id: uuid::Uuid::new_v4(),
         action: AgentAction::Health,
         packages: Vec::new(),
+        agent_version: None,
     };
 
     let first = execute_workflow_command(&state, &health_command).await;
@@ -428,6 +429,7 @@ async fn local_windows_workflow_commands_are_cached_and_reject_unsafe_packages()
         job_id: uuid::Uuid::new_v4(),
         action: AgentAction::Apply,
         packages: vec!["--accept-all".to_owned()],
+        agent_version: None,
     };
     let rejected = execute_workflow_command(&state, &unsafe_command).await;
     assert!(!rejected.response.success);
@@ -435,6 +437,38 @@ async fn local_windows_workflow_commands_are_cached_and_reject_unsafe_packages()
     let metrics = state.metrics_snapshot().await;
     assert_eq!(metrics.commands_total, 2);
     assert_eq!(metrics.commands_failed, 1);
+}
+
+#[tokio::test]
+async fn windows_agent_update_check_compares_the_requested_controller_version() {
+    let state = LocalAgentState::new(
+        AgentInfo {
+            agent_id: "windows-update-check".to_owned(),
+            platform: AgentPlatform::Windows,
+            hostname: "windows-host".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+        },
+        "agent-token",
+    );
+    let current = AgentWorkflowCommand {
+        job_id: uuid::Uuid::new_v4(),
+        action: AgentAction::Health,
+        packages: Vec::new(),
+        agent_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+    };
+    let current_result = execute_workflow_command(&state, &current).await;
+    assert!(current_result.response.success);
+    assert!(current_result.response.stdout.contains("is confirmed"));
+
+    let stale = AgentWorkflowCommand {
+        job_id: uuid::Uuid::new_v4(),
+        agent_version: Some("0.4.0".to_owned()),
+        ..current
+    };
+    let stale_result = execute_workflow_command(&state, &stale).await;
+    assert!(!stale_result.response.success);
+    assert!(stale_result.response.stdout.contains("expected 0.4.0"));
 }
 
 #[tokio::test]
