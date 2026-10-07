@@ -21,44 +21,7 @@ pub(crate) async fn claim_windows_agent_workflow(
 ) -> Result<Json<ApiEnvelope<Option<AgentWorkflowCommand>>>, ApiError> {
     let target_id = TargetId::from_uuid(request.target_id);
     authorize_windows_agent(&state, &headers, target_id).await?;
-    let job = if let Some(repositories) = state.repositories.clone() {
-        repositories
-            .ansible_jobs
-            .claim_next_windows_agent_job(target_id)
-            .await
-            .map_err(|_| ApiError::storage())?
-    } else {
-        let mut coordinator = state.ansible.write().await;
-        let candidate = coordinator.jobs().into_iter().find(|job| {
-            job.target == ResourceTarget::Target(target_id)
-                && job.status == AnsibleJobStatus::Queued
-                && matches!(
-                    job.operation,
-                    AnsibleOperation::HealthCheck
-                        | AnsibleOperation::CollectPackageInventory
-                        | AnsibleOperation::UpdatePackages
-                        | AnsibleOperation::UpdateAgent
-                )
-        });
-        if let Some(candidate) = candidate {
-            let mut claimed = coordinator
-                .transition(candidate.id, AnsibleJobStatus::Checking)
-                .map_err(|_| {
-                    ApiError::conflict("ansible_target_busy", "target has an active workflow")
-                })?;
-            if candidate.mode == ExecutionMode::Apply {
-                claimed = coordinator
-                    .transition(candidate.id, AnsibleJobStatus::Planned)
-                    .and_then(|_| coordinator.transition(candidate.id, AnsibleJobStatus::Applying))
-                    .map_err(|_| {
-                        ApiError::conflict("ansible_target_busy", "target has an active workflow")
-                    })?;
-            }
-            Some(claimed)
-        } else {
-            None
-        }
-    };
+    let job = claim_next_windows_job(&state, target_id).await?;
     let command = if let Some(job) = job {
         match workflow_command(job.clone()) {
             Ok(command) => Some(command),
@@ -93,6 +56,56 @@ pub(crate) async fn claim_windows_agent_workflow(
         ));
     }
     Ok(Json(envelope(command)))
+}
+
+async fn claim_next_windows_job(
+    state: &ApiState,
+    target_id: TargetId,
+) -> Result<Option<AnsibleJob>, ApiError> {
+    if let Some(repositories) = state.repositories.clone() {
+        return repositories
+            .ansible_jobs
+            .claim_next_windows_agent_job(target_id)
+            .await
+            .map_err(|_| ApiError::storage());
+    }
+    claim_in_memory_windows_job(state, target_id).await
+}
+
+async fn claim_in_memory_windows_job(
+    state: &ApiState,
+    target_id: TargetId,
+) -> Result<Option<AnsibleJob>, ApiError> {
+    let mut coordinator = state.ansible.write().await;
+    let candidate = coordinator.jobs().into_iter().find(|job| {
+        job.target == ResourceTarget::Target(target_id)
+            && job.status == AnsibleJobStatus::Queued
+            && is_windows_agent_operation(job.operation)
+    });
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+    let mut claimed = coordinator
+        .transition(candidate.id, AnsibleJobStatus::Checking)
+        .map_err(|_| ApiError::conflict("ansible_target_busy", "target has an active workflow"))?;
+    if candidate.mode != ExecutionMode::Apply {
+        return Ok(Some(claimed));
+    }
+    claimed = coordinator
+        .transition(candidate.id, AnsibleJobStatus::Planned)
+        .and_then(|_| coordinator.transition(candidate.id, AnsibleJobStatus::Applying))
+        .map_err(|_| ApiError::conflict("ansible_target_busy", "target has an active workflow"))?;
+    Ok(Some(claimed))
+}
+
+fn is_windows_agent_operation(operation: AnsibleOperation) -> bool {
+    matches!(
+        operation,
+        AnsibleOperation::HealthCheck
+            | AnsibleOperation::CollectPackageInventory
+            | AnsibleOperation::UpdatePackages
+            | AnsibleOperation::UpdateAgent
+    )
 }
 
 pub(crate) async fn report_windows_agent_workflow(

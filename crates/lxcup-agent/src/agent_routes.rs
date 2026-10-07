@@ -505,7 +505,7 @@ mod tests {
                 agent_id: "windows-agent".to_owned(),
                 platform: AgentPlatform::Windows,
                 hostname: "windows-host".to_owned(),
-                version: "0.5.0".to_owned(),
+                version: "0.6.0".to_owned(),
                 protocol_version: crate::PROTOCOL_VERSION.to_owned(),
             },
             "windows-token",

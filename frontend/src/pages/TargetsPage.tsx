@@ -34,6 +34,12 @@ function kindsForArea(area: TargetArea) {
   return area === undefined ? kinds : kinds.filter((item) => item.value === area);
 }
 
+function nextSshUser(current: string, kind: TargetKind) {
+  if (current !== "lxcup" && current !== "Administrator") return current;
+  if (kind === "windows_server") return "Administrator";
+  return "lxcup";
+}
+
 function targetsForArea(targets: import("../api").TargetDto[], area: TargetArea) {
   return area === undefined ? targets : targets.filter((target) => target.kind === area);
 }
@@ -151,6 +157,14 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
     }
   }
 
+  function changeSelectedKind(value: TargetKind) {
+    setKind(value);
+    setCredentialSecret("");
+    setStartOnboarding(value !== "windows_server");
+    setNewSecretKind(value === "windows_server" ? "agent_token" : "ssh_password");
+    setSshUser((current) => nextSshUser(current, value));
+  }
+
   useEffect(() => {
     if (startOnboarding === false || createdTarget === undefined || createdTarget.transport === "agent" || deploymentJob.data?.status !== "succeeded" || createdTarget.state !== "managed" || healthStartedFor.current === createdTarget.id) return;
     healthStartedFor.current = createdTarget.id;
@@ -162,73 +176,159 @@ export function TargetsPage({ area }: Readonly<{ area?: TargetArea }>) {
     inventory.mutate(createdTarget.id);
   }, [createdTarget, healthJob.data, inventory, startOnboarding]);
 
+  const targetFormProps: TargetFormProps = {
+    availableKinds,
+    selectedKind,
+    activeSecrets,
+    name,
+    address,
+    sshUser,
+    kind,
+    credentialSecret,
+    agentSecret,
+    knownHostsSecret,
+    newSecretFor,
+    newSecretName,
+    newSecretKind,
+    newSecretValue,
+    startOnboarding,
+    onboardingAvailable: area !== "lxc" && selectedKind.transport === "ssh",
+    submitLabel: "Hinzufügen",
+    inlineSecretPending: inlineSecret.isPending,
+    inlineSecretError: inlineSecret.error instanceof Error ? inlineSecret.error.message : undefined,
+    createPending: create.isPending,
+    createError: create.error instanceof Error ? create.error.message : undefined,
+    onSubmit: (event) => { event.preventDefault(); create.mutate(); },
+    onNameChange: setName,
+    onAddressChange: setAddress,
+    onSshUserChange: setSshUser,
+    onKindChange: changeSelectedKind,
+    onCredentialChange: setCredentialSecret,
+    onAgentChange: setAgentSecret,
+    onKnownHostsChange: setKnownHostsSecret,
+    onSecretForChange: setNewSecretFor,
+    onSecretNameChange: setNewSecretName,
+    onSecretKindChange: setNewSecretKind,
+    onSecretValueChange: setNewSecretValue,
+    onStartOnboardingChange: setStartOnboarding,
+    onCreateSecret: () => inlineSecret.mutate(),
+  };
+  const showWindowsSetup = createdTarget?.transport === "agent"
+    && !isAgentOnboarded(createdTarget)
+    && !visibleTargets.some((target) => target.id === createdTarget.id);
+  const showOnboardingActivities = createdTarget !== undefined
+    && startOnboarding
+    && createdTarget.transport !== "agent";
+
+  function removeTarget(target: TargetDto) {
+    const message = `Ressource „${target.name}“ und alle zugehörigen Inventar-, Telemetrie-, Docker- und Workflow-Daten aus lxcup entfernen?\n\nDer Agent wird NICHT auf dem Host deinstalliert. Zugangsdaten/Secrets bleiben erhalten, da sie von weiteren Ressourcen verwendet werden können. Laufende Workflows müssen zuerst abgeschlossen sein.`;
+    if (globalThis.confirm(message)) remove.mutate(target);
+  }
+
   return (
     <>
-      <header className="mb-3 flex items-end justify-between gap-4 border-b border-[var(--line)] pb-3 max-[720px]:flex-col max-[720px]:items-start">
-        <div>
-          <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">{content.eyebrow}</p>
-          <h1>{content.title}</h1>
-          <p className="text-[var(--muted)]">{content.description}</p>
-        </div>
-        {area === "windows_server" && visibleTargets.length === 0 ? <a className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" href="/windows-agent-setup.ps1" download>Setup-Skript herunterladen</a> : null}
-        <button
-          className={addFormOpen ? "inline-flex min-h-9 items-center justify-center gap-2 border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" : "inline-flex min-h-9 items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"}
-          type="button"
-          aria-expanded={addFormOpen}
-          aria-controls="target-registration"
-          onClick={() => setAddFormOpenByArea((current) => ({ ...current, [areaKey]: !current[areaKey] }))}
-        >
-          {addFormOpen ? "Schließen" : "Hinzufügen"}
-        </button>
-      </header>
-
+      <TargetsPageHeader content={content} area={area} visibleTargetCount={visibleTargets.length} addFormOpen={addFormOpen} onToggle={() => setAddFormOpenByArea((current) => ({ ...current, [areaKey]: !current[areaKey] }))} />
       {area === undefined ? <ResourceRelationshipMap /> : null}
-
-      {addFormOpen ? <section className="mb-3 overflow-hidden border border-[var(--line)] bg-[var(--panel)] text-[var(--ink)]" id="target-registration" aria-labelledby="target-registration-title">
-        <header className="flex items-center justify-between gap-4 border-b border-[var(--line)] bg-[var(--paper-muted)] px-4 py-3 max-[720px]:items-start">
-          <div className="min-w-0">
-            <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Ressource einrichten</p>
-            <h2 id="target-registration-title">{content.registrationTitle}</h2>
-            <p className="text-sm text-[var(--muted)]">Zugang, Anmeldung und optionale Automatisierung konfigurieren.</p>
-          </div>
-          <span className="inline-flex shrink-0 items-center gap-2 border border-[var(--primary)] bg-[var(--primary-soft)] px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-[var(--primary)]"><span className="grid h-5 w-5 place-items-center bg-lxcup-primary text-white">1</span>Zugang</span>
-        </header>
-        <div className="grid items-stretch xl:grid-cols-[minmax(0,1fr)_22rem]">
-          <div className="min-w-0 p-4">
-            <div className="mb-4 border-b border-[var(--line)] pb-3">
-              <h3>Verbindungsdaten</h3>
-              <p className="text-sm text-[var(--muted)]">{selectedKind.transport === "agent" ? "Der Windows-Agent baut die Verbindung ausgehend und TLS-gesichert zum Controller auf." : "Der Worker verwendet diese Angaben für die Verbindung zum Ziel."}</p>
-            </div>
-            <TargetForm availableKinds={availableKinds} selectedKind={selectedKind} activeSecrets={activeSecrets} name={name} address={address} sshUser={sshUser} kind={kind} credentialSecret={credentialSecret} agentSecret={agentSecret} knownHostsSecret={knownHostsSecret} newSecretFor={newSecretFor} newSecretName={newSecretName} newSecretKind={newSecretKind} newSecretValue={newSecretValue} startOnboarding={startOnboarding} onboardingAvailable={area !== "lxc" && selectedKind.transport !== "agent"} submitLabel="Hinzufügen" inlineSecretPending={inlineSecret.isPending} inlineSecretError={inlineSecret.error instanceof Error ? inlineSecret.error.message : undefined} createPending={create.isPending} createError={create.error instanceof Error ? create.error.message : undefined} onSubmit={(event) => { event.preventDefault(); create.mutate(); }} onNameChange={setName} onAddressChange={setAddress} onSshUserChange={setSshUser} onKindChange={(value) => { setKind(value); setCredentialSecret(""); setStartOnboarding(value !== "windows_server"); setNewSecretKind(value === "windows_server" ? "agent_token" : "ssh_password"); setSshUser((current) => current === "lxcup" || current === "Administrator" ? (value === "windows_server" ? "Administrator" : "lxcup") : current); }} onCredentialChange={setCredentialSecret} onAgentChange={setAgentSecret} onKnownHostsChange={setKnownHostsSecret} onSecretForChange={setNewSecretFor} onSecretNameChange={setNewSecretName} onSecretKindChange={setNewSecretKind} onSecretValueChange={setNewSecretValue} onStartOnboardingChange={setStartOnboarding} onCreateSecret={() => inlineSecret.mutate()} />
-          </div>
-          <div className="border-t border-[var(--line)] bg-[var(--paper-muted)] p-4 xl:border-l xl:border-t-0">
-            {selectedKind.transport === "ssh" ? <BootstrapCard copied={bootstrapCopied} onCopy={() => void copyBootstrapScript()} /> : selectedKind.transport === "agent" ? <WindowsSetupCard /> : <WindowsSetupCard />}
-          </div>
-        </div>
-      </section> : null}
+      {addFormOpen ? <TargetRegistrationSection content={content} selectedKind={selectedKind} formProps={targetFormProps} bootstrapCopied={bootstrapCopied} onCopyBootstrap={() => void copyBootstrapScript()} /> : null}
 
       {createdTarget ? <TargetLifecycle target={createdTarget} /> : null}
-      {createdTarget?.transport === "agent" && !isAgentOnboarded(createdTarget) && !visibleTargets.some((target) => target.id === createdTarget.id) ? <WindowsSetupCard target={createdTarget} /> : null}
-      {createdTarget && startOnboarding && createdTarget.transport !== "agent" ? <OnboardingActivities deployment={deployment} health={health} inventory={inventory} /> : null}
-
-      {pendingTargets.length > 0 && <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]"><div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start"><div><h2>Offene Onboardings</h2><p className="text-[var(--muted)]">Diese Ziele warten noch auf Agent und Heartbeat.</p></div><span className={cn("inline-flex items-center px-2 py-0.5 text-xs font-bold", "bg-[var(--warning-soft)] text-[var(--warning)]")}>{pendingTargets.length} offen</span></div><div className="grid">{pendingTargets.map((target) => <TargetLifecycle key={target.id} target={target} />)}</div></section>}
-
-      <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]">
-        <div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start">
-          <div>
-            <h2>{area ? `${content.title}-Inventar` : "Zugangsprofil-Inventar"}</h2>
-            <p className="text-[var(--muted)]">Registrierte Ressourcen, Agent-Version und Onboarding-Status auf einen Blick.</p>
-          </div>
-          <span className="text-[var(--muted)]">{visibleTargets.length} Einträge</span>
-        </div>
-        {remove.error instanceof Error && <p className="mb-3 font-semibold text-[var(--error)]" role="alert">Ressource konnte nicht entfernt werden: {remove.error.message}</p>}
-        <TargetInventory targets={visibleTargets} isLoading={targets.isLoading} jobs={jobs.data ?? []} removingTargetId={remove.isPending ? remove.variables?.id : undefined} onRemove={(target) => {
-          const message = `Ressource „${target.name}“ und alle zugehörigen Inventar-, Telemetrie-, Docker- und Workflow-Daten aus lxcup entfernen?\n\nDer Agent wird NICHT auf dem Host deinstalliert. Zugangsdaten/Secrets bleiben erhalten, da sie von weiteren Ressourcen verwendet werden können. Laufende Workflows müssen zuerst abgeschlossen sein.`;
-          if (globalThis.confirm(message)) remove.mutate(target);
-        }} />
-      </section>
+      {showWindowsSetup ? <WindowsSetupCard target={createdTarget} /> : null}
+      {showOnboardingActivities ? <OnboardingActivities deployment={deployment} health={health} inventory={inventory} /> : null}
+      {pendingTargets.length > 0 ? <PendingTargetsSection targets={pendingTargets} /> : null}
+      <TargetInventorySection area={area} title={content.title} targets={visibleTargets} isLoading={targets.isLoading} jobs={jobs.data ?? []} removeError={remove.error} removingTargetId={remove.isPending ? remove.variables?.id : undefined} onRemove={removeTarget} />
     </>
   );
+}
+
+function TargetsPageHeader({ content, area, visibleTargetCount, addFormOpen, onToggle }: Readonly<{
+  content: ReturnType<typeof contentForArea>;
+  area: TargetArea;
+  visibleTargetCount: number;
+  addFormOpen: boolean;
+  onToggle: () => void;
+}>) {
+  return <header className="mb-3 flex items-end justify-between gap-4 border-b border-[var(--line)] pb-3 max-[720px]:flex-col max-[720px]:items-start">
+    <div>
+      <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">{content.eyebrow}</p>
+      <h1>{content.title}</h1>
+      <p className="text-[var(--muted)]">{content.description}</p>
+    </div>
+    {area === "windows_server" && visibleTargetCount === 0 ? <a className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary" href="/windows-agent-setup.ps1" download>Setup-Skript herunterladen</a> : null}
+    <button
+      className={addFormOpen ? "inline-flex min-h-9 items-center justify-center gap-2 border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-xs font-semibold text-[var(--ink)] transition-colors hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-lxcup-primary disabled:cursor-not-allowed disabled:opacity-50" : "inline-flex min-h-9 items-center justify-center gap-2 border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"}
+      type="button"
+      aria-expanded={addFormOpen}
+      aria-controls="target-registration"
+      onClick={onToggle}
+    >
+      {addFormOpen ? "Schließen" : "Hinzufügen"}
+    </button>
+  </header>;
+}
+
+function TargetRegistrationSection({ content, selectedKind, formProps, bootstrapCopied, onCopyBootstrap }: Readonly<{
+  content: ReturnType<typeof contentForArea>;
+  selectedKind: (typeof kinds)[number];
+  formProps: TargetFormProps;
+  bootstrapCopied: boolean;
+  onCopyBootstrap: () => void;
+}>) {
+  const connectionDescription = selectedKind.transport === "agent"
+    ? "Der Windows-Agent baut die Verbindung ausgehend und TLS-gesichert zum Controller auf."
+    : "Der Worker verwendet diese Angaben für die Verbindung zum Ziel.";
+  return <section className="mb-3 overflow-hidden border border-[var(--line)] bg-[var(--panel)] text-[var(--ink)]" id="target-registration" aria-labelledby="target-registration-title">
+    <header className="flex items-center justify-between gap-4 border-b border-[var(--line)] bg-[var(--paper-muted)] px-4 py-3 max-[720px]:items-start">
+      <div className="min-w-0">
+        <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Ressource einrichten</p>
+        <h2 id="target-registration-title">{content.registrationTitle}</h2>
+        <p className="text-sm text-[var(--muted)]">Zugang, Anmeldung und optionale Automatisierung konfigurieren.</p>
+      </div>
+      <span className="inline-flex shrink-0 items-center gap-2 border border-[var(--primary)] bg-[var(--primary-soft)] px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-[var(--primary)]"><span className="grid h-5 w-5 place-items-center bg-lxcup-primary text-white">1</span>Zugang</span>
+    </header>
+    <div className="grid items-stretch xl:grid-cols-[minmax(0,1fr)_22rem]">
+      <div className="min-w-0 p-4">
+        <div className="mb-4 border-b border-[var(--line)] pb-3">
+          <h3>Verbindungsdaten</h3>
+          <p className="text-sm text-[var(--muted)]">{connectionDescription}</p>
+        </div>
+        <TargetForm {...formProps} />
+      </div>
+      <div className="border-t border-[var(--line)] bg-[var(--paper-muted)] p-4 xl:border-l xl:border-t-0">
+        {selectedKind.transport === "ssh" ? <BootstrapCard copied={bootstrapCopied} onCopy={onCopyBootstrap} /> : <WindowsSetupCard />}
+      </div>
+    </div>
+  </section>;
+}
+
+function PendingTargetsSection({ targets }: Readonly<{ targets: TargetDto[] }>) {
+  return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]">
+    <div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start">
+      <div><h2>Offene Onboardings</h2><p className="text-[var(--muted)]">Diese Ziele warten noch auf Agent und Heartbeat.</p></div>
+      <span className="inline-flex items-center bg-[var(--warning-soft)] px-2 py-0.5 text-xs font-bold text-[var(--warning)]">{targets.length} offen</span>
+    </div>
+    <div className="grid">{targets.map((target) => <TargetLifecycle key={target.id} target={target} />)}</div>
+  </section>;
+}
+
+function TargetInventorySection({ area, title, targets, isLoading, jobs, removeError, removingTargetId, onRemove }: Readonly<{
+  area: TargetArea;
+  title: string;
+  targets: TargetDto[];
+  isLoading: boolean;
+  jobs: NonNullable<ReturnType<typeof useAnsibleJobs>["data"]>;
+  removeError: unknown;
+  removingTargetId: string | undefined;
+  onRemove: (target: TargetDto) => void;
+}>) {
+  const inventoryTitle = area ? `${title}-Inventar` : "Zugangsprofil-Inventar";
+  return <section className="mb-3 border border-[var(--line)] bg-[var(--panel)] p-3 text-[var(--ink)]">
+    <div className="flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start">
+      <div><h2>{inventoryTitle}</h2><p className="text-[var(--muted)]">Registrierte Ressourcen, Agent-Version und Onboarding-Status auf einen Blick.</p></div>
+      <span className="text-[var(--muted)]">{targets.length} Einträge</span>
+    </div>
+    {removeError instanceof Error ? <p className="mb-3 font-semibold text-[var(--error)]" role="alert">Ressource konnte nicht entfernt werden: {removeError.message}</p> : null}
+    <TargetInventory targets={targets} isLoading={isLoading} jobs={jobs} removingTargetId={removingTargetId} onRemove={onRemove} />
+  </section>;
 }
 
 async function copyText(value: string) {
@@ -267,31 +367,24 @@ function WindowsSetupCard({ target }: Readonly<{ target?: TargetDto }>) {
   const [controllerUrl, setControllerUrl] = useState(() => {
     const configured = import.meta.env.VITE_BOOTSTRAP_BASE_URL?.trim();
     if (configured) return configured;
-    return isLoopbackHost(window.location.hostname) ? "" : window.location.origin;
+    return defaultControllerUrl();
   });
   const controllerUrlInput = useRef<HTMLInputElement>(null);
-  const normalizedControllerUrl = controllerUrl.trim().replace(/\/+$/, "");
+  const normalizedControllerUrl = trimTrailingSlashes(controllerUrl.trim());
   const controllerUrlAvailable = canWindowsTargetReachController(normalizedControllerUrl, target?.address);
-  const installCommand = target?.latest_agent_version && normalizedControllerUrl
-    ? buildWindowsInstallCommand(normalizedControllerUrl, target.id, target.latest_agent_version)
-    : undefined;
-  const cleanInstallCommand = target?.latest_agent_version && controllerUrlAvailable
-    ? buildWindowsCleanInstallCommand(normalizedControllerUrl, target.id, target.latest_agent_version)
-    : undefined;
-  const setupScriptUrl = "/windows-agent-setup.ps1";
-  const titleId = target ? `windows-setup-title-${target.id}` : "windows-setup-title";
   const [cleanCommandCopied, setCleanCommandCopied] = useState(false);
   const [copyError, setCopyError] = useState("");
   async function copyInstallCommand() {
-    if (!target?.latest_agent_version) return;
-    const enteredControllerUrl = (controllerUrlInput.current?.value ?? controllerUrl).trim().replace(/\/+$/, "");
+    const version = target?.latest_agent_version;
+    if (!target || !version) return;
+    const enteredControllerUrl = trimTrailingSlashes((controllerUrlInput.current?.value ?? controllerUrl).trim());
     setControllerUrl(enteredControllerUrl);
     if (!canWindowsTargetReachController(enteredControllerUrl, target.address)) {
       setCopyError(windowsControllerAddressWarning(enteredControllerUrl, target.address));
       return;
     }
     try {
-      await copyText(buildWindowsInstallCommand(enteredControllerUrl, target.id, target.latest_agent_version));
+      await copyText(buildWindowsInstallCommand(enteredControllerUrl, target.id, version));
       setCopied(true);
       setCopyError("");
       globalThis.setTimeout(() => setCopied(false), 2500);
@@ -300,9 +393,10 @@ function WindowsSetupCard({ target }: Readonly<{ target?: TargetDto }>) {
     }
   }
   async function copyCleanInstall() {
-    if (!cleanInstallCommand) return;
+    if (!target?.latest_agent_version || !controllerUrlAvailable) return;
     try {
-      await copyText(cleanInstallCommand);
+      const command = buildWindowsCleanInstallCommand(normalizedControllerUrl, target.id, target.latest_agent_version);
+      await copyText(command);
       setCleanCommandCopied(true);
       setCopyError("");
       globalThis.setTimeout(() => setCleanCommandCopied(false), 2500);
@@ -310,46 +404,79 @@ function WindowsSetupCard({ target }: Readonly<{ target?: TargetDto }>) {
       setCopyError("Der Befehl konnte nicht kopiert werden. Bitte markiere ihn und kopiere ihn manuell.");
     }
   }
+  const titleId = target ? `windows-setup-title-${target.id}` : "windows-setup-title";
   return <aside className="grid content-start gap-3 border border-[var(--line)] bg-[var(--panel)] p-4" aria-labelledby={titleId}>
     <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-lxcup-primary">Windows vorbereiten</p>
     <h3 id={titleId}>Agent lokal installieren</h3>
     <p className="text-[var(--muted)]">lxcup verbindet Windows ausschließlich über den lokal installierten Agenten. Es werden keine WinRM-Zugangsdaten und keine eingehenden Verwaltungsports benötigt. Der Agent baut nur ausgehende, TLS-validierte Verbindungen auf.</p>
-    {target?.latest_agent_version ? <>
-      <p className="m-0 text-sm">Lade das einzelne Setup-Skript herunter. Öffne PowerShell als Administrator und führe den kopierten Befehl aus. Das Skript lädt Agent und Manifest direkt aus dem Artifact-Store, prüft SHA-256 und PE-Architektur und fragt das Token geschützt ab.</p>
-      <label className="grid gap-1 text-xs font-semibold text-[var(--muted)]">Vom Windows-System erreichbare Controller-Adresse<input ref={controllerUrlInput} aria-label="Vom Windows-System erreichbare Controller-Adresse" value={controllerUrl} onChange={(event) => setControllerUrl(event.target.value)} onBlur={(event) => setControllerUrl(event.currentTarget.value)} placeholder="https://lxcup.example.org" /></label>
-      {!controllerUrlAvailable ? <p className="m-0 text-xs text-[var(--warning)]">{windowsControllerAddressWarning(normalizedControllerUrl, target?.address)}</p> : null}
-      {installCommand ? <code className="block overflow-x-auto border border-[var(--line)] bg-[var(--paper)] p-3 text-xs">{installCommand}</code> : null}
-      <div className="flex flex-wrap gap-2">
-        <a className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 text-xs font-semibold hover:bg-[var(--primary-soft)]" href={setupScriptUrl} download>Setup-Skript herunterladen</a>
-        {target?.latest_agent_version ? <button className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 text-xs font-semibold hover:bg-[var(--primary-soft)]" type="button" onClick={() => void copyInstallCommand()}>{copied ? "Befehl kopiert" : "Befehl kopieren"}</button> : null}
-      </div>
-      {copied ? <p className="m-0 text-xs text-[var(--success)]" aria-live="polite">Startbefehl mit Controller, Ziel-ID und Version kopiert. Führe ihn in einer PowerShell als Administrator aus; das Token wird dort verdeckt abgefragt.</p> : null}
-      {cleanInstallCommand ? <section className="grid gap-2 border-t border-[var(--line)] pt-3" aria-label="Saubere Neuinstallation">
-        <h4>Sauberer Testlauf</h4>
-        <p className="m-0 text-xs text-[var(--warning)]">Entfernt den vorhandenen Agent-Dienst, seine Dateien und die lokale Token-Konfiguration auf diesem Windows-System. Das Ziel in lxcup bleibt erhalten; anschließend wird der Agent neu installiert.</p>
-        <pre className="max-h-48 overflow-auto border border-[var(--line)] bg-[var(--paper)] p-2 text-[11px] leading-relaxed">{cleanInstallCommand}</pre>
-        <button className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs font-semibold hover:bg-[var(--primary-soft)]" type="button" onClick={() => void copyCleanInstall()}>{cleanCommandCopied ? "Befehl kopiert" : "Saubere Neuinstallation kopieren"}</button>
-        <span className="min-h-4 text-xs font-medium text-[var(--success)]" aria-live="polite">{cleanCommandCopied ? "Der Bereinigungs- und Installationsbefehl liegt in der Zwischenablage." : ""}</span>
-      </section> : null}
-      {copyError ? <p className="m-0 text-xs text-[var(--error)]" role="alert">{copyError}</p> : null}
-      <p className="m-0 text-xs text-[var(--muted)]">Bewahre das beim Anlegen gewählte Agent-Token bereit auf. Es wird weder in den Befehl geschrieben noch an die Browserhistorie übergeben.</p>
-    </> : <>
-      <p className="m-0 text-sm">Lade das einzelne Skript herunter. Nach dem Anlegen des Windows-Ziels zeigt lxcup den passenden Befehl an. Das Skript lädt das versionierte Agent-Artefakt samt Manifest aus dem Artifact-Store und prüft SHA-256 sowie PE-Architektur, bevor es den Dienst installiert.</p>
-      <a className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700" href="/windows-agent-setup.ps1" download>Setup-Skript herunterladen</a>
-      {target ? <p className="m-0 text-xs text-[var(--warning)]">Die aktuelle Agent-Version ist noch nicht verfügbar. Lade die Zielseite neu, sobald der Controller die Version meldet.</p> : null}
-      <span className="text-xs text-[var(--muted)]">Benötigt Windows 11 x64 und lokale Administratorrechte.</span>
-    </>}
+    {target?.latest_agent_version
+      ? <WindowsSetupReady target={target} controllerUrl={controllerUrl} controllerUrlAvailable={controllerUrlAvailable} normalizedControllerUrl={normalizedControllerUrl} installCommand={buildWindowsInstallCommand(normalizedControllerUrl, target.id, target.latest_agent_version)} cleanInstallCommand={controllerUrlAvailable ? buildWindowsCleanInstallCommand(normalizedControllerUrl, target.id, target.latest_agent_version) : undefined} copied={copied} cleanCommandCopied={cleanCommandCopied} copyError={copyError} controllerUrlInput={controllerUrlInput} onControllerUrlChange={setControllerUrl} onCopyInstall={() => void copyInstallCommand()} onCopyClean={() => void copyCleanInstall()} />
+      : <WindowsSetupUnavailable target={target} />}
   </aside>;
 }
 
+function defaultControllerUrl() {
+  return isLoopbackHost(globalThis.location.hostname) ? "" : globalThis.location.origin;
+}
+
+function WindowsSetupReady({ target, controllerUrl, controllerUrlAvailable, normalizedControllerUrl, installCommand, cleanInstallCommand, copied, cleanCommandCopied, copyError, controllerUrlInput, onControllerUrlChange, onCopyInstall, onCopyClean }: Readonly<{
+  target: TargetDto;
+  controllerUrl: string;
+  controllerUrlAvailable: boolean;
+  normalizedControllerUrl: string;
+  installCommand: string;
+  cleanInstallCommand: string | undefined;
+  copied: boolean;
+  cleanCommandCopied: boolean;
+  copyError: string;
+  controllerUrlInput: React.RefObject<HTMLInputElement | null>;
+  onControllerUrlChange: (value: string) => void;
+  onCopyInstall: () => void;
+  onCopyClean: () => void;
+}>) {
+  return <>
+    <p className="m-0 text-sm">Lade das einzelne Setup-Skript herunter. Öffne PowerShell als Administrator und führe den kopierten Befehl aus. Das Skript lädt Agent und Manifest direkt aus dem Artifact-Store, prüft SHA-256 und PE-Architektur und fragt das Token geschützt ab.</p>
+    <label className="grid gap-1 text-xs font-semibold text-[var(--muted)]">Vom Windows-System erreichbare Controller-Adresse<input ref={controllerUrlInput} aria-label="Vom Windows-System erreichbare Controller-Adresse" value={controllerUrl} onChange={(event) => onControllerUrlChange(event.target.value)} onBlur={(event) => onControllerUrlChange(event.currentTarget.value)} placeholder="https://lxcup.example.org" /></label>
+    {controllerUrlAvailable ? null : <p className="m-0 text-xs text-[var(--warning)]">{windowsControllerAddressWarning(normalizedControllerUrl, target.address)}</p>}
+    <code className="block overflow-x-auto border border-[var(--line)] bg-[var(--paper)] p-3 text-xs">{installCommand}</code>
+    <div className="flex flex-wrap gap-2">
+      <a className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 text-xs font-semibold hover:bg-[var(--primary-soft)]" href="/windows-agent-setup.ps1" download>Setup-Skript herunterladen</a>
+      <button className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 text-xs font-semibold hover:bg-[var(--primary-soft)]" type="button" onClick={onCopyInstall}>{copied ? "Befehl kopiert" : "Befehl kopieren"}</button>
+    </div>
+    {copied ? <p className="m-0 text-xs text-[var(--success)]" aria-live="polite">Startbefehl mit Controller, Ziel-ID und Version kopiert. Führe ihn in einer PowerShell als Administrator aus; das Token wird dort verdeckt abgefragt.</p> : null}
+    {cleanInstallCommand ? <CleanInstallInstructions command={cleanInstallCommand} copied={cleanCommandCopied} onCopy={onCopyClean} /> : null}
+    {copyError ? <p className="m-0 text-xs text-[var(--error)]" role="alert">{copyError}</p> : null}
+    <p className="m-0 text-xs text-[var(--muted)]">Bewahre das beim Anlegen gewählte Agent-Token bereit auf. Es wird weder in den Befehl geschrieben noch an die Browserhistorie übergeben.</p>
+  </>;
+}
+
+function CleanInstallInstructions({ command, copied, onCopy }: Readonly<{ command: string; copied: boolean; onCopy: () => void }>) {
+  return <section className="grid gap-2 border-t border-[var(--line)] pt-3" aria-label="Saubere Neuinstallation">
+    <h4>Sauberer Testlauf</h4>
+    <p className="m-0 text-xs text-[var(--warning)]">Entfernt den vorhandenen Agent-Dienst, seine Dateien und die lokale Token-Konfiguration auf diesem Windows-System. Das Ziel in lxcup bleibt erhalten; anschließend wird der Agent neu installiert.</p>
+    <pre className="max-h-48 overflow-auto border border-[var(--line)] bg-[var(--paper)] p-2 text-[11px] leading-relaxed">{command}</pre>
+    <button className="inline-flex min-h-9 items-center justify-center border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs font-semibold hover:bg-[var(--primary-soft)]" type="button" onClick={onCopy}>{copied ? "Befehl kopiert" : "Saubere Neuinstallation kopieren"}</button>
+    <span className="min-h-4 text-xs font-medium text-[var(--success)]" aria-live="polite">{copied ? "Der Bereinigungs- und Installationsbefehl liegt in der Zwischenablage." : ""}</span>
+  </section>;
+}
+
+function WindowsSetupUnavailable({ target }: Readonly<{ target: TargetDto | undefined }>) {
+  return <>
+    <p className="m-0 text-sm">Lade das einzelne Skript herunter. Nach dem Anlegen des Windows-Ziels zeigt lxcup den passenden Befehl an. Das Skript lädt das versionierte Agent-Artefakt samt Manifest aus dem Artifact-Store und prüft SHA-256 sowie PE-Architektur, bevor es den Dienst installiert.</p>
+    <a className="inline-flex min-h-9 items-center justify-center border border-lxcup-primary bg-lxcup-primary px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700" href="/windows-agent-setup.ps1" download>Setup-Skript herunterladen</a>
+    {target ? <p className="m-0 text-xs text-[var(--warning)]">Die aktuelle Agent-Version ist noch nicht verfügbar. Lade die Zielseite neu, sobald der Controller die Version meldet.</p> : null}
+    <span className="text-xs text-[var(--muted)]">Benötigt Windows 11 x64 und lokale Administratorrechte.</span>
+  </>;
+}
+
 function buildWindowsCleanInstallCommand(controllerUrl: string, targetId: string, version: string) {
-  const escapePowerShellLiteral = (value: string) => value.replace(/'/g, "''");
+  const escapePowerShellLiteral = (value: string) => value.replaceAll("'", "''");
   return [
     "$ErrorActionPreference = 'Stop'",
     `$controller = '${escapePowerShellLiteral(controllerUrl)}'`,
     `$targetId = '${escapePowerShellLiteral(targetId)}'`,
     `$version = '${escapePowerShellLiteral(version)}'`,
-    "$setup = Join-Path $env:USERPROFILE 'Downloads\\windows-agent-setup.ps1'",
+    String.raw`$setup = Join-Path $env:USERPROFILE 'Downloads\windows-agent-setup.ps1'`,
     "if (-not (Test-Path -LiteralPath $setup)) { throw \"Setup-Skript nicht gefunden: $setup\" }",
     "$principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())",
     "if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'PowerShell als Administrator starten.' }",
@@ -361,19 +488,28 @@ function buildWindowsCleanInstallCommand(controllerUrl: string, targetId: string
     "    for ($attempt = 0; $attempt -lt 30 -and (Get-Service -Name lxcup-agent -ErrorAction SilentlyContinue); $attempt++) { Start-Sleep -Seconds 1 }",
     "    if (Get-Service -Name lxcup-agent -ErrorAction SilentlyContinue) { throw 'Der Dienst ist noch zur Löschung vorgemerkt. Windows neu starten und erneut versuchen.' }",
     "}",
-    "Remove-Item -LiteralPath 'C:\\Program Files\\lxcup','C:\\ProgramData\\lxcup' -Recurse -Force -ErrorAction SilentlyContinue",
+    String.raw`Remove-Item -LiteralPath 'C:\Program Files\lxcup','C:\ProgramData\lxcup' -Recurse -Force -ErrorAction SilentlyContinue`,
     "& $setup -ControllerUrl $controller -TargetId $targetId -Version $version",
   ].join("\n");
 }
 
 function buildWindowsInstallCommand(controllerUrl: string, targetId: string, version: string) {
-  const escapePowerShellLiteral = (value: string) => value.replace(/'/g, "''");
-  return `& (Join-Path $env:USERPROFILE 'Downloads\\windows-agent-setup.ps1') -ControllerUrl '${escapePowerShellLiteral(controllerUrl)}' -TargetId "${targetId}" -Version "${version}"`;
+  const escapePowerShellLiteral = (value: string) => value.replaceAll("'", "''");
+  return String.raw`& (Join-Path $env:USERPROFILE 'Downloads\windows-agent-setup.ps1') -ControllerUrl '${escapePowerShellLiteral(controllerUrl)}' -TargetId "${targetId}" -Version "${version}"`;
 }
 
 function isLoopbackHost(host: string) {
-  const normalized = host.replace(/^\[|\]$/g, "").toLowerCase();
+  let normalized = host;
+  if (normalized.startsWith("[")) normalized = normalized.slice(1);
+  if (normalized.endsWith("]")) normalized = normalized.slice(0, -1);
+  normalized = normalized.toLowerCase();
   return normalized === "localhost" || normalized === "::1" || normalized.startsWith("127.");
+}
+
+function trimTrailingSlashes(value: string) {
+  let end = value.length;
+  while (end > 0 && value.codePointAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
 }
 
 function canWindowsTargetReachController(controller: string, targetAddress: string | undefined) {
@@ -456,6 +592,7 @@ type TargetFormProps = Readonly<{
 
 function TargetForm(props: TargetFormProps) {
   const { selectedKind, activeSecrets, newSecretFor, newSecretName, newSecretKind, newSecretValue, inlineSecretPending, createPending, createError, inlineSecretError } = props;
+  const remoteTransport = selectedKind.transport === "ssh" || selectedKind.transport === "winrm";
   const credentialSecrets = activeSecrets.filter((item) => selectedKind.transport === "ssh"
     ? item.metadata.metadata.kind === "ssh_password" || item.metadata.metadata.kind === "ssh_private_key"
     : item.metadata.metadata.kind === "winrm_password");
@@ -464,8 +601,8 @@ function TargetForm(props: TargetFormProps) {
       <label><span className="inline-flex items-center gap-1" title="Anzeigename des verwalteten Ziels.">Name</span><input name="target_name" autoComplete="off" value={props.name} onChange={(event) => props.onNameChange(event.target.value)} required /></label>
       <label><span className="inline-flex items-center gap-1" title="Plattform des Ziels. Sie bestimmt unter anderem das verwendete Ansible-Playbook.">Typ</span>{props.availableKinds.length === 1 ? <input name="target_kind" value={selectedKind.label} readOnly /> : <select name="target_kind" value={props.kind} onChange={(event) => props.onKindChange(event.target.value as TargetKind)}>{props.availableKinds.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>}</label>
       <label><span className="inline-flex items-center gap-1" title="IP-Adresse oder DNS-Name, unter dem der Worker das Ziel erreicht.">Adresse</span><input name="target_address" autoComplete="url" value={props.address} onChange={(event) => props.onAddressChange(event.target.value)} placeholder="IP oder DNS-Name …" required /></label>
-      {selectedKind.transport !== "agent" ? <label><span className="inline-flex items-center gap-1" title={`Benutzername für die ${selectedKind.transport === "ssh" ? "SSH" : "WinRM"}-Verbindung zu diesem Ziel.`}>{selectedKind.transport === "ssh" ? "SSH-Benutzer" : "WinRM-Benutzer"}</span><input name="ssh_user" autoComplete="username" value={props.sshUser} onChange={(event) => props.onSshUserChange(event.target.value)} placeholder={selectedKind.transport === "ssh" ? "z. B. root oder lxcup …" : "z. B. Administrator …"} required /></label> : null}
-      {selectedKind.transport !== "agent" ? <SecretSelect label="Deployment-Secret" title={`Zugangsdaten für die ${selectedKind.transport === "ssh" ? "SSH" : "WinRM über HTTPS"}-Verbindung.`} value={props.credentialSecret} options={credentialSecrets} onChange={props.onCredentialChange} onNew={() => { props.onSecretForChange("credential"); props.onSecretKindChange(selectedKind.transport === "ssh" ? "ssh_password" : "winrm_password"); }} /> : null}
+      {remoteTransport ? <label><span className="inline-flex items-center gap-1" title={`Benutzername für die ${selectedKind.transport === "ssh" ? "SSH" : "WinRM"}-Verbindung zu diesem Ziel.`}>{selectedKind.transport === "ssh" ? "SSH-Benutzer" : "WinRM-Benutzer"}</span><input name="ssh_user" autoComplete="username" value={props.sshUser} onChange={(event) => props.onSshUserChange(event.target.value)} placeholder={selectedKind.transport === "ssh" ? "z. B. root oder lxcup …" : "z. B. Administrator …"} required /></label> : null}
+      {remoteTransport ? <SecretSelect label="Deployment-Secret" title={`Zugangsdaten für die ${selectedKind.transport === "ssh" ? "SSH" : "WinRM über HTTPS"}-Verbindung.`} value={props.credentialSecret} options={credentialSecrets} onChange={props.onCredentialChange} onNew={() => { props.onSecretForChange("credential"); props.onSecretKindChange(selectedKind.transport === "ssh" ? "ssh_password" : "winrm_password"); }} /> : null}
       {selectedKind.transport === "ssh" && <SecretSelect label="SSH-Host-Fingerprint" title="Bekannter SSH-Host-Fingerprint als known_hosts-Datei." value={props.knownHostsSecret} options={activeSecrets.filter((item) => item.metadata.metadata.kind === "ssh_known_hosts")} onChange={props.onKnownHostsChange} onNew={() => { props.onSecretForChange("known_hosts"); props.onSecretKindChange("ssh_known_hosts"); }} emptyLabel="Known-Hosts-Secret auswählen" />}
       <SecretSelect label="Agent-Token" title="Geheimer Token, mit dem sich der installierte lxcup-Agent beim Controller authentifiziert." value={props.agentSecret} options={activeSecrets.filter((item) => item.metadata.metadata.kind === "agent_token")} onChange={props.onAgentChange} onNew={() => { props.onSecretForChange("agent"); props.onSecretKindChange("agent_token"); }} />
       <label><span className="inline-flex items-center gap-1" title="Verbindungsprotokoll, das automatisch aus dem Zieltyp abgeleitet wird.">Transport</span><input name="transport" value={selectedKind.transport.toUpperCase()} readOnly /></label>
@@ -660,9 +797,7 @@ function targetStateStatusClass(state: TargetState) {
 function TargetOnboardingProtocols({ target, jobs }: Readonly<{ target: import("../api").TargetDto; jobs: import("../api").AnsibleJobDto[] }>) {
   const targetJobs = jobs.filter((job) => "target" in job.target && job.target.target === target.id);
   const deployment = targetJobs.find((job) => job.operation === "deploy_agent");
-  const laterJobs = target.transport === "agent"
-    ? targetJobs
-    : deployment ? targetJobs.filter((job) => job.created_at >= deployment.created_at) : [];
+  const laterJobs = jobsAfterDeployment(target, targetJobs, deployment);
   const health = latestTargetJob(laterJobs, "health_check");
   const inventory = latestTargetJob(laterJobs, "collect_package_inventory");
   if (target.transport === "agent") {
@@ -684,6 +819,16 @@ function TargetOnboardingProtocols({ target, jobs }: Readonly<{ target: import("
       {job ? <Link className={cn("inline-flex items-center border border-transparent px-2 py-1 text-xs font-semibold hover:border-[var(--primary)] hover:underline", jobStatusBadgeClass(job.status))} to={`/workflows/${job.id}`} title={`${label}: ${jobStatusLabel(job.status)}`}>{label} · {jobStatusLabel(job.status)}</Link> : <span className="inline-flex items-center border border-[var(--line)] px-2 py-1 text-xs text-[var(--muted)]">{label} · {pendingLabel}</span>}
     </li>)}
   </ol>;
+}
+
+function jobsAfterDeployment(
+  target: import("../api").TargetDto,
+  targetJobs: import("../api").AnsibleJobDto[],
+  deployment: import("../api").AnsibleJobDto | undefined,
+) {
+  if (target.transport === "agent") return targetJobs;
+  if (!deployment) return [];
+  return targetJobs.filter((job) => job.created_at >= deployment.created_at);
 }
 
 function latestTargetJob(jobs: AnsibleJobDto[], operation: AnsibleJobDto["operation"]) {

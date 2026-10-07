@@ -816,7 +816,7 @@ async fn windows_agent_heartbeat_persists_only_validated_winget_updates() {
             agent_id: "windows-heartbeat-agent".to_owned(),
             platform: lxcup_agent::AgentPlatform::Windows,
             hostname: "windows-host".to_owned(),
-            version: "0.5.0".to_owned(),
+            version: "0.6.0".to_owned(),
             protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
         },
         metrics: lxcup_agent::AgentMetrics {

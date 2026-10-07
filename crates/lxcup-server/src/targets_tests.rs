@@ -1,5 +1,6 @@
 use super::*;
 use axum::Extension;
+use chrono::Utc;
 use lxcup_core::ActorRole;
 use std::time::Duration;
 use uuid::Uuid;
@@ -249,7 +250,7 @@ async fn windows_heartbeat_keeps_store_and_unmatched_software_in_inventory() {
             agent_id: "windows-heartbeat-agent".to_owned(),
             platform: lxcup_agent::AgentPlatform::Windows,
             hostname: "windows-host".to_owned(),
-            version: "0.5.0".to_owned(),
+            version: "0.6.0".to_owned(),
             protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
         },
         metrics: lxcup_agent::AgentMetrics {

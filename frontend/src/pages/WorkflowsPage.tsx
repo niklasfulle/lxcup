@@ -53,7 +53,7 @@ export function buildWorkflowRequest({
     const selectedPackages = typeof packages === "string"
       ? packages.split(",").map((item) => item.trim()).filter(Boolean)
       : [...packages];
-    parameters = { operation, packages: selectedPackages.length > 0 ? selectedPackages : targetKind === "windows_server" ? [] : ["*"] };
+    parameters = { operation, packages: updatePackageSelection(selectedPackages, targetKind) };
   } else if (operation === "deploy_agent" || operation === "update_agent" || operation === "repair_agent") {
     if (!latestAgentVersion) throw new Error("Die aktuelle Agent-Version konnte nicht vom Controller geladen werden.");
     parameters = { operation, agent_version: latestAgentVersion };
@@ -68,6 +68,11 @@ export function buildWorkflowRequest({
     confirmed,
     ...(operation === "update_packages" ? { policy_id: policyId, approved_plan_job_id: approvedPlanJobId } : {}),
   };
+}
+
+function updatePackageSelection(selectedPackages: string[], targetKind: string | undefined) {
+  if (selectedPackages.length > 0) return selectedPackages;
+  return targetKind === "windows_server" ? [] : ["*"];
 }
 
 function workflowIdempotencyKey(operation: AnsibleOperation, mode: AnsibleExecutionMode, policyId?: string, approvedPlanJobId?: string) {
@@ -244,7 +249,7 @@ function workflowSubmitLabel(targetCount: number, pending: boolean) {
 function WorkflowControlPanel(props: WorkflowControlPanelProps) {
   const { targets, targetIds, onTargetToggle, bulkMode, onBulkModeChange, onSingleTargetChange, onSelectAllTargets, onClearTargets, operation, onOperationChange, mode, onModeChange, packagesByTarget, onPackagesChange, packageInventories, policies, policyId, onPolicyChange, approvedPlanJobIds, onApprovedPlanChange, packagePlansByTarget, modifying, confirmed, onConfirmedChange, pendingTargets, selectedOperation, selectedMode, pending, error, results, canSubmit, onSubmit } = props;
   const windowsSelected = targets.some((target) => targetIds.includes(target.id) && target.kind === "windows_server");
-  const windowsOnlyOperations: AnsibleOperation[] = ["health_check", "collect_package_inventory", "update_packages", "update_agent"];
+  const windowsOnlyOperations = new Set<AnsibleOperation>(["health_check", "collect_package_inventory", "update_packages", "update_agent"]);
   const selectedPolicy = policies.find((policy) => policy.id === policyId && policy.enabled);
   const policyCoversTargets = selectedPolicy !== undefined && targetIds.every((targetId) => selectedPolicy.allowed_targets.includes(targetId));
   const policyWarning = operation === "update_packages" && policyId && targetIds.length > 0 && !policyCoversTargets;
@@ -268,7 +273,7 @@ function WorkflowControlPanel(props: WorkflowControlPanelProps) {
             <WorkflowTargetSelection bulkMode={bulkMode} targets={targets} targetIds={targetIds} onTargetToggle={onTargetToggle} onSingleTargetChange={onSingleTargetChange} onSelectAllTargets={onSelectAllTargets} onClearTargets={onClearTargets} />
             <label className="grid content-start gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Die erlaubte, fest registrierte Aktion des Workers."><span>Operation</span>
                 <select value={operation} onChange={(event) => onOperationChange(event.target.value as AnsibleOperation)}>
-                {operations.map((item) => <option key={item.value} value={item.value} disabled={windowsSelected && !windowsOnlyOperations.includes(item.value)}>{item.label}{windowsSelected && !windowsOnlyOperations.includes(item.value) ? " · nur über lokales Setup" : ""}</option>)}
+                {operations.map((item) => <option key={item.value} value={item.value} disabled={windowsSelected && !windowsOnlyOperations.has(item.value)}>{item.label}{windowsSelected && !windowsOnlyOperations.has(item.value) ? " · nur über lokales Setup" : ""}</option>)}
               </select>
             </label>
             <label className="grid content-start gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Check prüft, Plan erstellt eine Vorschau, Apply führt aus und Reconcile gleicht einen unklaren Zustand ab."><span>Modus</span>
@@ -335,7 +340,14 @@ function packageSelectionLabel(targets: TargetDto[], packagesByTarget: Record<st
   const count = packagesByTarget[targetId]?.length ?? 0;
   const target = targets.find((item) => item.id === targetId);
   const name = target?.name ?? targetId;
-  const scope = count === 0 ? target?.kind === "windows_server" ? "winget-ID auswählen" : "alle Updates" : `${count} ausgewählt`;
+  let scope: string;
+  if (count > 0) {
+    scope = `${count} ausgewählt`;
+  } else if (target?.kind === "windows_server") {
+    scope = "winget-ID auswählen";
+  } else {
+    scope = "alle Updates";
+  }
   return `${name}: ${scope}`;
 }
 

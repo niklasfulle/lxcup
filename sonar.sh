@@ -14,7 +14,7 @@ fi
 
 SONAR_HOST_URL="${1%/}"
 SONAR_TOKEN_VALUE="${2:-${SONAR_TOKEN:-}}"
-SONAR_PROJECT_KEY="${3:-3D-Online-Schach}"
+SONAR_PROJECT_KEY="${3:-Lxcup}"
 
 if [[ ! "${SONAR_HOST_URL}" =~ ^https?://[^[:space:]]+$ ]]; then
     echo "Die SonarQube-URL muss eine vollständige HTTP- oder HTTPS-URL sein." >&2
@@ -27,7 +27,16 @@ if [[ -z "${NODE}" ]]; then
     exit 1
 fi
 
-SONAR_PROJECT_VERSION="$("${NODE}" "${SCRIPT_DIR}/scripts/read-version.mjs")"
+SONAR_PROJECT_VERSION="$(awk '
+    /^\[workspace\.package\]$/ { in_workspace = 1; next }
+    /^\[/ { in_workspace = 0 }
+    in_workspace && /^version[[:space:]]*=/ {
+        sub(/^[^\"]*\"/, "")
+        sub(/\".*/, "")
+        print
+        exit
+    }
+' "${SCRIPT_DIR}/Cargo.toml")"
 if [[ -z "${SONAR_PROJECT_VERSION}" ]]; then
     echo "Die Anwendungsversion konnte nicht gelesen werden." >&2
     exit 1

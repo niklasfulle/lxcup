@@ -370,6 +370,8 @@ mod tests {
     struct PtyTestServer {
         pty_requested: Arc<AtomicBool>,
         shell_requested: Arc<AtomicBool>,
+        reject_pty: Arc<AtomicBool>,
+        reject_shell: Arc<AtomicBool>,
     }
 
     impl server::Server for PtyTestServer {
@@ -417,7 +419,11 @@ mod tests {
             session: &mut Session,
         ) -> Result<(), Self::Error> {
             self.pty_requested.store(!term.is_empty(), Ordering::SeqCst);
-            session.channel_success(channel)?;
+            if self.reject_pty.load(Ordering::SeqCst) {
+                session.channel_failure(channel)?;
+            } else {
+                session.channel_success(channel)?;
+            }
             Ok(())
         }
 
@@ -427,7 +433,11 @@ mod tests {
             session: &mut Session,
         ) -> Result<(), Self::Error> {
             self.shell_requested.store(true, Ordering::SeqCst);
-            session.channel_success(channel)?;
+            if self.reject_shell.load(Ordering::SeqCst) {
+                session.channel_failure(channel)?;
+            } else {
+                session.channel_success(channel)?;
+            }
             Ok(())
         }
 
@@ -458,9 +468,13 @@ mod tests {
         });
         let pty_requested = Arc::new(AtomicBool::new(false));
         let shell_requested = Arc::new(AtomicBool::new(false));
+        let reject_pty = Arc::new(AtomicBool::new(false));
+        let reject_shell = Arc::new(AtomicBool::new(false));
         let server_impl = PtyTestServer {
             pty_requested: pty_requested.clone(),
             shell_requested: shell_requested.clone(),
+            reject_pty: reject_pty.clone(),
+            reject_shell: reject_shell.clone(),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -518,6 +532,59 @@ mod tests {
         let _ = handle
             .disconnect(russh::Disconnect::ByApplication, "test complete", "en")
             .await;
+
+        let pinned_hosts = lxcup_core::SecretValue::new(format!(
+            "[127.0.0.1]:{} {host_public_key}",
+            address.port()
+        ))
+        .unwrap();
+        let mut rejected_password = TerminalConnection {
+            actor: AuthenticatedUser {
+                id: Uuid::new_v4(),
+                username: "terminal-admin".to_owned(),
+                role: lxcup_persistence::AuthUserRole::Admin,
+                must_change_password: false,
+                token_hash: "test-session-token-hash".to_owned(),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+            },
+            target_name: "isolated-test-target".to_owned(),
+            address: "127.0.0.1".to_owned(),
+            username: "terminal-test".to_owned(),
+            credential_kind: SecretKind::SshPassword,
+            credential: lxcup_core::SecretValue::new("wrong-password").unwrap(),
+            known_hosts: pinned_hosts.clone(),
+        };
+        assert!(matches!(
+            open_ssh_session_at(&rejected_password, address.port()).await,
+            Err("ssh_authentication_failed")
+        ));
+
+        rejected_password.credential_kind = SecretKind::SshKnownHosts;
+        assert!(matches!(
+            open_ssh_session_at(&rejected_password, address.port()).await,
+            Err("ssh_credential_invalid")
+        ));
+
+        rejected_password.credential_kind = SecretKind::SshPrivateKey;
+        rejected_password.credential = lxcup_core::SecretValue::new("not a private key").unwrap();
+        assert!(matches!(
+            open_ssh_session_at(&rejected_password, address.port()).await,
+            Err("ssh_private_key_invalid")
+        ));
+
+        rejected_password.credential_kind = SecretKind::SshPassword;
+        rejected_password.credential = lxcup_core::SecretValue::new("test-password").unwrap();
+        reject_pty.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            open_ssh_session_at(&rejected_password, address.port()).await,
+            Err("ssh_pty_failed")
+        ));
+        reject_pty.store(false, Ordering::SeqCst);
+        reject_shell.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            open_ssh_session_at(&rejected_password, address.port()).await,
+            Err("ssh_shell_failed")
+        ));
 
         let wrong_host_key = russh::keys::PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
             .expect("generate mismatched SSH host key");

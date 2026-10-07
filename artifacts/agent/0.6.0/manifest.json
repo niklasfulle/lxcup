@@ -1,0 +1,20 @@
+{
+  "version": "0.6.0",
+  "artifacts": [
+    {
+      "platform": "linux-amd64",
+      "sha256": "a76b72b0d394194069c871f6fc9e5ae3496bffcc77e9196b098567ad929bcf96",
+      "file": "linux-amd64"
+    },
+    {
+      "platform": "linux-arm64",
+      "sha256": "832cf7c243153a2c1fe4e18e11692fc45bd9240e5f7cdf390974e4af1cab9687",
+      "file": "linux-arm64"
+    },
+    {
+      "platform": "windows-amd64",
+      "sha256": "c5082794d6df912ce6a56c02b8b2d032add9b2370d08fe002df1215753a12ed5",
+      "file": "windows-amd64.exe"
+    }
+  ]
+}

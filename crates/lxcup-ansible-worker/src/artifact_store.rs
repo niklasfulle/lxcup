@@ -125,6 +125,36 @@ pub(crate) async fn report_availability(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn check_availability_for_response(status: u16, body: &'static str) -> bool {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let reason = if status == 200 {
+                "OK"
+            } else {
+                "Service Unavailable"
+            };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let available = is_available(&reqwest::Client::new(), &format!("http://{address}")).await;
+        server.await.unwrap();
+        available
+    }
+
+    #[tokio::test]
+    async fn artifact_store_rejects_http_errors_and_invalid_manifests() {
+        assert!(!check_availability_for_response(503, "unavailable",).await);
+        assert!(!check_availability_for_response(200, "not-json",).await);
+    }
 
     #[test]
     fn manifest_probe_requires_current_version_and_all_supported_artifacts() {
@@ -168,5 +198,28 @@ mod tests {
             ]
         });
         assert!(!supports_manifest(&missing_windows_artifact));
+
+        for malformed in [
+            serde_json::json!({ "version": lxcup_core::VERSION }),
+            serde_json::json!({ "version": lxcup_core::VERSION, "artifacts": {} }),
+            serde_json::json!({
+                "version": lxcup_core::VERSION,
+                "artifacts": [
+                    { "platform": "linux-amd64", "file": "agent", "sha256": "x" },
+                    { "platform": "linux-arm64", "sha256": "x" },
+                    { "platform": "windows-amd64", "file": "agent.exe", "sha256": "x" }
+                ]
+            }),
+            serde_json::json!({
+                "version": lxcup_core::VERSION,
+                "artifacts": [
+                    { "platform": "linux-amd64", "file": "agent", "sha256": "x" },
+                    { "platform": "linux-arm64", "file": "agent", "sha256": "x" },
+                    { "platform": "windows-amd64", "file": "agent.exe" }
+                ]
+            }),
+        ] {
+            assert!(!supports_manifest(&malformed));
+        }
     }
 }

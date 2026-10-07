@@ -7,12 +7,16 @@ use axum::{
     extract::{Extension, Json as JsonBody, Path, State},
     http::{HeaderMap, StatusCode},
 };
-use chrono::{Duration, Timelike, Utc};
-use lxcup_agent::{AgentHeartbeat, AgentPlatform};
-use lxcup_core::{
-    ActorRole, InstalledPackage, PackageInventorySnapshot, PackageName, PackageVersion,
-};
+use lxcup_agent::AgentHeartbeat;
+use lxcup_core::ActorRole;
 use serde::{Deserialize, Serialize};
+
+#[path = "targets/heartbeat.rs"]
+mod heartbeat;
+use heartbeat::{
+    persist_agent_heartbeat, sanitize_docker_telemetry_window, sanitize_reported_package_inventory,
+    sanitize_telemetry_window, warn_on_incomplete_telemetry,
+};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreateTargetRequest {
@@ -305,51 +309,11 @@ pub(super) async fn receive_agent_heartbeat(
     if expected.expose() != token {
         return Err(ApiError::unauthorized());
     }
-    let reported_package_count = heartbeat
-        .package_inventory
-        .as_ref()
-        .map(|inventory| inventory.packages.len());
-    let package_inventory = match sanitize_agent_package_inventory(&heartbeat, target.kind) {
-        Ok(inventory) => inventory,
-        Err(error) => {
-            tracing::warn!(
-                target: "lxcup_server::agent",
-                target_id = %target.id.as_uuid(),
-                error_code = %error.code,
-                "discarding invalid optional package inventory while accepting agent heartbeat"
-            );
-            None
-        }
-    };
-    if let (Some(reported), Some(snapshot)) = (reported_package_count, package_inventory.as_ref()) {
-        if snapshot.packages.len() < reported {
-            tracing::warn!(
-                target: "lxcup_server::agent",
-                target_id = %heartbeat.target_id,
-                reported_packages = reported,
-                accepted_packages = snapshot.packages.len(),
-                "discarded invalid Windows package inventory entries"
-            );
-        }
-    }
+    let package_inventory = sanitize_reported_package_inventory(&heartbeat, target.kind, target.id);
     let telemetry_summary = sanitize_telemetry_window(&mut heartbeat);
     sanitize_docker_telemetry_window(&mut heartbeat);
     heartbeat.package_inventory = None;
-    if telemetry_summary.rejected() > 0 || telemetry_summary.missing_samples > 0 {
-        tracing::warn!(
-            target: "lxcup_server::telemetry",
-            target_id = %target.id.as_uuid(),
-            received_samples = telemetry_summary.received,
-            rejected_samples = telemetry_summary.rejected(),
-            stale_samples = telemetry_summary.stale,
-            future_samples = telemetry_summary.future,
-            out_of_range_samples = telemetry_summary.out_of_range,
-            missing_samples = telemetry_summary.missing_samples,
-            duplicate_samples = telemetry_summary.duplicates,
-            truncated_samples = telemetry_summary.truncated,
-            "agent telemetry window was incomplete or contained rejected samples"
-        );
-    }
+    warn_on_incomplete_telemetry(target.id, &telemetry_summary);
     target.mark_managed();
     let persisted = target.clone();
     store.agent_reports.insert(persisted.id, heartbeat);
@@ -361,257 +325,21 @@ pub(super) async fn receive_agent_heartbeat(
     }
     drop(store);
     if let Some(repositories) = state.repositories.clone() {
-        repositories
-            .targets
-            .update(&persisted)
-            .await
-            .map_err(|_| ApiError::storage())?;
-        if let Some(heartbeat) = heartbeat_for_persistence.as_ref() {
-            if repositories
-                .telemetry
-                .append_heartbeat(heartbeat)
-                .await
-                .is_err()
-            {
-                tracing::error!(
-                    target: "lxcup_server::telemetry",
-                    target_id = %persisted.id.as_uuid(),
-                    accepted_samples = telemetry_summary.accepted,
-                    "agent telemetry persistence failed"
-                );
-                return Err(ApiError::storage());
-            }
-        }
-        if let Some(snapshot) = package_inventory.as_ref() {
-            let latest = repositories
-                .package_inventory
-                .find_latest(persisted.id)
-                .await
-                .map_err(|_| ApiError::storage())?;
-            if latest.is_none_or(|current| current.snapshot.collected_at < snapshot.collected_at) {
-                repositories
-                    .package_inventory
-                    .replace(snapshot)
-                    .await
-                    .map_err(|_| ApiError::storage())?;
-            }
-        }
+        persist_agent_heartbeat(
+            &repositories,
+            &persisted,
+            heartbeat_for_persistence.as_ref(),
+            package_inventory.as_ref(),
+            telemetry_summary,
+        )
+        .await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn sanitize_agent_package_inventory(
-    heartbeat: &AgentHeartbeat,
-    target_kind: TargetKind,
-) -> Result<Option<PackageInventorySnapshot>, ApiError> {
-    let Some(inventory) = heartbeat.package_inventory.as_ref() else {
-        return Ok(None);
-    };
-    if target_kind != TargetKind::WindowsServer || heartbeat.info.platform != AgentPlatform::Windows
-    {
-        return Err(ApiError::bad_request(
-            "agent_inventory_platform_mismatch",
-            "package inventory does not match the registered Windows target",
-        ));
-    }
-    let now = Utc::now();
-    if inventory.packages.len() > 50_000
-        || inventory.collected_at > now + Duration::seconds(5)
-        || inventory.collected_at < now - Duration::hours(1)
-    {
-        return Err(ApiError::bad_request(
-            "agent_inventory_invalid",
-            "Windows package inventory is invalid or too old",
-        ));
-    }
-    let mut names = std::collections::HashSet::new();
-    let mut packages = Vec::with_capacity(inventory.packages.len());
-    for package in &inventory.packages {
-        let source = package.source.as_deref();
-        let safe_identifier = match source {
-            Some("winget") => lxcup_agent::safe_winget_id(&package.name),
-            Some("msstore") => lxcup_agent::safe_msstore_id(&package.name),
-            Some(source @ ("arp" | "msix")) => {
-                lxcup_agent::safe_read_only_windows_package_id(&package.name, source)
-            }
-            _ => false,
-        };
-        if !safe_identifier
-            || package.name.len() > 128
-            || package.installed_version.trim().is_empty()
-            || package.installed_version.len() > 128
-            || package
-                .candidate_version
-                .as_ref()
-                .is_some_and(|value| value.trim().is_empty() || value.len() > 128)
-            || !names.insert(package.name.to_ascii_lowercase())
-        {
-            continue;
-        }
-        let Ok(name) = PackageName::new(package.name.clone()) else {
-            continue;
-        };
-        let Ok(version) = PackageVersion::new(package.installed_version.clone()) else {
-            continue;
-        };
-        let candidate_version = if matches!(source, Some("winget" | "msstore")) {
-            package
-                .candidate_version
-                .as_ref()
-                .map(|value| PackageVersion::new(value.clone()))
-                .transpose()
-        } else {
-            Ok(None)
-        };
-        let Ok(candidate_version) = candidate_version else {
-            continue;
-        };
-        packages.push(InstalledPackage {
-            name,
-            version,
-            candidate_version,
-            architecture: package.architecture.clone(),
-            source: package.source.clone(),
-        });
-    }
-    if packages.is_empty() && !inventory.packages.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(PackageInventorySnapshot {
-        target_id: TargetId::from_uuid(heartbeat.target_id),
-        collected_at: inventory.collected_at,
-        packages,
-    }))
-}
-
-fn sanitize_docker_telemetry_window(heartbeat: &mut AgentHeartbeat) {
-    const MAX_DOCKER_SAMPLES: usize = 8_000;
-    let now = Utc::now();
-    let mut seen = std::collections::HashSet::new();
-    heartbeat.docker_telemetry.samples.retain(|sample| {
-        let valid_id = (12..=64).contains(&sample.container_id.len())
-            && sample
-                .container_id
-                .chars()
-                .all(|character| character.is_ascii_hexdigit());
-        valid_id
-            && sample
-                .memory_basis_points
-                .is_none_or(|value| value <= 10_000)
-            && sample.collected_at <= now + Duration::seconds(5)
-            && sample.collected_at
-                >= now - Duration::seconds(lxcup_agent::TelemetryBuffer::WINDOW_SECONDS)
-            && seen.insert((
-                sample.container_id.to_ascii_lowercase(),
-                sample.collected_at,
-            ))
-    });
-    heartbeat
-        .docker_telemetry
-        .samples
-        .sort_by_key(|sample| sample.collected_at);
-    if heartbeat.docker_telemetry.samples.len() > MAX_DOCKER_SAMPLES {
-        let excess = heartbeat.docker_telemetry.samples.len() - MAX_DOCKER_SAMPLES;
-        heartbeat.docker_telemetry.samples.drain(..excess);
-    }
-}
-
-/// Treat telemetry as best-effort heartbeat data: discard malformed, stale,
-/// duplicate, or oversized sample windows while preserving the heartbeat.
-/// This bounds persistence work even for an authenticated but buggy agent.
-#[derive(Debug, Default, Eq, PartialEq)]
-struct TelemetrySanitizationSummary {
-    received: usize,
-    accepted: usize,
-    stale: usize,
-    future: usize,
-    out_of_range: usize,
-    missing_samples: usize,
-    duplicates: usize,
-    truncated: usize,
-}
-
-impl TelemetrySanitizationSummary {
-    fn rejected(&self) -> usize {
-        self.stale + self.future + self.out_of_range + self.duplicates + self.truncated
-    }
-}
-
-fn sanitize_telemetry_window(heartbeat: &mut AgentHeartbeat) -> TelemetrySanitizationSummary {
-    const MAX_SAMPLES: usize = 32;
-    let samples = &mut heartbeat.telemetry.samples;
-    let mut summary = TelemetrySanitizationSummary {
-        received: samples.len(),
-        ..TelemetrySanitizationSummary::default()
-    };
-    if samples.len() > MAX_SAMPLES {
-        summary.truncated = samples.len() - MAX_SAMPLES;
-        samples.drain(..samples.len() - MAX_SAMPLES);
-        heartbeat.telemetry.partial = true;
-    }
-
-    let received_at = chrono::Utc::now();
-    let max_sample_age = chrono::Duration::seconds(lxcup_agent::TelemetryBuffer::WINDOW_SECONDS);
-    let max_future_skew = chrono::Duration::seconds(-5);
-    let sent_at = heartbeat.sent_at;
-    samples.retain_mut(|sample| {
-        let sample_age = sent_at.signed_duration_since(sample.collected_at);
-        if sample_age > max_sample_age {
-            summary.stale += 1;
-            return false;
-        }
-        if sample_age < max_future_skew {
-            summary.future += 1;
-            return false;
-        }
-        if sample.cpu_basis_points.is_some_and(|value| value > 10_000)
-            || sample
-                .memory_basis_points
-                .is_some_and(|value| value > 10_000)
-            || sample
-                .storage_basis_points
-                .is_some_and(|value| value > 10_000)
-        {
-            summary.out_of_range += 1;
-            return false;
-        }
-        let normalized_at = received_at - sample_age;
-        // Strip transport-jitter fractions so overlapping heartbeats hit the
-        // same target/timestamp database key and are deduplicated on insert.
-        sample.collected_at = normalized_at.with_nanosecond(0).unwrap_or(normalized_at);
-        true
-    });
-    if summary.stale + summary.future + summary.out_of_range > 0 {
-        heartbeat.telemetry.partial = true;
-    }
-
-    samples.sort_by_key(|sample| sample.collected_at);
-    samples.dedup_by(|right, left| {
-        let duplicate = right.collected_at == left.collected_at;
-        if duplicate {
-            summary.duplicates += 1;
-        }
-        duplicate
-    });
-    if summary.duplicates > 0 {
-        heartbeat.telemetry.partial = true;
-    }
-    summary.missing_samples = samples
-        .windows(2)
-        .map(|pair| (pair[1].collected_at - pair[0].collected_at).num_milliseconds())
-        .filter(|gap_ms| *gap_ms > 7_500)
-        .map(|gap_ms| ((gap_ms + 4_999) / 5_000 - 1) as usize)
-        .sum();
-    if summary.missing_samples > 0 {
-        heartbeat.telemetry.partial = true;
-    }
-    summary.accepted = samples.len();
-    summary
-}
-
 #[cfg(test)]
 mod telemetry_sanitization_tests {
-    use super::{TelemetrySanitizationSummary, sanitize_telemetry_window};
+    use super::{heartbeat::TelemetrySanitizationSummary, sanitize_telemetry_window};
     use chrono::Timelike;
     use chrono::{Duration, Utc};
     use lxcup_agent::{

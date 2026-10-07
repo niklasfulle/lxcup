@@ -407,7 +407,7 @@ async fn local_windows_workflow_commands_are_cached_and_reject_unsafe_packages()
             agent_id: "windows-workflow-agent".to_owned(),
             platform: AgentPlatform::Windows,
             hostname: "windows-host".to_owned(),
-            version: "0.5.0".to_owned(),
+            version: "0.6.0".to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
         },
         "agent-token",

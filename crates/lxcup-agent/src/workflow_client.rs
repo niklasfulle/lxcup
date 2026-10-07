@@ -214,6 +214,79 @@ mod tests {
     };
     use lxcup_agent::{AgentWorkflowCommand, LocalAgentState};
 
+    #[tokio::test]
+    async fn rejected_heartbeat_keeps_package_inventory_for_a_later_retry() {
+        let app = axum::Router::new().route(
+            "/heartbeat",
+            axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/heartbeat", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let info = lxcup_agent::AgentInfo {
+            agent_id: "retry-test".to_owned(),
+            platform: lxcup_agent::AgentPlatform::Windows,
+            hostname: "windows-test".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
+        };
+        let state = LocalAgentState::new(info.clone(), "test-token");
+        let collected_at = chrono::Utc::now();
+        state
+            .record_package_inventory(lxcup_agent::AgentPackageInventory {
+                collected_at,
+                packages: Vec::new(),
+            })
+            .await;
+
+        assert!(
+            !send_agent_heartbeat(
+                &reqwest::Client::new(),
+                &endpoint,
+                "test-token",
+                uuid::Uuid::new_v4(),
+                &info,
+                &state,
+            )
+            .await
+        );
+        assert_eq!(
+            state
+                .package_inventory_snapshot()
+                .await
+                .unwrap()
+                .collected_at,
+            collected_at,
+            "a rejected heartbeat must not acknowledge the inventory snapshot"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn unreachable_heartbeat_controller_is_reported_as_unavailable() {
+        let info = lxcup_agent::AgentInfo {
+            agent_id: "offline-test".to_owned(),
+            platform: lxcup_agent::AgentPlatform::Linux,
+            hostname: "offline-host".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol_version: lxcup_agent::PROTOCOL_VERSION.to_owned(),
+        };
+        let state = LocalAgentState::new(info.clone(), "test-token");
+
+        assert!(
+            !send_agent_heartbeat(
+                &reqwest::Client::new(),
+                "http://127.0.0.1:1/api/v1/agents/heartbeat",
+                "test-token",
+                uuid::Uuid::new_v4(),
+                &info,
+                &state,
+            )
+            .await
+        );
+    }
+
     #[test]
     fn package_inventory_workflow_refreshes_inventory_but_update_plan_does_not() {
         let inventory = AgentWorkflowCommand {

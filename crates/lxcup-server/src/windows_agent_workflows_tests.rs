@@ -433,7 +433,7 @@ async fn windows_agent_claim_returns_none_for_missing_or_unsupported_work() {
             lifecycle: ResourceLifecycle::Managed,
             mode: ExecutionMode::Plan,
             parameters: AnsibleParameters::DeployAgent {
-                agent_version: "0.5.0".to_owned(),
+                agent_version: "0.6.0".to_owned(),
             },
             secret_refs: vec![target.agent_secret_ref],
             idempotency_key: "windows-agent-unsupported-operation".to_owned(),

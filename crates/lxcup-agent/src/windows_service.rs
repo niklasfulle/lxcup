@@ -103,20 +103,7 @@ async fn update_agent_binary(controller: &str, token: &str, version: &str) -> Re
     if !valid_version(version) {
         return Err("requested version is invalid".to_owned());
     }
-    let controller = reqwest::Url::parse(controller).map_err(|_| "controller URL is invalid")?;
-    let is_loopback = controller
-        .host_str()
-        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
-        .is_some_and(|address| address.is_loopback())
-        || controller.host_str() == Some("localhost");
-    if (controller.scheme() != "https" && !(controller.scheme() == "http" && is_loopback))
-        || !controller.username().is_empty()
-        || controller.password().is_some()
-        || controller.query().is_some()
-        || controller.fragment().is_some()
-    {
-        return Err("controller URL must use validated HTTPS".to_owned());
-    }
+    let controller = validated_controller_url(controller)?;
     let base = format!(
         "{}/agent/{version}",
         controller.as_str().trim_end_matches('/')
@@ -126,6 +113,35 @@ async fn update_agent_binary(controller: &str, token: &str, version: &str) -> Re
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "could not create artifact client")?;
+    let (bytes, expected_hash) =
+        download_verified_windows_artifact(&client, &base, version).await?;
+
+    let install_directory = Path::new(r"C:\Program Files\lxcup");
+    fs::create_dir_all(install_directory).map_err(|_| "agent install directory is unavailable")?;
+    let current_path = std::env::current_exe().map_err(|_| "current agent path is unavailable")?;
+    if current_path == versioned_agent_path(install_directory, version) {
+        return Ok(());
+    }
+    let next_path = versioned_agent_path(install_directory, version);
+    let staged_path = install_directory.join(format!("lxcup-agent-{version}.staged.exe"));
+    fs::write(&staged_path, &bytes).map_err(|_| "verified agent could not be staged")?;
+    if let Err(error) = validate_file(&staged_path, &expected_hash) {
+        let _ = fs::remove_file(&staged_path);
+        return Err(error);
+    }
+    if next_path.exists() {
+        fs::remove_file(&next_path).map_err(|_| "stale staged agent could not be replaced")?;
+    }
+    fs::rename(&staged_path, &next_path).map_err(|_| "verified agent could not be activated")?;
+
+    restart_service(&current_path, &next_path, token).await
+}
+
+async fn download_verified_windows_artifact(
+    client: &reqwest::Client,
+    base: &str,
+    version: &str,
+) -> Result<(Vec<u8>, String), String> {
     let manifest = client
         .get(format!("{base}/manifest.json"))
         .send()
@@ -135,20 +151,8 @@ async fn update_agent_binary(controller: &str, token: &str, version: &str) -> Re
         .json::<ArtifactManifest>()
         .await
         .map_err(|_| "agent manifest is invalid")?;
-    if manifest.version != version {
-        return Err("artifact manifest version does not match the requested version".to_owned());
-    }
-    let mut matches = manifest
-        .artifacts
-        .iter()
-        .filter(|artifact| artifact.platform == "windows-amd64");
-    let artifact = matches.next().ok_or("Windows amd64 artifact is missing")?;
-    if matches.next().is_some()
-        || artifact.file != "windows-amd64.exe"
-        || !is_sha256(&artifact.sha256)
-    {
-        return Err("Windows artifact manifest entry is invalid".to_owned());
-    }
+    let expected_hash = windows_artifact_hash(&manifest, version)?;
+
     let response = client
         .get(format!("{base}/windows-amd64.exe"))
         .send()
@@ -169,30 +173,46 @@ async fn update_agent_binary(controller: &str, token: &str, version: &str) -> Re
         return Err("Windows agent artifact has an invalid size".to_owned());
     }
     let actual_hash = format!("{:x}", Sha256::digest(&bytes));
-    if !actual_hash.eq_ignore_ascii_case(&artifact.sha256) {
+    if !actual_hash.eq_ignore_ascii_case(&expected_hash) {
         return Err("Windows agent artifact checksum does not match the manifest".to_owned());
     }
     validate_windows_amd64_pe(&bytes)?;
+    Ok((bytes.to_vec(), expected_hash))
+}
 
-    let install_directory = Path::new(r"C:\Program Files\lxcup");
-    fs::create_dir_all(install_directory).map_err(|_| "agent install directory is unavailable")?;
-    let current_path = std::env::current_exe().map_err(|_| "current agent path is unavailable")?;
-    if current_path == versioned_agent_path(install_directory, version) {
-        return Ok(());
+fn windows_artifact_hash(manifest: &ArtifactManifest, version: &str) -> Result<String, String> {
+    if manifest.version != version {
+        return Err("artifact manifest version does not match the requested version".to_owned());
     }
-    let next_path = versioned_agent_path(install_directory, version);
-    let staged_path = install_directory.join(format!("lxcup-agent-{version}.staged.exe"));
-    fs::write(&staged_path, &bytes).map_err(|_| "verified agent could not be staged")?;
-    if let Err(error) = validate_file(&staged_path, &artifact.sha256) {
-        let _ = fs::remove_file(&staged_path);
-        return Err(error);
+    let mut matches = manifest
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.platform == "windows-amd64");
+    let artifact = matches.next().ok_or("Windows amd64 artifact is missing")?;
+    if matches.next().is_some()
+        || artifact.file != "windows-amd64.exe"
+        || !is_sha256(&artifact.sha256)
+    {
+        return Err("Windows artifact manifest entry is invalid".to_owned());
     }
-    if next_path.exists() {
-        fs::remove_file(&next_path).map_err(|_| "stale staged agent could not be replaced")?;
-    }
-    fs::rename(&staged_path, &next_path).map_err(|_| "verified agent could not be activated")?;
+    Ok(artifact.sha256.clone())
+}
 
-    restart_service(&current_path, &next_path, token).await
+fn validated_controller_url(controller: &str) -> Result<reqwest::Url, String> {
+    let controller = reqwest::Url::parse(controller).map_err(|_| "controller URL is invalid")?;
+    let is_loopback = controller
+        .host_str()
+        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+        .is_some_and(|address| address.is_loopback())
+        || controller.host_str() == Some("localhost");
+    let secure_transport =
+        controller.scheme() == "https" || (controller.scheme() == "http" && is_loopback);
+    let has_credentials = !controller.username().is_empty() || controller.password().is_some();
+    let has_url_suffix = controller.query().is_some() || controller.fragment().is_some();
+    if !secure_transport || has_credentials || has_url_suffix {
+        return Err("controller URL must use validated HTTPS".to_owned());
+    }
+    Ok(controller)
 }
 
 fn versioned_agent_path(directory: &Path, version: &str) -> std::path::PathBuf {
@@ -546,7 +566,15 @@ fn set_stopped(
 
 #[cfg(test)]
 mod tests {
-    use super::{running_status, start_pending_status, stopped_status, write_startup_failure};
+    use super::{
+        ArtifactEntry, ArtifactManifest, download_verified_windows_artifact, is_sha256,
+        running_status, spawn_agent_update, start_pending_status, stopped_status,
+        update_agent_binary, valid_version, validate_file, validate_windows_amd64_pe,
+        validated_controller_url, versioned_agent_path, wait_for_agent_version,
+        windows_artifact_hash, write_startup_failure,
+    };
+    use axum::{Json, Router, routing::get};
+    use sha2::Digest as _;
     use windows_service::service::{ServiceControlAccept, ServiceExitCode, ServiceState};
 
     #[test]
@@ -573,5 +601,152 @@ mod tests {
         let diagnostic = std::fs::read_to_string(&path).unwrap();
         assert_eq!(diagnostic, "service dispatcher: OS error 87\n");
         std::fs::remove_file(path).unwrap();
+        assert!(
+            write_startup_failure(&std::env::temp_dir(), "service dispatcher", &"OS error 5")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn agent_versions_and_artifact_hashes_are_strictly_validated() {
+        for version in ["0.6.0", "1.2.3-rc.1", "123.0.0"] {
+            assert!(valid_version(version), "{version} should be valid");
+        }
+        for version in ["", "1.2", "1.2.3.4", "1..3", "1.2.3/evil", "1.2.3+meta"] {
+            assert!(!valid_version(version), "{version} should be rejected");
+        }
+        assert!(is_sha256(&"a".repeat(64)));
+        assert!(!is_sha256(&"g".repeat(64)));
+        assert!(!is_sha256(&"a".repeat(63)));
+
+        let manifest = ArtifactManifest {
+            version: "0.6.0".to_owned(),
+            artifacts: vec![ArtifactEntry {
+                platform: "windows-amd64".to_owned(),
+                file: "windows-amd64.exe".to_owned(),
+                sha256: "a".repeat(64),
+            }],
+        };
+        assert_eq!(
+            windows_artifact_hash(&manifest, "0.6.0").unwrap(),
+            "a".repeat(64)
+        );
+        assert!(windows_artifact_hash(&manifest, "0.5.0").is_err());
+        let mut duplicate = manifest;
+        duplicate.artifacts.push(ArtifactEntry {
+            platform: "windows-amd64".to_owned(),
+            file: "windows-amd64.exe".to_owned(),
+            sha256: "a".repeat(64),
+        });
+        assert!(windows_artifact_hash(&duplicate, "0.6.0").is_err());
+    }
+
+    #[test]
+    fn updater_controller_url_requires_https_except_for_loopback() {
+        assert!(validated_controller_url("https://controller.example").is_ok());
+        assert!(validated_controller_url("http://127.0.0.1:8080").is_ok());
+        assert!(validated_controller_url("http://controller.example").is_err());
+        assert!(validated_controller_url("https://user:secret@controller.example").is_err());
+        assert!(validated_controller_url("https://controller.example/?token=x").is_err());
+        assert!(validated_controller_url("https://controller.example/#fragment").is_err());
+    }
+
+    #[test]
+    fn updater_accepts_only_amd64_pe32_plus_and_verified_files() {
+        let mut executable = vec![0_u8; 0x100];
+        executable[0..2].copy_from_slice(b"MZ");
+        executable[0x3c..0x40].copy_from_slice(&0x80_u32.to_le_bytes());
+        executable[0x80..0x84].copy_from_slice(&0x0000_4550_u32.to_le_bytes());
+        executable[0x84..0x86].copy_from_slice(&0x8664_u16.to_le_bytes());
+        executable[0x98..0x9a].copy_from_slice(&0x020b_u16.to_le_bytes());
+        assert!(validate_windows_amd64_pe(&executable).is_ok());
+
+        let mut wrong_architecture = executable.clone();
+        wrong_architecture[0x84..0x86].copy_from_slice(&0x014c_u16.to_le_bytes());
+        assert!(validate_windows_amd64_pe(&wrong_architecture).is_err());
+        assert!(validate_windows_amd64_pe(b"not an executable").is_err());
+        assert!(validate_windows_amd64_pe(&[0_u8; 0x100]).is_err());
+        let mut out_of_bounds_header = executable.clone();
+        out_of_bounds_header[0x3c..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(validate_windows_amd64_pe(&out_of_bounds_header).is_err());
+
+        let path = std::env::temp_dir().join(format!("lxcup-agent-{}.exe", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &executable).unwrap();
+        let expected_hash = format!("{:x}", sha2::Sha256::digest(&executable));
+        assert!(validate_file(&path, &expected_hash).is_ok());
+        assert!(validate_file(&path, &"0".repeat(64)).is_err());
+        assert!(validate_file(&path.with_extension("missing"), &expected_hash).is_err());
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            versioned_agent_path(std::path::Path::new("agents"), "0.6.0"),
+            std::path::Path::new("agents/lxcup-agent-0.6.0.exe")
+        );
+    }
+
+    #[tokio::test]
+    async fn updater_rejects_invalid_versions_before_starting_or_downloading() {
+        let error = update_agent_binary("not a URL", "token", "../0.6.0")
+            .await
+            .unwrap_err();
+        assert_eq!(error, "requested version is invalid");
+
+        let spawn_error = spawn_agent_update(uuid::Uuid::new_v4(), "../0.6.0").unwrap_err();
+        assert_eq!(spawn_error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!wait_for_agent_version(std::path::Path::new("agent.exe"), "token", 0).await);
+    }
+
+    #[tokio::test]
+    async fn updater_download_checks_manifest_digest_and_executable_format() {
+        let mut executable = vec![0_u8; 0x100];
+        executable[0..2].copy_from_slice(b"MZ");
+        executable[0x3c..0x40].copy_from_slice(&0x80_u32.to_le_bytes());
+        executable[0x80..0x84].copy_from_slice(&0x0000_4550_u32.to_le_bytes());
+        executable[0x84..0x86].copy_from_slice(&0x8664_u16.to_le_bytes());
+        executable[0x98..0x9a].copy_from_slice(&0x020b_u16.to_le_bytes());
+        let digest = format!("{:x}", sha2::Sha256::digest(&executable));
+        let manifest = serde_json::json!({
+            "version": "0.6.0",
+            "artifacts": [{
+                "platform": "windows-amd64",
+                "file": "windows-amd64.exe",
+                "sha256": digest
+            }]
+        });
+        let manifest_for_route = manifest.clone();
+        let bytes_for_route = executable.clone();
+        let app = Router::new()
+            .route(
+                "/agent/0.6.0/manifest.json",
+                get(move || async move { Json(manifest_for_route) }),
+            )
+            .route(
+                "/agent/0.6.0/windows-amd64.exe",
+                get(move || async move { bytes_for_route.clone() }),
+            )
+            .route(
+                "/agent/0.5.0/manifest.json",
+                get(move || async move { Json(manifest) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+
+        let (downloaded, downloaded_digest) =
+            download_verified_windows_artifact(&client, &format!("{base}/agent/0.6.0"), "0.6.0")
+                .await
+                .expect("valid amd64 artifact should pass manifest and binary verification");
+        assert_eq!(downloaded, executable);
+        assert_eq!(
+            downloaded_digest,
+            format!("{:x}", sha2::Sha256::digest(&downloaded))
+        );
+        assert!(
+            download_verified_windows_artifact(&client, &format!("{base}/agent/0.5.0"), "0.5.0",)
+                .await
+                .is_err()
+        );
+
+        server.abort();
     }
 }

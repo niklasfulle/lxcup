@@ -41,11 +41,11 @@ export function TerminalPanel({ targetId }: Readonly<{ targetId: string }>) {
     const resize = () => fitTerminal(fitAddon);
     const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(resize);
     resizeObserver?.observe(host);
-    window.addEventListener("resize", resize);
+    globalThis.addEventListener("resize", resize);
 
     return () => {
       resizeObserver?.disconnect();
-      window.removeEventListener("resize", resize);
+      globalThis.removeEventListener("resize", resize);
       inputSubscription.dispose();
       resizeSubscription.dispose();
       socketRef.current?.close(1000, "terminal panel closed");
@@ -60,8 +60,8 @@ export function TerminalPanel({ targetId }: Readonly<{ targetId: string }>) {
     if (socketRef.current && socketRef.current.readyState < WebSocket.CLOSING) return;
     setError(null);
     setState("connecting");
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${window.location.host}/api/v1/targets/${encodeURIComponent(targetId)}/terminal`);
+    const protocol = globalThis.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${protocol}//${globalThis.location.host}/api/v1/targets/${encodeURIComponent(targetId)}/terminal`);
     socket.binaryType = "arraybuffer";
     socketRef.current = socket;
     socket.addEventListener("message", (event: MessageEvent<string | ArrayBuffer>) => {

@@ -1052,7 +1052,7 @@ describe("onboarding and secret pages", () => {
       ssh_user: null,
       credential_secret_ref: null,
       ssh_known_hosts_secret_ref: null,
-      latest_agent_version: "0.5.0",
+      latest_agent_version: "0.6.0",
     }];
     renderPage(<TargetsPage area="windows_server" />);
 
@@ -1064,7 +1064,7 @@ describe("onboarding and secret pages", () => {
     const installCommand = screen.getByText(/Downloads\\windows-agent-setup\.ps1/, { selector: "code" });
     expect(installCommand).toBeInTheDocument();
     expect(installCommand).toHaveTextContent("https://lxcup.example.test");
-    expect(screen.getByText(/-TargetId "target-1".*-Version "0\.5\.0"/)).toBeInTheDocument();
+    expect(screen.getByText(/-TargetId "target-1".*-Version "0\.6\.0"/)).toBeInTheDocument();
     expect(installCommand).not.toHaveTextContent("-AgentToken");
 
     const controllerInput = screen.getByLabelText("Vom Windows-System erreichbare Controller-Adresse");
@@ -1075,6 +1075,28 @@ describe("onboarding and secret pages", () => {
     expect(screen.getByText(/-ControllerUrl 'https:\/\/lxcup\.example\.test\/o''hare'/)).toBeInTheDocument();
   });
 
+  it("normalizes trailing controller slashes before validating and copying the setup command", async () => {
+    mocks.targets.data = [{
+      ...target,
+      kind: "windows_server",
+      transport: "agent",
+      ssh_user: null,
+      credential_secret_ref: null,
+      ssh_known_hosts_secret_ref: null,
+      latest_agent_version: "0.6.0",
+    }];
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    renderPage(<TargetsPage area="windows_server" />);
+
+    await userEvent.type(screen.getByLabelText("Vom Windows-System erreichbare Controller-Adresse"), "https://lxcup.example.test///");
+    expect(screen.queryByText(/Verwende nur die Controller-Adresse/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Befehl kopieren" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("-ControllerUrl 'https://lxcup.example.test'")));
+    expect(writeText.mock.calls[0]?.[0]).not.toContain("///");
+  });
+
   it("keeps setup download separate from copying Windows agent commands", async () => {
     mocks.targets.data = [{
       ...target,
@@ -1083,7 +1105,7 @@ describe("onboarding and secret pages", () => {
       ssh_user: null,
       credential_secret_ref: null,
       ssh_known_hosts_secret_ref: null,
-      latest_agent_version: "0.5.0",
+      latest_agent_version: "0.6.0",
     }];
     const writeText = vi.fn(async (_text: string) => undefined);
     Object.assign(navigator, { clipboard: { writeText } });
@@ -1096,7 +1118,7 @@ describe("onboarding and secret pages", () => {
     expect(writeText).not.toHaveBeenCalled();
 
     await userEvent.click(screen.getByRole("button", { name: "Befehl kopieren" }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("-TargetId \"target-1\" -Version \"0.5.0\"")));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("-TargetId \"target-1\" -Version \"0.6.0\"")));
     expect(downloadClick).not.toHaveBeenCalled();
     downloadClick.mockRestore();
     expect(screen.getByText(/Startbefehl mit Controller, Ziel-ID und Version kopiert/)).toBeInTheDocument();
@@ -1108,7 +1130,7 @@ describe("onboarding and secret pages", () => {
     const copiedCommand = String(writeText.mock.calls[1]?.[0]);
     expect(copiedCommand).toContain("https://lxcup.example.test");
     expect(copiedCommand).toContain("$targetId = 'target-1'");
-    expect(copiedCommand).toContain("$version = '0.5.0'");
+    expect(copiedCommand).toContain("$version = '0.6.0'");
     expect(copiedCommand).toContain("-TargetId $targetId -Version $version");
     expect(copiedCommand).toContain("if ($agentService.Status -ne 'Stopped')");
     expect(copiedCommand).not.toContain("-AgentToken");
@@ -1160,7 +1182,7 @@ describe("onboarding and secret pages", () => {
   });
 
   it("shows an installed Windows agent as connected without an Ansible deployment job", () => {
-    mocks.targets.data = [{ ...target, kind: "windows_server", transport: "agent", agent_version: "0.5.0" }];
+    mocks.targets.data = [{ ...target, kind: "windows_server", transport: "agent", agent_version: "0.6.0" }];
     mocks.jobs.data = [
       { id: "windows-health", operation: "health_check", target: { target: target.id }, status: "succeeded", created_at: "2026-01-01T00:01:00Z" },
       { id: "windows-inventory", operation: "collect_package_inventory", target: { target: target.id }, status: "queued", created_at: "2026-01-01T00:02:00Z" },
@@ -1184,7 +1206,7 @@ describe("onboarding and secret pages", () => {
   });
 
   it("shows the three successful Windows onboarding stages without an extra completion badge", () => {
-    mocks.targets.data = [{ ...target, kind: "windows_server", transport: "agent", agent_version: "0.5.0" }];
+    mocks.targets.data = [{ ...target, kind: "windows_server", transport: "agent", agent_version: "0.6.0" }];
     mocks.jobs.data = [
       { id: "windows-health", operation: "health_check", target: { target: target.id }, status: "succeeded", created_at: "2026-10-06T21:40:00Z" },
       { id: "windows-inventory", operation: "collect_package_inventory", target: { target: target.id }, status: "succeeded", created_at: "2026-10-06T21:41:00Z" },

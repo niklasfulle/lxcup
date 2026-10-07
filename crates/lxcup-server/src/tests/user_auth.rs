@@ -116,8 +116,16 @@ async fn account_auth_enforces_first_login_admin_routes_logout_and_redacted_audi
         eprintln!("skipped: DATABASE_TEST_URL is not configured");
         return;
     };
+    let schema = format!("auth_account_{}", uuid::Uuid::new_v4().simple());
+    let admin_pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    let scoped_url = format!("{database_url}{separator}options=-c%20search_path%3D{schema}");
     let config = lxcup_persistence::DatabaseConfig::from_values(
-        database_url,
+        scoped_url,
         3,
         0,
         Duration::from_secs(10),
@@ -127,6 +135,13 @@ async fn account_auth_enforces_first_login_admin_routes_logout_and_redacted_audi
     .unwrap();
     let database = lxcup_persistence::Database::connect(&config).await.unwrap();
     database.migrate().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT current_schema()")
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        schema
+    );
     let repositories = lxcup_persistence::Repositories::new(&database);
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let admin_name = format!("api-admin-{suffix}");
@@ -474,6 +489,12 @@ async fn account_auth_enforces_first_login_admin_routes_logout_and_redacted_audi
         .execute(database.pool())
         .await
         .unwrap();
+    database.pool().close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    admin_pool.close().await;
 }
 
 async fn get_json(api: axum::Router, path: &str, token: &str) -> (StatusCode, serde_json::Value) {

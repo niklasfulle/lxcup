@@ -506,7 +506,7 @@ async fn postgres_windows_agent_claims_only_allowlisted_jobs_and_persists_apply_
         lifecycle: ResourceLifecycle::Managed,
         mode: ExecutionMode::Plan,
         parameters: AnsibleParameters::DeployAgent {
-            agent_version: "0.5.0".to_owned(),
+            agent_version: "0.6.0".to_owned(),
         },
         secret_refs: vec![unsupported_target.agent_secret_ref],
         idempotency_key: "windows-agent-deploy-unsupported".to_owned(),

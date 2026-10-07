@@ -1904,7 +1904,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "lxcup-agent"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "axum",
  "chrono",
@@ -1923,7 +1923,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-ansible"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "lxcup-core",
@@ -1936,7 +1936,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-ansible-worker"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "lxcup-ansible",
@@ -1957,7 +1957,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-apt"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "lxcup-core",
@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "lxcup-core",
@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1987,7 +1987,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-execution"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "lxcup-core",
@@ -2000,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-observability"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -2008,7 +2008,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-persistence"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "lxcup-agent",
@@ -2025,7 +2025,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-planner"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "lxcup-core",
  "thiserror 2.0.20",
@@ -2033,7 +2033,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-safety"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "reqwest",
@@ -2044,7 +2044,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-secrets"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chacha20poly1305",
  "chrono",
@@ -2057,7 +2057,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-server"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "age",
  "axum",
@@ -2095,7 +2095,7 @@ dependencies = [
 
 [[package]]
 name = "lxcup-test-support"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "lxcup-agent",

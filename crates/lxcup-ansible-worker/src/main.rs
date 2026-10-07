@@ -364,6 +364,35 @@ async fn prepare_invocation(
     target: &Target,
     dir: &Path,
 ) -> Result<InvocationContext, JobFailureCode> {
+    let (host, credential) = prepare_target_host(r, target, dir)?;
+    let group = if target.kind == TargetKind::WindowsServer {
+        "lxcup_windows_targets"
+    } else {
+        "lxcup_targets"
+    };
+    let inventory = dir.join("inventory.json");
+    private(
+        &inventory,
+        &serde_json::json!({group:{"hosts":{"target":host}}}).to_string(),
+    )
+    .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+
+    let (vars, agent_token) = prepare_workflow_vars(r, job, target, dir).await?;
+    let vars_file = dir.join("vars.json");
+    private(&vars_file, &vars.to_string()).map_err(|_| JobFailureCode::WorkerUnavailable)?;
+    Ok(InvocationContext {
+        inventory,
+        vars_file,
+        credential,
+        agent_token,
+    })
+}
+
+fn prepare_target_host(
+    r: &Runtime,
+    target: &Target,
+    dir: &Path,
+) -> Result<(serde_json::Value, SecretValue), JobFailureCode> {
     let credential_secret_ref = target
         .credential_secret_ref
         .ok_or(JobFailureCode::InvalidCredentials)?;
@@ -413,17 +442,15 @@ async fn prepare_invocation(
         host["ansible_ssh_common_args"] =
             serde_json::json!(format!("-o UserKnownHostsFile={}", path.display()));
     }
-    let group = if target.kind == TargetKind::WindowsServer {
-        "lxcup_windows_targets"
-    } else {
-        "lxcup_targets"
-    };
-    let inventory = dir.join("inventory.json");
-    private(
-        &inventory,
-        &serde_json::json!({group:{"hosts":{"target":host}}}).to_string(),
-    )
-    .map_err(|_| JobFailureCode::WorkerUnavailable)?;
+    Ok((host, credential))
+}
+
+async fn prepare_workflow_vars(
+    r: &Runtime,
+    job: &AnsibleJob,
+    target: &Target,
+    dir: &Path,
+) -> Result<(serde_json::Value, Option<SecretValue>), JobFailureCode> {
     let execution_mode = if job.mode == lxcup_ansible::ExecutionMode::Reconcile {
         "plan"
     } else {
@@ -479,14 +506,7 @@ async fn prepare_invocation(
                 "/tmp/lxcup-package-inventory.json"
             });
     }
-    let vars_file = dir.join("vars.json");
-    private(&vars_file, &vars.to_string()).map_err(|_| JobFailureCode::WorkerUnavailable)?;
-    Ok(InvocationContext {
-        inventory,
-        vars_file,
-        credential,
-        agent_token,
-    })
+    Ok((vars, agent_token))
 }
 
 fn prepare_known_hosts(

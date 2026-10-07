@@ -153,43 +153,16 @@ pub fn parse_windows_packages(
     let mut has_table_separator = false;
     for line in output.lines() {
         let trimmed = line.trim();
-        if trimmed.len() >= 3 && trimmed.bytes().all(|byte| byte == b'-') {
+        if is_winget_table_separator(trimmed) {
             has_table_separator = true;
             continue;
         }
-        let columns = split_winget_columns(line);
-        if !has_table_separator || columns.len() < 4 {
+        if !has_table_separator {
             continue;
         }
-        if !safe_winget_id(columns[1]) {
-            return Err(WindowsPackageParseError::InvalidOutput);
+        if let Some(package) = parse_winget_package(line)? {
+            packages.push(package);
         }
-        if columns[0].is_empty()
-            || columns[0].len() > 256
-            || columns[2].is_empty()
-            || columns[2].len() > 128
-        {
-            return Err(WindowsPackageParseError::InvalidOutput);
-        }
-        let candidate_version = (columns.len() >= 5)
-            .then(|| columns[3].trim())
-            .filter(|value| !value.is_empty() && !matches!(*value, "-" | "Unknown" | "N/A"))
-            .filter(|value| value.len() <= 128)
-            .map(str::to_owned);
-        let source = columns
-            .last()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty() && value.len() <= 128)
-            .map(str::to_owned);
-        packages.push(AgentInstalledPackage {
-            // The stable package identifier is the safe selector used by
-            // policy and exact winget upgrade operations.
-            name: columns[1].to_owned(),
-            installed_version: columns[2].to_owned(),
-            candidate_version,
-            architecture: None,
-            source,
-        });
         if packages.len() > 50_000 {
             return Err(WindowsPackageParseError::InvalidOutput);
         }
@@ -198,6 +171,46 @@ pub fn parse_windows_packages(
         return Err(WindowsPackageParseError::InvalidOutput);
     }
     Ok(packages)
+}
+
+fn is_winget_table_separator(line: &str) -> bool {
+    line.len() >= 3 && line.bytes().all(|byte| byte == b'-')
+}
+
+fn parse_winget_package(
+    line: &str,
+) -> Result<Option<AgentInstalledPackage>, WindowsPackageParseError> {
+    let columns = split_winget_columns(line);
+    if columns.len() < 4 {
+        return Ok(None);
+    }
+    if !safe_winget_id(columns[1])
+        || columns[0].is_empty()
+        || columns[0].len() > 256
+        || columns[2].is_empty()
+        || columns[2].len() > 128
+    {
+        return Err(WindowsPackageParseError::InvalidOutput);
+    }
+    let candidate_version = (columns.len() >= 5)
+        .then(|| columns[3].trim())
+        .filter(|value| !value.is_empty() && !matches!(*value, "-" | "Unknown" | "N/A"))
+        .filter(|value| value.len() <= 128)
+        .map(str::to_owned);
+    let source = columns
+        .last()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .map(str::to_owned);
+    Ok(Some(AgentInstalledPackage {
+        // The stable package identifier is the safe selector used by
+        // policy and exact winget upgrade operations.
+        name: columns[1].to_owned(),
+        installed_version: columns[2].to_owned(),
+        candidate_version,
+        architecture: None,
+        source,
+    }))
 }
 
 fn split_winget_columns(line: &str) -> Vec<&str> {
